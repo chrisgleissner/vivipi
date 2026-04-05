@@ -5,7 +5,7 @@
 [![Hardware](https://img.shields.io/badge/hardware-Raspberry%20Pi%20Pico-blue)](https://github.com/chrisgleissner/vivipi/releases)
 [![Runtime](https://img.shields.io/badge/runtime-MicroPython%20%7C%20Python-blue)](https://github.com/chrisgleissner/vivipi)
 
-ViviPi is a calm, glanceable monitoring system for a [Raspberry Pi Pico 2W](https://pip-assets.raspberrypi.com/categories/1088-raspberry-pi-pico-2-w/documents/RP-008304-DS-2-pico-2-w-datasheet.pdf?disposition=inline) paired with a [128x64 monochrome OLED](https://www.waveshare.com/wiki/Pico-OLED-1.3).
+ViviPi is a calm, glanceable monitoring system for a [Raspberry Pi Pico 2W](https://pip-assets.raspberrypi.com/categories/1088-raspberry-pi-pico-2-w/documents/RP-008304-DS-2-pico-2-w-datasheet.pdf?disposition=inline) paired with a [128x64 monochrome OLED](https://www.waveshare.com/wiki/Pico-OLED-1.3) with a SH1107 display driver.
 
 > [!WARNING]
 > ViviPi is under heavy development. Some of the features mentioned below are not yet implemented.
