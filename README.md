@@ -173,7 +173,7 @@ Notes:
 
 ### Checks
 
-`config/checks.yaml` defines build-time checks.
+[`config/checks.yaml`](./config/checks.yaml) defines build-time checks.
 
 Supports:
 
