@@ -11,7 +11,7 @@ RUNTIME_CONFIG_OUTPUT="$ROOT_DIR/artifacts/device/config.json"
 HOST="0.0.0.0"
 PORT="8080"
 DEVICE_PORT=""
-COMMAND="help"
+COMMAND=""
 VERBOSE=0
 USE_VENV=1
 WIFI_SSID="${VIVIPI_WIFI_SSID:-}"
@@ -20,35 +20,42 @@ SERVICE_BASE_URL="${VIVIPI_SERVICE_BASE_URL:-}"
 
 usage() {
     cat <<'EOF'
-Usage: ./build <command> [options]
+Usage: ./build [command] [options]
+
+Running ./build with no command is equivalent to: ./build ci
+
+Commands that render or package device config require:
+    VIVIPI_WIFI_SSID, VIVIPI_WIFI_PASSWORD, and VIVIPI_SERVICE_BASE_URL
+You can provide them as environment variables or with:
+    --wifi-ssid, --wifi-password, and --service-base-url
 
 Commands:
+  ci               Install dependencies, run Ruff, run pytest, and build firmware assets
   install          Create the local virtual environment and install dev dependencies
   lint             Run Ruff
   test             Run pytest
   coverage         Run pytest with branch coverage output
-  ci               Run lint, tests, and firmware bundle build
-    render-config    Render artifacts/device/config.json from the build config
-    build-firmware   Build the zipped firmware bundle into artifacts/release
+  render-config    Render artifacts/device/config.json from the build config
+  build-firmware   Build the zipped firmware bundle into artifacts/release
+  deploy           Build the firmware bundle and copy it to the Pico via mpremote
   release-assets   Build Python distributions and the firmware release bundle
-    deploy           Build the firmware bundle and copy it to the Pico via mpremote
   service          Run the default ADB-backed Vivi Service
-  all              Install dependencies, lint, test, and build firmware
+  all              Alias for ci
   help             Show this help text
 
 Options:
   -c, --config PATH          Build/deploy config path
   -o, --output-dir PATH      Release output directory
   --runtime-config PATH      Runtime config JSON output path
+  --device-port PATH         Serial or USB path for mpremote deploy
   --host HOST                Host for the Vivi Service
   --port PORT                Port for the Vivi Service
-    --device-port PATH         Serial or USB path for mpremote deploy
   --python PATH              Python executable to use when not in venv
   --venv PATH                Virtualenv directory
   --no-venv                  Use the current Python environment directly
   --wifi-ssid VALUE          Override VIVIPI_WIFI_SSID for this invocation
   --wifi-password VALUE      Override VIVIPI_WIFI_PASSWORD for this invocation
-    --service-base-url VALUE   Override VIVIPI_SERVICE_BASE_URL for this invocation
+  --service-base-url VALUE   Override VIVIPI_SERVICE_BASE_URL for this invocation
   -v, --verbose              Print commands before running them
   -h, --help                 Show this help text
 EOF
@@ -109,14 +116,49 @@ run_python_module() {
     run_cmd "$python_path" -m "$@"
 }
 
+require_runtime_env() {
+    local missing=()
+
+    if [[ -z "$WIFI_SSID" ]]; then
+        missing+=("VIVIPI_WIFI_SSID")
+    fi
+    if [[ -z "$WIFI_PASSWORD" ]]; then
+        missing+=("VIVIPI_WIFI_PASSWORD")
+    fi
+    if [[ -z "$SERVICE_BASE_URL" ]]; then
+        missing+=("VIVIPI_SERVICE_BASE_URL")
+    fi
+
+    if [[ ${#missing[@]} -eq 0 ]]; then
+        return
+    fi
+
+    log "Missing required runtime configuration: ${missing[*]}"
+    log "Set them in the environment or pass --wifi-ssid, --wifi-password, and --service-base-url."
+    log "Example:"
+    log "  VIVIPI_WIFI_SSID=wifi VIVIPI_WIFI_PASSWORD=secret VIVIPI_SERVICE_BASE_URL=http://192.168.1.10:8080/checks ./build $COMMAND"
+    exit 2
+}
+
+run_ci_workflow() {
+    ensure_dependencies
+    run_python_module ruff check .
+    run_python_module pytest
+    require_runtime_env
+    with_wifi_env
+    run_python_module vivipi.tooling.build_deploy build-firmware --config "$CONFIG_PATH" --output-dir "$OUTPUT_DIR"
+}
+
 build_firmware_bundle() {
     ensure_dependencies
+    require_runtime_env
     with_wifi_env
     run_python_module vivipi.tooling.build_deploy build-firmware --config "$CONFIG_PATH" --output-dir "$OUTPUT_DIR"
 }
 
 render_runtime_config() {
     ensure_dependencies
+    require_runtime_env
     with_wifi_env
     run_python_module vivipi.tooling.build_deploy render-config --config "$CONFIG_PATH" --output "$RUNTIME_CONFIG_OUTPUT"
 }
@@ -130,6 +172,7 @@ build_python_distributions() {
 
 deploy_bundle() {
     ensure_dependencies
+    require_runtime_env
     with_wifi_env
     local args=(vivipi.tooling.build_deploy deploy-firmware --config "$CONFIG_PATH" --output-dir "$OUTPUT_DIR")
     if [[ -n "$DEVICE_PORT" ]]; then
@@ -208,6 +251,10 @@ parse_args() {
                 ;;
         esac
     done
+
+    if [[ -z "$COMMAND" ]]; then
+        COMMAND="ci"
+    fi
 }
 
 main() {
@@ -231,11 +278,7 @@ main() {
             run_python_module pytest --cov=src/vivipi --cov-branch --cov-report=term-missing --cov-report=xml
             ;;
         ci)
-            ensure_dependencies
-            run_python_module ruff check .
-            run_python_module pytest
-            with_wifi_env
-            run_python_module vivipi.tooling.build_deploy build-firmware --config "$CONFIG_PATH" --output-dir "$OUTPUT_DIR"
+            run_ci_workflow
             ;;
         render-config)
             render_runtime_config
@@ -255,10 +298,7 @@ main() {
             run_python_module vivipi.services.adb_service --host "$HOST" --port "$PORT"
             ;;
         all)
-            ensure_dependencies
-            run_python_module ruff check .
-            run_python_module pytest
-            build_firmware_bundle
+            run_ci_workflow
             ;;
         help)
             usage

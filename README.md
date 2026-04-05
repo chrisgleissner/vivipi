@@ -5,30 +5,14 @@
 [![Hardware](https://img.shields.io/badge/hardware-Raspberry%20Pi%20Pico-blue)](https://github.com/chrisgleissner/vivipi/releases)
 [![Runtime](https://img.shields.io/badge/runtime-MicroPython%20%7C%20Python-blue)](https://github.com/chrisgleissner/vivipi)
 
-ViviPi is a glanceable monitoring system for a [Raspberry Pi Pico 2W](https://pip-assets.raspberrypi.com/categories/1088-raspberry-pi-pico-2-w/documents/RP-008304-DS-2-pico-2-w-datasheet.pdf?disposition=inline) paired with a [128x64 monochrome OLED](https://www.waveshare.com/wiki/Pico-OLED-1.3) driven by SH1107.
-
-> [!NOTE]
-> This project is under active development. Some documented features may not yet be fully functional.
-
-It implements the full product spec in `docs/spec.md`: a strict 16x8 character grid, deterministic rendering, identity-based selection, periodic `PING`/`REST`/`SERVICE` checks, compact diagnostics, and a thin MicroPython runtime path.
-
-The codebase is split into a pure core, a testable runtime layer, thin firmware adapters, host-side services, and build tooling:
-
-- `src/vivipi/core` contains rendering, state reduction, scheduling, diagnostics, and selection logic
-- `src/vivipi/runtime` contains the runtime controller and portable check runners
-- `firmware/` contains the Pico-specific display, button, and Wi-Fi adapters
-- `src/vivipi/services` contains the default ADB-backed Vivi Service
-- `src/vivipi/tooling` contains config rendering, packaging, and deploy logic
+ViviPi (pronounced “VEE-vee-pie”, from Latin *viv-* “to live”) is a minimal, glanceable monitoring system built on the Raspberry Pi Pico 2W, paired with a 128×64 monochrome OLED.
 
 ## What You Get
 
 - Strict 16x8 rendering for idle, overview, detail, and diagnostics views
-- Identity-based selection with pagination and detail navigation
 - Deterministic scheduling and execution for `PING`, `REST`, and `SERVICE`
 - Compact runtime diagnostics and burn-in shift control
-- YAML-defined checks plus build-time environment substitution
 - `./build` commands for install, lint, test, coverage, packaging, deploy, and service hosting
-- Release assets for the device filesystem bundle and the supported Pico 2W MicroPython download reference
 
 ## Hardware Target
 
@@ -61,6 +45,12 @@ Requirements:
 - `adb` if you want to use the default service against connected Android devices
 - `mpremote` if you want `./build deploy` to copy files onto a Pico 2W
 
+Commands that render or package device config need three values:
+
+- `VIVIPI_WIFI_SSID`
+- `VIVIPI_WIFI_PASSWORD`
+- `VIVIPI_SERVICE_BASE_URL`
+
 1. Set Wi-Fi credentials and a service URL that the Pico can reach over Wi-Fi.
 
 ```bash
@@ -74,6 +64,8 @@ export VIVIPI_SERVICE_BASE_URL="http://192.168.1.10:8080/checks"
 ```bash
 ./build ci
 ```
+
+`./build`, `./build ci`, `./build render-config`, `./build build-firmware`, and `./build deploy` all use those same values.
 
 1. Start the default Vivi Service if you want the sample `SERVICE` check to report connected ADB devices.
 
@@ -108,10 +100,12 @@ Use the pinned reference written to `artifacts/release/pico2w-micropython.txt`, 
 ## Build Tooling
 
 The `./build` script is the canonical entrypoint.
+Running `./build` with no command is equivalent to `./build ci`.
 
 ### Common commands
 
 ```bash
+./build
 ./build install
 ./build lint
 ./build test
@@ -124,6 +118,19 @@ The `./build` script is the canonical entrypoint.
 ./build service --host 0.0.0.0 --port 8080
 ```
 
+Typical examples:
+
+```bash
+VIVIPI_WIFI_SSID="your-wifi" \
+VIVIPI_WIFI_PASSWORD="your-password" \
+VIVIPI_SERVICE_BASE_URL="http://192.168.1.10:8080/checks" \
+./build build-firmware
+```
+
+```bash
+./build service --host 0.0.0.0 --port 8080
+```
+
 Generated artifacts are written under `artifacts/`.
 
 Key outputs:
@@ -131,7 +138,7 @@ Key outputs:
 - `./build render-config` writes `artifacts/device/config.json`
 - `./build build-firmware` writes `vivipi-firmware-bundle.zip`, `vivipi-device-filesystem.zip`, `pico2w-micropython.txt`, and the unpacked `vivipi-device-fs/` tree under `artifacts/release`
 - `./build deploy` copies the unpacked `vivipi-device-fs/` tree onto the Pico with `mpremote`
-- `./build ci` validates the core, runtime, tooling, and firmware adapters together on CPython
+- `./build` and `./build ci` validate the core, runtime, tooling, and firmware adapters together on CPython
 
 ## Running the Default Vivi Service
 
