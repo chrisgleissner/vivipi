@@ -7,12 +7,14 @@ import pytest
 from vivipi.core.models import CheckDefinition, CheckType
 from vivipi.tooling import build_deploy
 from vivipi.tooling.build_deploy import (
+    _is_loopback_host,
     _parse_brightness,
     _parse_column_separator,
     _parse_columns,
     _parse_display_mode,
     _parse_duration_s,
     _parse_font_size_px,
+    _resolve_checks_path,
     build_firmware_bundle,
     deploy_firmware,
     load_build_deploy_settings,
@@ -314,6 +316,19 @@ def test_build_deploy_helper_parsers_cover_string_float_and_error_paths():
         _parse_column_separator(1)
 
 
+def test_build_deploy_helper_parsers_cover_additional_numeric_paths():
+    assert _parse_font_size_px(10.0, "font", 8) == 10
+    assert _parse_brightness("255") == 255
+    assert _parse_brightness(32.0) == 32
+    assert _parse_columns(2.0) == 2
+
+    with pytest.raises(ValueError, match="integer number of seconds"):
+        _parse_duration_s(object(), "duration")
+
+    with pytest.raises(ValueError, match="0-255"):
+        _parse_brightness(1.5)
+
+
 def test_render_device_runtime_config_uses_empty_project_when_omitted():
     settings = {
         "device": {"board": "pico2w", "buttons": {"a": "GP14", "b": "GP15"}},
@@ -335,6 +350,37 @@ def test_render_device_runtime_config_uses_empty_project_when_omitted():
     assert rendered["checks"][0]["type"] == "PING"
 
 
+def test_render_device_runtime_config_serializes_optional_auth_fields():
+    settings = {
+        "device": {"board": "pico2w", "buttons": {"a": "GP14", "b": "GP15"}},
+        "wifi": {"ssid": "wifi", "password": "secret"},
+        "service": {},
+    }
+    checks = (
+        CheckDefinition(
+            identifier="nas-ftp",
+            name="NAS FTP",
+            check_type=CheckType.FTP,
+            target="ftp://nas.example.local",
+            username="admin",
+            password="secret",
+        ),
+        CheckDefinition(
+            identifier="switch-console",
+            name="Switch Console",
+            check_type=CheckType.TELNET,
+            target="telnet://switch.example.local",
+        ),
+    )
+
+    rendered = render_device_runtime_config(settings, checks)
+
+    assert rendered["checks"][0]["username"] == "admin"
+    assert rendered["checks"][0]["password"] == "secret"
+    assert rendered["checks"][1]["username"] is None
+    assert rendered["checks"][1]["password"] is None
+
+
 def test_load_runtime_checks_skips_unconfigured_service_checks(tmp_path: Path):
     checks_path = tmp_path / "checks.yaml"
     checks_path.write_text(
@@ -344,7 +390,7 @@ checks:
     type: ping
     target: 192.168.1.1
   - name: NAS API
-    type: rest
+    type: http
     target: https://nas.example.local/health
   - name: Android Devices
     type: service
@@ -363,6 +409,19 @@ checks:
     assert all(definition.check_type != CheckType.SERVICE for definition in definitions)
 
 
+def test_load_runtime_checks_rejects_non_list_roots_and_preserves_invalid_items_for_parser(tmp_path: Path):
+    checks_path = tmp_path / "checks.yaml"
+    checks_path.write_text("checks: {}\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="checks must be a list"):
+        load_runtime_checks(checks_path)
+
+    checks_path.write_text("checks:\n  - invalid\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="each check must be a mapping"):
+        load_runtime_checks(checks_path)
+
+
 def test_write_runtime_config_excludes_service_checks_without_service_url(tmp_path: Path):
     checks_path = tmp_path / "checks.yaml"
     checks_path.write_text(
@@ -372,7 +431,7 @@ checks:
     type: ping
     target: 192.168.1.1
   - name: NAS API
-    type: rest
+    type: http
     target: https://nas.example.local/health
   - name: Android Devices
     type: service
@@ -466,6 +525,26 @@ def test_validate_runtime_settings_rejects_service_check_targets_on_loopback():
         validate_runtime_settings(settings, checks)
 
 
+def test_validate_runtime_settings_rejects_non_http_urls_and_detects_loopback_hosts():
+    settings = {
+        "device": {"board": "pico2w"},
+        "wifi": {"ssid": "wifi", "password": "secret"},
+        "service": {"base_url": "ftp://192.0.2.10/checks"},
+    }
+
+    with pytest.raises(ValueError, match="absolute http or https URL"):
+        validate_runtime_settings(settings, ())
+
+    assert _is_loopback_host("127.0.0.1") is True
+    assert _is_loopback_host("localhost") is True
+    assert _is_loopback_host("example.invalid") is False
+
+
+def test_resolve_checks_path_requires_checks_config_setting(tmp_path: Path):
+    with pytest.raises(ValueError, match="checks_config"):
+        _resolve_checks_path(tmp_path / "build-deploy.yaml", {})
+
+
 def test_build_deploy_main_dispatches_render_config(monkeypatch, tmp_path: Path):
     output_path = tmp_path / "config.json"
     called = {}
@@ -498,6 +577,23 @@ def test_build_deploy_main_dispatches_build_firmware(monkeypatch, tmp_path: Path
     assert called == {"config": "config.yaml", "output_dir": "release-dir"}
 
 
+def test_build_deploy_main_dispatches_deploy_firmware(monkeypatch):
+    called = {}
+
+    def fake_deploy_firmware(config_path, output_dir, port=None):
+        called["config"] = config_path
+        called["output_dir"] = output_dir
+        called["port"] = port
+        return Path("bundle.zip")
+
+    monkeypatch.setattr(build_deploy, "deploy_firmware", fake_deploy_firmware)
+
+    exit_code = build_deploy.main(["deploy-firmware", "--config", "config.yaml", "--output-dir", "release-dir", "--port", "/dev/ttyACM0"])
+
+    assert exit_code == 0
+    assert called == {"config": "config.yaml", "output_dir": "release-dir", "port": "/dev/ttyACM0"}
+
+
 def test_write_install_manifest_records_supported_install_metadata(tmp_path: Path):
     output_path = tmp_path / "pico2w-micropython.txt"
 
@@ -519,6 +615,52 @@ def test_write_install_manifest_records_supported_install_metadata(tmp_path: Pat
 
     assert "micropython_version: 1.25.0" in content
     assert "download_page: https://micropython.org/download/RPI_PICO2_W/" in content
+
+
+def test_deploy_firmware_requires_port_and_reports_missing_mpremote(tmp_path: Path, monkeypatch):
+    config_path = write_fixture_files(tmp_path)
+
+    def fake_build_firmware_bundle_no_port(*args, **kwargs):
+        device_root = tmp_path / "release-no-port" / "vivipi-device-fs"
+        device_root.mkdir(parents=True, exist_ok=True)
+        return tmp_path / "release-no-port" / "bundle.zip"
+
+    monkeypatch.setattr(build_deploy, "build_firmware_bundle", fake_build_firmware_bundle_no_port)
+    monkeypatch.setattr(
+        build_deploy,
+        "load_build_deploy_settings",
+        lambda *args, **kwargs: {"device": {"board": "pico2w"}, "wifi": {"ssid": "wifi", "password": "secret"}, "service": {}},
+    )
+
+    with pytest.raises(ValueError, match="micropython_port"):
+        deploy_firmware(
+            config_path,
+            tmp_path / "release-no-port",
+            port="",
+            run_command=lambda *args, **kwargs: None,
+        )
+
+    def fake_load_build_deploy_settings(*args, **kwargs):
+        return {
+            "device": {"board": "pico2w", "micropython_port": "/dev/ttyACM0"},
+            "wifi": {"ssid": "wifi", "password": "secret"},
+            "service": {},
+        }
+
+    def fake_build_firmware_bundle(*args, **kwargs):
+        device_root = tmp_path / "release-missing" / "vivipi-device-fs"
+        device_root.mkdir(parents=True, exist_ok=True)
+        (device_root / "main.py").write_text("print('hi')\n", encoding="utf-8")
+        return tmp_path / "release-missing" / "bundle.zip"
+
+    monkeypatch.setattr(build_deploy, "load_build_deploy_settings", fake_load_build_deploy_settings)
+    monkeypatch.setattr(build_deploy, "build_firmware_bundle", fake_build_firmware_bundle)
+
+    def fake_run_command(command, check):
+        raise FileNotFoundError("mpremote")
+
+    with pytest.raises(RuntimeError, match="mpremote is required"):
+        deploy_firmware(config_path, tmp_path / "release-missing", run_command=fake_run_command)
 
 
 def test_deploy_firmware_copies_files_via_mpremote(tmp_path: Path):
@@ -549,21 +691,3 @@ def test_deploy_firmware_reports_missing_mpremote(tmp_path: Path):
             port="/dev/ttyUSB0",
             run_command=lambda command, check: (_ for _ in ()).throw(FileNotFoundError("mpremote")),
         )
-
-
-def test_build_deploy_main_dispatches_deploy_firmware(monkeypatch):
-    called = {}
-
-    def fake_deploy_firmware(config_path, output_dir, port=None):
-        called["config"] = config_path
-        called["output_dir"] = output_dir
-        called["port"] = port
-
-    monkeypatch.setattr(build_deploy, "deploy_firmware", fake_deploy_firmware)
-
-    exit_code = build_deploy.main(
-        ["deploy-firmware", "--config", "config.yaml", "--output-dir", "release-dir", "--port", "/dev/ttyUSB0"]
-    )
-
-    assert exit_code == 0
-    assert called == {"config": "config.yaml", "output_dir": "release-dir", "port": "/dev/ttyUSB0"}

@@ -11,7 +11,7 @@ ViviPi (pronounced “VEE-vee-pie”, from the Latin *viv-* in *vivere*, “to l
 ## What You Get
 
 - Strict 16x8 character rendering for idle, overview, detail, and diagnostics view
-- Deterministic scheduling and execution for `PING`, `REST`, and `SERVICE`
+- Deterministic scheduling and execution for `PING`, `HTTP`, `FTP`, `TELNET`, and `SERVICE`
 - Compact runtime diagnostics and burn-in shift control
 - `./build` commands for install, lint, test, coverage, packaging, deploy, and service hosting
 
@@ -60,7 +60,7 @@ Step 2: Run the default local workflow.
 ./build
 ```
 
-Without `VIVIPI_SERVICE_BASE_URL`, ViviPi builds only the `PING` and `REST` checks from `config/checks.yaml`.
+Without `VIVIPI_SERVICE_BASE_URL`, ViviPi builds only the direct `PING`, `HTTP`, `FTP`, and `TELNET` checks from `config/checks.yaml`.
 
 Step 3: Start the default Vivi Service only if you want the sample `SERVICE` check.
 
@@ -162,7 +162,7 @@ Notes:
 
 - `VIVIPI_WIFI_SSID` and `VIVIPI_WIFI_PASSWORD` are required for device config
 - `service.base_url` is resolved from `VIVIPI_SERVICE_BASE_URL` when you want `SERVICE` checks
-- If `VIVIPI_SERVICE_BASE_URL` is omitted, build-time config keeps only the configured `PING` and `REST` checks
+- If `VIVIPI_SERVICE_BASE_URL` is omitted, build-time config keeps only the configured `PING` and `HTTP` checks
 - When used, the value points to a host address reachable from the Pico over Wi-Fi, such as `http://192.168.1.10:8080/checks`
 - `device.display.mode` accepts `standard` or `compact`
 - `device.display.columns` accepts integer values from `1` to `4`
@@ -178,7 +178,7 @@ Notes:
 Supports:
 
 - PING
-- REST
+- HTTP
 - SERVICE endpoints
 
 ## Testing and Quality Gates

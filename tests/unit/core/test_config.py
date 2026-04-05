@@ -133,7 +133,7 @@ def test_load_checks_config_uses_defaults_and_normalizes_blank_prefixes(tmp_path
         """
 checks:
   - name: Status API
-    type: rest
+    type: http
     target: https://example.invalid/health
     method: post
     prefix: "   "
@@ -147,6 +147,52 @@ checks:
     assert definitions[0].timeout_s == 10
     assert definitions[0].method == "POST"
     assert definitions[0].service_prefix is None
+
+
+def test_load_checks_config_accepts_legacy_rest_alias_and_normalizes_to_http(tmp_path: Path):
+    config_path = tmp_path / "checks.yaml"
+    config_path.write_text(
+        """
+checks:
+  - name: Legacy API
+    type: rest
+    target: https://example.invalid/health
+""".strip(),
+        encoding="utf-8",
+    )
+
+    definitions = load_checks_config(config_path)
+
+    assert definitions[0].check_type == CheckType.HTTP
+
+
+def test_load_checks_config_supports_ftp_and_telnet_credentials(tmp_path: Path):
+    config_path = tmp_path / "checks.yaml"
+    config_path.write_text(
+        """
+checks:
+  - name: NAS FTP
+    type: ftp
+    target: ftp://nas.example.local
+    username: admin
+    password: secret
+  - name: Switch Console
+    type: telnet
+    target: telnet://switch.example.local:2323
+    username: ops
+    password: "   "
+""".strip(),
+        encoding="utf-8",
+    )
+
+    definitions = load_checks_config(config_path)
+
+    assert definitions[0].check_type == CheckType.FTP
+    assert definitions[0].username == "admin"
+    assert definitions[0].password == "secret"
+    assert definitions[1].check_type == CheckType.TELNET
+    assert definitions[1].username == "ops"
+    assert definitions[1].password is None
 
 
 def test_load_checks_config_substitutes_environment_placeholders(tmp_path: Path):
@@ -173,3 +219,69 @@ checks:
 def test_parse_checks_config_rejects_non_mapping_root():
     with pytest.raises(ValueError, match="mapping"):
         parse_checks_config([])
+
+
+def test_parse_checks_config_rejects_non_string_auth_fields():
+    with pytest.raises(ValueError, match="username must be a string"):
+        parse_checks_config(
+            {
+                "checks": [
+                    {
+                        "name": "NAS FTP",
+                        "type": "ftp",
+                        "target": "ftp://nas.example.local",
+                        "username": 123,
+                    }
+                ]
+            }
+        )
+
+    with pytest.raises(ValueError, match="password must be a string"):
+        parse_checks_config(
+            {
+                "checks": [
+                    {
+                        "name": "Switch Console",
+                        "type": "telnet",
+                        "target": "telnet://switch.example.local",
+                        "password": False,
+                    }
+                ]
+            }
+        )
+
+
+def test_load_checks_config_requires_present_placeholders_and_positive_timings(tmp_path: Path):
+    config_path = tmp_path / "checks.yaml"
+    config_path.write_text(
+        """
+checks:
+  - name: NAS API
+    type: http
+    target: ${VIVIPI_SERVICE_BASE_URL}
+    interval_s: 0
+    timeout_s: 0
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(KeyError, match="VIVIPI_SERVICE_BASE_URL"):
+        load_checks_config(config_path, env={"OTHER": "value"})
+
+    with pytest.raises(ValueError, match="interval_s must be positive"):
+        load_checks_config(config_path, env={"VIVIPI_SERVICE_BASE_URL": "https://example.invalid/health"})
+
+    config_path.write_text(
+        """
+checks:
+  - name: NAS API
+    type: http
+    target: https://example.invalid/health
+    interval_s: 15
+    timeout_s: 0
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="timeout_s must be positive"):
+        load_checks_config(config_path, env={"OTHER": "value"})

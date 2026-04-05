@@ -6,7 +6,9 @@ from enum import Enum
 
 class CheckType(str, Enum):
     PING = "PING"
-    REST = "REST"
+    HTTP = "HTTP"
+    FTP = "FTP"
+    TELNET = "TELNET"
     SERVICE = "SERVICE"
 
 
@@ -52,6 +54,8 @@ class CheckDefinition:
     interval_s: int = 15
     timeout_s: int = 10
     method: str = "GET"
+    username: str | None = None
+    password: str | None = None
     service_prefix: str | None = None
 
 

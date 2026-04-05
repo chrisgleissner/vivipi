@@ -12,4 +12,12 @@
 - 2026-04-05T21:08:29+01:00 Captured deterministic renderer snapshots for `standard` and `compact` modes across `1` to `4` columns in `artifacts/release/display-validation-snapshots.txt` as non-hardware evidence for layout, truncation, and failed-only inversion spans.
 - 2026-04-05T21:25:23+01:00 Reproduced the failing GitHub Actions `./build ci` workflow locally. Root cause was an invalid checked-in sample config value: `device.display.brightness: compact` in `config/build-deploy.yaml`.
 - 2026-04-05T21:25:23+01:00 Restored `device.display.brightness` to `medium` and reran `./build ci` with CI-like environment variables. The full local CI entrypoint now passes with `142` tests green and `93.38%` branch coverage.
+- 2026-04-05T21:25:23+01:00 Renamed the `REST` check type to `HTTP` across the enum, execution diagnostics, checked-in configs, tests, and docs. Parser compatibility for legacy `rest` / `REST` inputs is preserved at the config and runtime-config loaders.
+- 2026-04-05T21:40:16+01:00 Validated the `REST` to `HTTP` rename with targeted suites and the full `./build ci` path. Final validation result: `144` tests green and `93.44%` branch coverage.
+- 2026-04-05T21:44:11+01:00 Extended the plan for new `FTP` and `TELNET` check types with optional credentials and for a stricter branch-coverage gate above `95%`.
+- 2026-04-05T21:44:11+01:00 Next step is updating the shared check model and config/runtime serialization path before implementing the new protocol runners.
 - 2026-04-05T21:01:38+01:00 Replaced the SH1107 text draw path with a pure framebuffer renderer and added unit coverage for layout math, filtering, runtime wiring, and byte-level inversion.
+- 2026-04-05T22:28:00+01:00 Added `FTP` and `TELNET` check support end-to-end across the shared model, YAML parsing, runtime config serialization, core execution dispatch, and socket-based runtime runners with optional username/password handling.
+- 2026-04-05T22:28:00+01:00 Added coverage-heavy protocol and validation tests across runtime checks, build/deploy tooling, config parsing, runtime app behavior, state/model validation, and the ADB service handler to lift the repository-wide gate safely.
+- 2026-04-05T22:28:00+01:00 Updated `README.md`, `docs/spec.md`, `docs/spec-traceability.md`, `AGENTS.md`, `pyproject.toml`, and the traceability gate test to document FTP/Telnet support and enforce `96%` minimum coverage in CI.
+- 2026-04-05T22:28:00+01:00 Full validation now passes via `./build ci` with explicit test env vars: `178` tests green and `96.97%` total coverage.

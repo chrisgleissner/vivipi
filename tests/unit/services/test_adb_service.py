@@ -1,3 +1,5 @@
+import io
+
 from vivipi.services import adb_service
 
 
@@ -26,7 +28,26 @@ def test_build_handler_overrides_logging():
 
 def test_route_request_handles_health_checks_and_missing_routes():
     assert adb_service.route_request("/health") == (200, {"status": "OK"})
+    assert adb_service.route_request("/checks", payload_factory=lambda: {"checks": []}) == (200, {"checks": []})
     assert adb_service.route_request("/missing") == (404, {"error": "not_found"})
+
+
+def test_build_handler_writes_json_response_body():
+    handler_type = adb_service.build_handler(payload_factory=lambda: {"checks": []})
+    handler = object.__new__(handler_type)
+    handler.path = "/checks"
+    handler.wfile = io.BytesIO()
+    calls = {"headers": []}
+    handler.send_response = lambda status_code: calls.__setitem__("status", status_code)
+    handler.send_header = lambda key, value: calls["headers"].append((key, value))
+    handler.end_headers = lambda: calls.__setitem__("ended", True)
+
+    handler.do_GET()
+
+    assert calls["status"] == 200
+    assert ("Content-Type", "application/json") in calls["headers"]
+    assert calls["ended"] is True
+    assert handler.wfile.getvalue() == b'{"checks": []}'
 
 
 def test_serve_closes_the_server(monkeypatch):

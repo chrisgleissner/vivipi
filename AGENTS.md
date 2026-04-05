@@ -39,5 +39,5 @@
 ## Testing expectations
 
 - Every requirement ID from `docs/spec.md` must remain mapped in `docs/spec-traceability.md`.
-- Branch coverage must stay at or above `91%`.
+- Branch coverage must stay at or above `96%`.
 - Prefer pure-function tests before hardware integration tests.

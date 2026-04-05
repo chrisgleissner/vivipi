@@ -1,3 +1,5 @@
+import pytest
+
 from vivipi.core.execution import CheckExecutionResult
 from vivipi.core.input import Button
 from vivipi.core.models import CheckDefinition, CheckObservation, CheckType, DiagnosticEvent, DisplayMode, Status
@@ -179,3 +181,32 @@ def test_runtime_app_applies_button_events_and_activates_diagnostics():
 
     assert next_reason == "state"
     assert app.state.mode.value == "overview"
+
+
+def test_runtime_app_validates_page_interval_and_uses_button_reader_when_present():
+    with pytest.raises(ValueError, match="must not be negative"):
+        RuntimeApp(definitions=(), executor=lambda definition, now_s: None, display=FakeDisplay(), page_interval_s=-1)
+
+    class FakeButtonReader:
+        def poll(self):
+            return (ButtonEvent(button=Button.B, held_ms=30),)
+
+    display = FakeDisplay()
+    app = RuntimeApp(definitions=(), executor=lambda definition, now_s: None, display=display, button_reader=FakeButtonReader())
+
+    reason = app.tick(0.0)
+
+    assert reason == "bootstrap"
+    assert app.state.mode.value == "detail"
+
+
+def test_runtime_app_injects_diagnostics_without_forcing_mode_and_skips_rotation_when_disabled():
+    display = FakeDisplay()
+    app = RuntimeApp(definitions=(), executor=lambda definition, now_s: None, display=display, page_interval_s=0)
+
+    app.inject_diagnostics((DiagnosticEvent(code="wifi", message="down"),), activate=False)
+    reason = app.tick(0.0)
+
+    assert app.state.mode.value == "overview"
+    assert app.state.diagnostics == ("WIFI down",)
+    assert reason == "bootstrap"

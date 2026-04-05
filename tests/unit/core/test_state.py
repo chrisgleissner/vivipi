@@ -162,6 +162,14 @@ def test_move_selection_on_empty_state_keeps_no_selection():
     assert moved.selected_id is None
 
 
+def test_move_selection_recovers_from_missing_selected_identifier():
+    state = AppState(checks=(make_check("Alpha"), make_check("Bravo")), selected_id="missing")
+
+    moved = move_selection(state, 1)
+
+    assert moved.selected_id == "bravo"
+
+
 def test_selected_check_and_diagnostics_helpers_preserve_state_shape():
     state = AppState(checks=(make_check("Router"),), selected_id="router")
     diagnostics = with_diagnostics(state, ("wifi disconnected",))
@@ -169,6 +177,22 @@ def test_selected_check_and_diagnostics_helpers_preserve_state_shape():
     assert selected_check(state) is not None
     assert diagnostics.mode.value == "diagnostics"
     assert diagnostics.diagnostics == ("wifi disconnected",)
+
+
+def test_selected_check_returns_none_when_no_checks_exist():
+    state = AppState(selected_id="missing")
+
+    assert selected_check(state) is None
+
+
+def test_set_page_index_can_leave_visible_selection_unchanged():
+    checks = tuple(make_check(name) for name in ["Alpha", "Bravo", "Charlie", "Delta"])
+    state = AppState(checks=checks, selected_id="alpha", page_size=2)
+
+    updated = set_page_index(state, 0, select_visible=True)
+
+    assert updated.page_index == 0
+    assert updated.selected_id == "alpha"
 
 
 def test_integrate_observations_replaces_previous_service_children_by_source_identifier():

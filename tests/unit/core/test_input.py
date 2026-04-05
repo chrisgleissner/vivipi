@@ -61,3 +61,12 @@ def test_input_controller_validates_repeat_interval_and_exits_diagnostics():
     updated = controller.apply(diagnostics, Button.B, held_ms=30)
 
     assert updated.mode == AppMode.OVERVIEW
+
+
+def test_unknown_button_input_leaves_state_unchanged():
+    controller = InputController()
+    state = make_state()
+
+    updated = controller.apply(state, "UNKNOWN", held_ms=30)
+
+    assert updated == state

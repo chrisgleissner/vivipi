@@ -30,4 +30,4 @@ def test_pytest_config_enforces_the_coverage_gate():
     addopts = pyproject["tool"]["pytest"]["ini_options"]["addopts"]
 
     assert "--cov-branch" in addopts
-    assert "--cov-fail-under=91" in addopts
+    assert "--cov-fail-under=96" in addopts

@@ -37,8 +37,8 @@ def test_execute_check_maps_ping_success_and_failure_without_diagnostics():
     assert failed.observations[0].details == "timeout"
 
 
-def test_execute_check_maps_rest_status_codes_to_observations():
-    definition = make_definition("nas-api", CheckType.REST)
+def test_execute_check_maps_http_status_codes_to_observations():
+    definition = make_definition("nas-api", CheckType.HTTP)
 
     result = execute_check(
         definition,
@@ -102,9 +102,9 @@ def test_execute_check_reports_service_schema_errors_via_diagnostics():
     assert result.diagnostics[0].code == "SERV"
 
 
-def test_execute_check_reports_ping_and_rest_executor_failures_via_diagnostics():
+def test_execute_check_reports_ping_and_http_executor_failures_via_diagnostics():
     ping_definition = make_definition("router", CheckType.PING)
-    rest_definition = make_definition("nas-api", CheckType.REST)
+    http_definition = make_definition("nas-api", CheckType.HTTP)
 
     ping_result = execute_check(
         ping_definition,
@@ -112,8 +112,8 @@ def test_execute_check_reports_ping_and_rest_executor_failures_via_diagnostics()
         ping_runner=lambda target, timeout_s: (_ for _ in ()).throw(RuntimeError("boom")),
         http_runner=None,
     )
-    rest_result = execute_check(
-        rest_definition,
+    http_result = execute_check(
+        http_definition,
         observed_at_s=10.0,
         ping_runner=None,
         http_runner=lambda method, target, timeout_s: (_ for _ in ()).throw(RuntimeError("boom")),
@@ -121,7 +121,99 @@ def test_execute_check_reports_ping_and_rest_executor_failures_via_diagnostics()
 
     assert ping_result.diagnostics[0].code == "PING"
     assert ping_result.observations[0].details == "executor error"
-    assert rest_result.diagnostics[0].code == "REST"
+    assert http_result.diagnostics[0].code == "HTTP"
+
+
+def test_execute_check_maps_ftp_and_telnet_probe_results():
+    ftp_definition = CheckDefinition(
+        identifier="nas-ftp",
+        name="NAS FTP",
+        check_type=CheckType.FTP,
+        target="ftp://nas.example.local",
+        interval_s=15,
+        timeout_s=10,
+        username="admin",
+        password="secret",
+    )
+    telnet_definition = CheckDefinition(
+        identifier="switch-console",
+        name="Switch Console",
+        check_type=CheckType.TELNET,
+        target="telnet://switch.example.local",
+        interval_s=15,
+        timeout_s=10,
+        username="ops",
+        password="pw",
+    )
+    ftp_calls = []
+    telnet_calls = []
+
+    ftp_result = execute_check(
+        ftp_definition,
+        observed_at_s=10.0,
+        ping_runner=None,
+        http_runner=None,
+        ftp_runner=lambda target, timeout_s, username, password: (
+            ftp_calls.append((target, timeout_s, username, password))
+            or PingProbeResult(ok=True, latency_ms=21.0, details="listed 3 entries")
+        ),
+        telnet_runner=None,
+    )
+    telnet_result = execute_check(
+        telnet_definition,
+        observed_at_s=11.0,
+        ping_runner=None,
+        http_runner=None,
+        ftp_runner=None,
+        telnet_runner=lambda target, timeout_s, username, password: (
+            telnet_calls.append((target, timeout_s, username, password))
+            or PingProbeResult(ok=False, latency_ms=8.0, details="login failed")
+        ),
+    )
+
+    assert ftp_calls == [("ftp://nas.example.local", 10, "admin", "secret")]
+    assert ftp_result.observations[0].status == Status.OK
+    assert ftp_result.observations[0].details == "listed 3 entries"
+    assert telnet_calls == [("telnet://switch.example.local", 10, "ops", "pw")]
+    assert telnet_result.observations[0].status == Status.FAIL
+    assert telnet_result.observations[0].details == "login failed"
+
+
+def test_execute_check_reports_ftp_and_telnet_executor_failures_via_diagnostics():
+    ftp_definition = CheckDefinition(
+        identifier="nas-ftp",
+        name="NAS FTP",
+        check_type=CheckType.FTP,
+        target="ftp://nas.example.local",
+    )
+    telnet_definition = CheckDefinition(
+        identifier="switch-console",
+        name="Switch Console",
+        check_type=CheckType.TELNET,
+        target="telnet://switch.example.local",
+    )
+
+    ftp_result = execute_check(
+        ftp_definition,
+        observed_at_s=10.0,
+        ping_runner=None,
+        http_runner=None,
+        ftp_runner=lambda target, timeout_s, username, password: (_ for _ in ()).throw(RuntimeError("boom")),
+        telnet_runner=None,
+    )
+    telnet_result = execute_check(
+        telnet_definition,
+        observed_at_s=10.0,
+        ping_runner=None,
+        http_runner=None,
+        ftp_runner=None,
+        telnet_runner=lambda target, timeout_s, username, password: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    assert ftp_result.diagnostics[0].code == "FTP"
+    assert ftp_result.observations[0].details == "executor error"
+    assert telnet_result.diagnostics[0].code == "TELN"
+    assert telnet_result.observations[0].details == "executor error"
 
 
 def test_execute_check_handles_service_request_failures_and_non_2xx_responses():

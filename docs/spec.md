@@ -161,12 +161,28 @@ Checks are evaluated periodically.
 - Latency measured locally
 - Failure = no response or timeout
 
-### REST
+### HTTP
 
 - HTTP request
 - Status OK if response is 2xx or 3xx
 - Latency measured locally
 - Failure = non-2xx/3xx or timeout
+
+### FTP
+
+- FTP control session
+- Optional username and password
+- Must log in successfully
+- Must list the top-level directory via passive mode
+- Failure = login failure, invalid listing, or timeout
+
+### TELNET
+
+- Telnet session
+- Optional username and password
+- Must log in successfully when prompted
+- Must observe valid prompt or session output
+- Failure = login failure, invalid output, or timeout
 
 ### SERVICE
 
@@ -456,7 +472,7 @@ System MUST include:
 # 18. Testing
 
 - All requirements must be covered by tests
-- ≥ 91% branch coverage
+- ≥ 96% branch coverage
 - Each spec section must map to tests
 
 [VIVIPI-TEST-001]

@@ -79,38 +79,102 @@ def _status_for_http(status_code: int | None) -> Status:
     return Status.FAIL
 
 
+def _probe_execution_result(
+    definition: CheckDefinition,
+    observed_at_s: float,
+    result,
+    ok_detail: str,
+    failure_detail: str,
+) -> CheckExecutionResult:
+    status = Status.OK if result.ok else Status.FAIL
+    details = result.details.strip() or (ok_detail if status == Status.OK else failure_detail)
+    return CheckExecutionResult(
+        source_identifier=definition.identifier,
+        observations=(
+            _direct_observation(
+                definition,
+                status=status,
+                observed_at_s=observed_at_s,
+                details=details,
+                latency_ms=result.latency_ms,
+            ),
+        ),
+    )
+
+
+def _execute_probe_check(
+    definition: CheckDefinition,
+    observed_at_s: float,
+    runner,
+    code: str,
+    error_detail: str,
+    ok_detail: str,
+    failure_detail: str,
+) -> CheckExecutionResult:
+    try:
+        result = runner()
+    except Exception:
+        return _execution_error(definition, observed_at_s, code, error_detail)
+
+    return _probe_execution_result(definition, observed_at_s, result, ok_detail, failure_detail)
+
+
 def execute_check(
     definition: CheckDefinition,
     observed_at_s: float,
     ping_runner,
     http_runner,
+    ftp_runner=None,
+    telnet_runner=None,
 ) -> CheckExecutionResult:
     if definition.check_type == CheckType.PING:
-        try:
-            result = ping_runner(definition.target, definition.timeout_s)
-        except Exception:
-            return _execution_error(definition, observed_at_s, "PING", "probe failed")
-
-        status = Status.OK if result.ok else Status.FAIL
-        details = result.details.strip() or ("reachable" if status == Status.OK else "timeout")
-        return CheckExecutionResult(
-            source_identifier=definition.identifier,
-            observations=(
-                _direct_observation(
-                    definition,
-                    status=status,
-                    observed_at_s=observed_at_s,
-                    details=details,
-                    latency_ms=result.latency_ms,
-                ),
-            ),
+        return _execute_probe_check(
+            definition,
+            observed_at_s,
+            runner=lambda: ping_runner(definition.target, definition.timeout_s),
+            code="PING",
+            error_detail="probe failed",
+            ok_detail="reachable",
+            failure_detail="timeout",
         )
 
-    if definition.check_type == CheckType.REST:
+    if definition.check_type == CheckType.FTP:
+        return _execute_probe_check(
+            definition,
+            observed_at_s,
+            runner=lambda: ftp_runner(
+                definition.target,
+                definition.timeout_s,
+                username=definition.username,
+                password=definition.password,
+            ),
+            code="FTP",
+            error_detail="session failed",
+            ok_detail="directory listed",
+            failure_detail="ftp failed",
+        )
+
+    if definition.check_type == CheckType.TELNET:
+        return _execute_probe_check(
+            definition,
+            observed_at_s,
+            runner=lambda: telnet_runner(
+                definition.target,
+                definition.timeout_s,
+                username=definition.username,
+                password=definition.password,
+            ),
+            code="TELN",
+            error_detail="session failed",
+            ok_detail="session ready",
+            failure_detail="telnet failed",
+        )
+
+    if definition.check_type == CheckType.HTTP:
         try:
             result = http_runner(definition.method, definition.target, definition.timeout_s)
         except Exception:
-            return _execution_error(definition, observed_at_s, "REST", "request failed")
+            return _execution_error(definition, observed_at_s, "HTTP", "request failed")
 
         status = _status_for_http(result.status_code)
         details = result.details.strip() or (

@@ -61,6 +61,23 @@ def _validate_timing(interval_s: int, timeout_s: int):
         raise ValueError("timeout_s must be at least 20% smaller than interval_s")
 
 
+def _parse_check_type(value: str) -> CheckType:
+    normalized = value.strip().upper()
+    if normalized == "REST":
+        normalized = "HTTP"
+    return CheckType(normalized)
+
+
+def _optional_auth_value(item: dict[str, object], key: str) -> str | None:
+    value = item.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{key} must be a string when provided")
+    normalized = value.strip()
+    return normalized or None
+
+
 def parse_checks_config(raw: object) -> tuple[CheckDefinition, ...]:
     if not isinstance(raw, dict):
         raise ValueError("checks config must be a mapping")
@@ -78,11 +95,13 @@ def parse_checks_config(raw: object) -> tuple[CheckDefinition, ...]:
 
         name = _require_str(item, "name")
         target = _require_str(item, "target")
-        check_type = CheckType(_require_str(item, "type").upper())
+        check_type = _parse_check_type(_require_str(item, "type"))
         interval_s = int(item.get("interval_s", 15))
         timeout_s = int(item.get("timeout_s", 10))
         method = str(item.get("method", "GET")).upper()
         prefix = item.get("prefix")
+        username = _optional_auth_value(item, "username")
+        password = _optional_auth_value(item, "password")
         service_prefix = str(prefix).strip() if isinstance(prefix, str) and prefix.strip() else None
 
         _validate_timing(interval_s, timeout_s)
@@ -101,6 +120,8 @@ def parse_checks_config(raw: object) -> tuple[CheckDefinition, ...]:
                 interval_s=interval_s,
                 timeout_s=timeout_s,
                 method=method,
+                username=username,
+                password=password,
                 service_prefix=service_prefix,
             )
         )

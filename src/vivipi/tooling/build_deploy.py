@@ -211,6 +211,8 @@ def _check_to_dict(check: CheckDefinition) -> dict[str, object]:
         "interval_s": check.interval_s,
         "timeout_s": check.timeout_s,
         "method": check.method,
+        "username": check.username,
+        "password": check.password,
         "service_prefix": check.service_prefix,
     }
 

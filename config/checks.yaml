@@ -6,7 +6,7 @@ checks:
     timeout_s: 10
 
   - name: NAS API
-    type: rest
+    type: http
     target: https://nas.example.local/health
     method: GET
     interval_s: 15

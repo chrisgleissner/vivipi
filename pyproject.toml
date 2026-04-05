@@ -49,7 +49,7 @@ include = [
 packages = ["src/vivipi"]
 
 [tool.pytest.ini_options]
-addopts = "--cov=src/vivipi --cov-branch --cov-report=term-missing --cov-report=xml --cov-fail-under=91"
+addopts = "--cov=src/vivipi --cov-branch --cov-report=term-missing --cov-report=xml --cov-fail-under=96"
 testpaths = ["tests"]
 
 [tool.coverage.report]
