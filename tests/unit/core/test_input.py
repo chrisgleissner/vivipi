@@ -70,3 +70,53 @@ def test_unknown_button_input_leaves_state_unchanged():
     updated = controller.apply(state, "UNKNOWN", held_ms=30)
 
     assert updated == state
+
+
+def test_button_a_in_detail_transitions_to_about_at_last_check():
+    controller = InputController()
+    state = AppState(
+        checks=tuple(CheckRuntime(identifier=n, name=n.title()) for n in ("alpha", "bravo")),
+        selected_id="bravo",
+        mode=AppMode.DETAIL,
+    )
+
+    updated = controller.apply(state, Button.A, held_ms=30)
+
+    assert updated.mode == AppMode.ABOUT
+
+
+def test_button_a_from_about_enters_detail_of_first_check():
+    controller = InputController()
+    state = AppState(
+        checks=tuple(CheckRuntime(identifier=n, name=n.title()) for n in ("alpha", "bravo")),
+        selected_id="bravo",
+        mode=AppMode.ABOUT,
+    )
+
+    updated = controller.apply(state, Button.A, held_ms=30)
+
+    assert updated.mode == AppMode.DETAIL
+    assert updated.selected_id == "alpha"
+
+
+def test_button_b_from_about_returns_to_overview():
+    controller = InputController()
+    state = AppState(mode=AppMode.ABOUT)
+
+    updated = controller.apply(state, Button.B, held_ms=30)
+
+    assert updated.mode == AppMode.OVERVIEW
+
+
+def test_button_a_in_detail_does_not_trigger_about_when_not_at_last_check():
+    controller = InputController()
+    state = AppState(
+        checks=tuple(CheckRuntime(identifier=n, name=n.title()) for n in ("alpha", "bravo", "charlie")),
+        selected_id="alpha",
+        mode=AppMode.DETAIL,
+    )
+
+    updated = controller.apply(state, Button.A, held_ms=30)
+
+    assert updated.mode == AppMode.DETAIL
+    assert updated.selected_id == "bravo"

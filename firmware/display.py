@@ -12,6 +12,11 @@ except ImportError:  # pragma: no cover - imported on-device
     SPI = None
 
 
+BOOT_LOGO_TITLE = "ViviPi"
+BOOT_LOGO_MIN_FONT = 6
+BOOT_LOGO_MAX_FONT = 32
+
+
 BASE_GLYPH_SIZE = 8
 ELLIPSIS = "…"
 ELLIPSIS_ROWS = (
@@ -209,6 +214,55 @@ def render_framebuffer(frame, width, height, font_width, font_height, glyph_look
     return buffer
 
 
+def _clamp_font(size):
+    return max(BOOT_LOGO_MIN_FONT, min(BOOT_LOGO_MAX_FONT, size))
+
+
+def boot_logo_font_sizes(width, height, version):
+    title_len = len(BOOT_LOGO_TITLE)
+    title_font = _clamp_font(min(width // title_len, (height * 55) // 100))
+
+    version_len = len(version) if version else 0
+    if version_len > 0:
+        remaining = height - title_font
+        version_font = _clamp_font(
+            min(width // version_len, (remaining * 60) // 100, (title_font * 2) // 3)
+        )
+    else:
+        version_font = 0
+
+    return title_font, version_font
+
+
+def render_boot_logo(width, height, version, glyph_builder=None):
+    builder = glyph_builder or _build_glyph_lookup
+    buffer = bytearray((width * height) // 8)
+    _fill_buffer(buffer, 0)
+
+    title_font, version_font = boot_logo_font_sizes(width, height, version)
+    gap = max(2, height // 16)
+    total_h = title_font + (gap + version_font if version else 0)
+    y_start = max(0, (height - total_h) // 2)
+
+    title_glyph = builder(title_font, title_font)
+    title_px = len(BOOT_LOGO_TITLE) * title_font
+    title_x = max(0, (width - title_px) // 2)
+    for col_index, character in enumerate(BOOT_LOGO_TITLE):
+        for delta_x, delta_y in title_glyph(character):
+            _set_buffer_pixel(buffer, width, height, title_x + col_index * title_font + delta_x, y_start + delta_y, 1)
+
+    if version:
+        ver_glyph = builder(version_font, version_font)
+        ver_px = len(version) * version_font
+        ver_x = max(0, (width - ver_px) // 2)
+        ver_y = y_start + title_font + gap
+        for col_index, character in enumerate(version):
+            for delta_x, delta_y in ver_glyph(character):
+                _set_buffer_pixel(buffer, width, height, ver_x + col_index * version_font + delta_x, ver_y + delta_y, 1)
+
+    return buffer
+
+
 def render(checks, config, selected_id=None, page_index=0, shift_offset=(0, 0), glyph_lookup=None):
     display_config = config.get("display", config) if isinstance(config, dict) else {}
     width = int(display_config.get("width_px", 128))
@@ -327,4 +381,8 @@ class SH1107Display:
             self.font_height,
             self._glyph_lookup,
         )
+        self._show()
+
+    def show_boot_logo(self, version, glyph_builder=None):
+        self.buffer[:] = render_boot_logo(self.width, self.height, version, glyph_builder=glyph_builder)
         self._show()

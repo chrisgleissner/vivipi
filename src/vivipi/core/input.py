@@ -4,7 +4,7 @@ from dataclasses import replace
 from enum import Enum
 
 from vivipi.core.models import AppMode, AppState
-from vivipi.core.state import enter_detail, exit_detail, move_selection
+from vivipi.core.state import enter_detail, exit_detail, move_selection, overview_checks, would_wrap_selection
 
 
 class Button(str, Enum):
@@ -34,12 +34,18 @@ class InputController:
             return state
 
         if button == Button.A:
+            if state.mode == AppMode.ABOUT:
+                checks = overview_checks(state)
+                first_id = checks[0].identifier if checks else None
+                return replace(state, mode=AppMode.DETAIL, selected_id=first_id, page_index=0)
+            if state.mode == AppMode.DETAIL and would_wrap_selection(state, self._step_count(held_ms)):
+                return replace(state, mode=AppMode.ABOUT)
             return move_selection(state, self._step_count(held_ms))
 
         if button == Button.B:
             if state.mode == AppMode.DETAIL:
                 return exit_detail(state)
-            if state.mode == AppMode.DIAGNOSTICS:
+            if state.mode == AppMode.DIAGNOSTICS or state.mode == AppMode.ABOUT:
                 return replace(state, mode=AppMode.OVERVIEW)
             return enter_detail(state)
 

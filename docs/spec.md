@@ -450,7 +450,59 @@ System MUST include:
 
 ---
 
-# 16. Performance
+# 16. Boot Logo
+
+On device startup, the display MUST show a boot logo for at least 5 seconds.
+
+Layout:
+
+- "ViviPi" in a large font, centered horizontally and vertically
+- Version string below in a smaller font, also centered
+
+Version format:
+
+- On a tagged commit: `<tag>` (e.g. `0.1.0`)
+- After a tagged commit: `<tag>-<8-char git hash>` (e.g. `0.1.0-12345678`)
+
+Font sizing:
+
+- Font sizes MUST be calculated dynamically from the screen dimensions
+- The configured application font MUST NOT affect boot logo font sizing
+- Title font ≤ 55% of screen height and ≤ screen width / title length
+- Version font ≤ 2/3 of title font
+- All sizes clamped to the valid font range (6–32 pixels)
+
+The boot logo is shown before WiFi connection and application initialization.
+
+[VIVIPI-BOOT-001]
+
+---
+
+# 17. About View
+
+After cycling past the last check in detail view, the system MUST show an About page.
+
+Layout:
+
+```
+     ViviPi
+VER: <version>
+BLD: <build_time>
+```
+
+Rules:
+
+- Lines are omitted if the corresponding value is empty
+- Button A returns to the first check's detail view
+- Button B returns to overview
+
+The build time is recorded at firmware build time in UTC.
+
+[VIVIPI-UX-ABOUT-001]
+
+---
+
+# 18. Performance
 
 - Idle CPU near baseline
 - No unnecessary redraws
@@ -460,7 +512,7 @@ System MUST include:
 
 ---
 
-# 17. Determinism
+# 19. Determinism
 
 - Same inputs → same outputs
 - No randomness allowed
@@ -469,7 +521,7 @@ System MUST include:
 
 ---
 
-# 18. Testing
+# 20. Testing
 
 - All requirements must be covered by tests
 - ≥ 96% branch coverage
@@ -479,7 +531,7 @@ System MUST include:
 
 ---
 
-# 19. Forbidden
+# 21. Forbidden
 
 - Animations
 - Blinking

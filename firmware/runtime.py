@@ -73,6 +73,9 @@ def build_runtime_app(
     definitions_builder=build_runtime_definitions,
     executor_factory=build_executor,
     wifi_connector=connect_wifi,
+    now_provider=_now_s,
+    sleep_ms=_sleep_ms,
+    boot_logo_min_s=5,
 ):
     input_controller = input_controller_factory()
     display_config = config["device"]["display"]
@@ -80,7 +83,22 @@ def build_runtime_app(
     font_width = int(font.get("width_px", 8)) if isinstance(font, dict) else 8
     font_height = int(font.get("height_px", 8)) if isinstance(font, dict) else 8
     display = display_factory(display_config)
+
+    project = config.get("project", {}) if isinstance(config.get("project"), dict) else {}
+    version = str(project.get("version", ""))
+    build_time_value = str(project.get("build_time", ""))
+
+    boot_start_s = now_provider()
+    display.show_boot_logo(version)
+
     button_reader = button_reader_factory(config["device"]["buttons"], input_controller=input_controller)
+    diagnostics = wifi_connector(config)
+
+    elapsed_s = now_provider() - boot_start_s
+    remaining_ms = max(0, int((boot_logo_min_s - elapsed_s) * 1000))
+    if remaining_ms > 0:
+        sleep_ms(remaining_ms)
+
     app = runtime_app_factory(
         definitions=definitions_builder(config),
         executor=executor_factory(),
@@ -93,8 +111,9 @@ def build_runtime_app(
         display_mode=DisplayMode(str(display_config.get("mode", DisplayMode.STANDARD.value))),
         overview_columns=int(display_config.get("columns", 1)),
         column_separator=str(display_config.get("column_separator", " ")),
+        version=version,
+        build_time=build_time_value,
     )
-    diagnostics = wifi_connector(config)
     if diagnostics:
         app.inject_diagnostics(diagnostics, activate=True)
     return app

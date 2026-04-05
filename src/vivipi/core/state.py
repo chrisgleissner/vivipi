@@ -191,6 +191,19 @@ def move_selection(state: AppState, step: int = 1) -> AppState:
     )
 
 
+def would_wrap_selection(state: AppState, step: int = 1) -> bool:
+    checks = overview_checks(state)
+    if len(checks) <= 1:
+        return True
+    current_index = _sorted_selected_index(state)
+    if current_index is None:
+        return False
+    next_index = (current_index + step) % len(checks)
+    if step > 0:
+        return next_index <= current_index
+    return next_index >= current_index
+
+
 def page_index(state: AppState) -> int:
     return normalize_page_index(overview_checks(state), checks_per_page(state), state.page_index)
 

@@ -60,6 +60,18 @@ def _diagnostic_rows(lines: tuple[str, ...], row_width: int, page_size: int) -> 
     return tuple(rows)
 
 
+def _about_rows(state: AppState, row_width: int, page_size: int) -> tuple[str, ...]:
+    rows: list[str] = []
+    rows.append(center_text("ViviPi", row_width))
+    if state.version:
+        rows.append(_fixed_width_row(f"VER: {state.version}", row_width))
+    if state.build_time:
+        rows.append(_fixed_width_row(f"BLD: {state.build_time}", row_width))
+    while len(rows) < page_size:
+        rows.append(" " * row_width)
+    return tuple(rows[:page_size])
+
+
 def _legacy_overview_frame(state: AppState, checks: tuple[CheckRuntime, ...]) -> Frame:
     rows = _blank_rows(state.row_width, state.page_size)
     selected_index = None
@@ -134,6 +146,11 @@ def render_frame(state: AppState, now_s: float | None = None) -> Frame:
     if state.mode == AppMode.DIAGNOSTICS:
         return Frame(
             rows=_diagnostic_rows(state.diagnostics, state.row_width, state.page_size),
+            shift_offset=state.shift_offset,
+        )
+    if state.mode == AppMode.ABOUT:
+        return Frame(
+            rows=_about_rows(state, state.row_width, state.page_size),
             shift_offset=state.shift_offset,
         )
     return _overview_frame(state)

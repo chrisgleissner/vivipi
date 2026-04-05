@@ -201,3 +201,25 @@ def test_rendering_is_deterministic_for_identical_inputs():
     )
 
     assert render_frame(state, now_s=100) == render_frame(state, now_s=100)
+
+
+def test_about_page_shows_version_and_build_time():
+    state = AppState(mode=AppMode.ABOUT, version="0.1.0", build_time="2025-04-05T12:00Z")
+
+    frame = render_frame(state)
+
+    assert len(frame.rows) == 8
+    assert all(len(row) == 16 for row in frame.rows)
+    assert "ViviPi" in frame.rows[0]
+    assert "VER: 0.1.0" in frame.rows[1]
+    assert "BLD: 2025-04-05…" == frame.rows[2]
+
+
+def test_about_page_omits_empty_version_and_build_time():
+    state = AppState(mode=AppMode.ABOUT)
+
+    frame = render_frame(state)
+
+    assert "ViviPi" in frame.rows[0]
+    assert all("VER:" not in row for row in frame.rows)
+    assert all("BLD:" not in row for row in frame.rows)

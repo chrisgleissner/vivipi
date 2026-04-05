@@ -6,7 +6,7 @@ from vivipi.core.models import AppMode, AppState, CheckDefinition, CheckObservat
 from vivipi.core.render import Frame, InvertedSpan, render_frame
 from vivipi.core.scheduler import ScheduledCheck, due_checks, next_due_at, render_reason
 from vivipi.core.shift import PixelShiftController
-from vivipi.core.state import apply_observation, integrate_observations, move_selection, page_count, record_diagnostic_events, set_page_index, visible_checks
+from vivipi.core.state import apply_observation, integrate_observations, move_selection, page_count, record_diagnostic_events, set_page_index, visible_checks, would_wrap_selection
 
 __all__ = [
     "AppMode",
@@ -43,4 +43,5 @@ __all__ = [
     "render_reason",
     "set_page_index",
     "visible_checks",
+    "would_wrap_selection",
 ]

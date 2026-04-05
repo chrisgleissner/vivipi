@@ -23,6 +23,7 @@ class AppMode(str, Enum):
     OVERVIEW = "overview"
     DETAIL = "detail"
     DIAGNOSTICS = "diagnostics"
+    ABOUT = "about"
 
 
 class DisplayMode(str, Enum):
@@ -110,6 +111,8 @@ class AppState:
     page_index: int = 0
     shift_offset: tuple[int, int] = (0, 0)
     diagnostics: tuple[str, ...] = field(default_factory=tuple)
+    version: str = ""
+    build_time: str = ""
 
     def __post_init__(self):
         if self.row_width < 1:

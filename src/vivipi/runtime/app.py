@@ -28,6 +28,8 @@ class RuntimeApp:
         display_mode: DisplayMode = DisplayMode.STANDARD,
         overview_columns: int = 1,
         column_separator: str = " ",
+        version: str = "",
+        build_time: str = "",
     ):
         if page_interval_s < 0:
             raise ValueError("page_interval_s must not be negative")
@@ -45,6 +47,8 @@ class RuntimeApp:
             display_mode=display_mode,
             overview_columns=overview_columns,
             column_separator=column_separator,
+            version=version,
+            build_time=build_time,
         )
         self.last_rendered_state: AppState | None = None
 

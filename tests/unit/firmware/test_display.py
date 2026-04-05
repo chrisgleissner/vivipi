@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from firmware.display import SH1107Display, _pin_number, _sample_source_coordinates, render, render_framebuffer
+from firmware.display import SH1107Display, _pin_number, _sample_source_coordinates, boot_logo_font_sizes, render, render_boot_logo, render_framebuffer
 from vivipi.core.models import CheckRuntime, Status
 from vivipi.core.render import InvertedSpan
 
@@ -85,3 +85,57 @@ def test_render_returns_a_deterministic_buffer_for_compact_failed_columns():
 
     assert first == second
     assert list(first[:9]) == [0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0x00, 0x00, 0x01]
+
+
+def test_boot_logo_font_sizes_scale_to_screen_dimensions():
+    title_font, version_font = boot_logo_font_sizes(128, 64, "0.1.0")
+
+    assert 6 <= title_font <= 32
+    assert 6 <= version_font <= 32
+    assert title_font > version_font
+
+
+def test_boot_logo_font_sizes_clamp_to_minimum_for_tiny_screen():
+    title_font, version_font = boot_logo_font_sizes(36, 12, "0.1.0-abcdef12")
+
+    assert title_font == 6
+    assert version_font == 6
+
+
+def test_boot_logo_font_sizes_return_zero_version_font_when_no_version():
+    title_font, version_font = boot_logo_font_sizes(128, 64, "")
+
+    assert title_font > 0
+    assert version_font == 0
+
+
+def test_render_boot_logo_produces_correct_buffer_size():
+    buffer = render_boot_logo(128, 64, "0.1.0", glyph_builder=lambda w, h: fake_glyph_lookup)
+
+    assert len(buffer) == (128 * 64) // 8
+
+
+def test_render_boot_logo_has_lit_pixels():
+    buffer = render_boot_logo(128, 64, "0.1.0", glyph_builder=lambda w, h: fake_glyph_lookup)
+
+    assert any(byte != 0 for byte in buffer)
+
+
+def test_render_boot_logo_without_version_still_renders_title():
+    buffer = render_boot_logo(128, 64, "", glyph_builder=lambda w, h: fake_glyph_lookup)
+
+    assert any(byte != 0 for byte in buffer)
+
+
+def test_show_boot_logo_writes_buffer_and_shows():
+    display = SH1107Display.__new__(SH1107Display)
+    display.width = 128
+    display.height = 64
+    display.buffer = bytearray((128 * 64) // 8)
+    shown = {"called": False}
+    display._show = lambda: shown.__setitem__("called", True)
+
+    display.show_boot_logo("0.1.0", glyph_builder=lambda w, h: fake_glyph_lookup)
+
+    assert shown["called"] is True
+    assert len(display.buffer) == (128 * 64) // 8

@@ -9,6 +9,7 @@ from vivipi.core.state import (
     visible_checks,
     with_checks,
     with_diagnostics,
+    would_wrap_selection,
 )
 
 
@@ -236,3 +237,34 @@ def test_record_diagnostic_events_deduplicates_and_can_activate_mode():
 
     assert updated.mode.value == "diagnostics"
     assert updated.diagnostics == ("WIFI down", "SERV schema err…")
+
+
+def test_would_wrap_selection_returns_true_at_last_check():
+    checks = (make_check("Alpha"), make_check("Bravo"), make_check("Charlie"))
+    state = AppState(checks=checks, selected_id="charlie")
+
+    assert would_wrap_selection(state, step=1) is True
+
+
+def test_would_wrap_selection_returns_false_when_not_at_end():
+    checks = (make_check("Alpha"), make_check("Bravo"), make_check("Charlie"))
+    state = AppState(checks=checks, selected_id="alpha")
+
+    assert would_wrap_selection(state, step=1) is False
+
+
+def test_would_wrap_selection_returns_true_for_single_check():
+    state = AppState(checks=(make_check("Alpha"),), selected_id="alpha")
+
+    assert would_wrap_selection(state, step=1) is True
+
+
+def test_would_wrap_selection_returns_true_with_large_step():
+    checks = (make_check("Alpha"), make_check("Bravo"), make_check("Charlie"))
+    state = AppState(checks=checks, selected_id="bravo")
+
+    assert would_wrap_selection(state, step=5) is True
+
+
+def test_would_wrap_selection_returns_false_for_empty_checks():
+    assert would_wrap_selection(AppState(), step=1) is True

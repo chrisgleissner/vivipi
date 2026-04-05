@@ -218,8 +218,9 @@ def _check_to_dict(check: CheckDefinition) -> dict[str, object]:
 
 
 def render_device_runtime_config(settings: dict[str, object], checks: tuple[CheckDefinition, ...]) -> dict[str, object]:
+    project = dict(settings.get("project", {})) if isinstance(settings.get("project"), dict) else {}
     return {
-        "project": settings.get("project", {}),
+        "project": project,
         "device": settings["device"],
         "wifi": settings["wifi"],
         "service": settings.get("service", {}),
@@ -308,12 +309,21 @@ def write_runtime_config(
     config_path: str | Path,
     output_path: str | Path,
     env: dict[str, str] | None = None,
+    version: str = "",
+    build_time: str = "",
 ) -> Path:
     source_config_path = Path(config_path).resolve()
     settings = load_build_deploy_settings(source_config_path, env=env)
     checks = load_runtime_checks(_resolve_checks_path(source_config_path, settings), env=env)
     validate_runtime_settings(settings, checks)
     runtime_config = render_device_runtime_config(settings, checks)
+
+    if version:
+        runtime_config.setdefault("project", {})
+        runtime_config["project"]["version"] = version
+    if build_time:
+        runtime_config.setdefault("project", {})
+        runtime_config["project"]["build_time"] = build_time
 
     destination = Path(output_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -325,6 +335,8 @@ def build_firmware_bundle(
     config_path: str | Path,
     output_dir: str | Path,
     env: dict[str, str] | None = None,
+    version_resolver=None,
+    build_time_resolver=None,
 ) -> Path:
     repository_root = Path(__file__).resolve().parents[3]
     release_dir = Path(output_dir)
@@ -332,6 +344,18 @@ def build_firmware_bundle(
 
     source_config_path = Path(config_path).resolve()
     settings = load_build_deploy_settings(source_config_path, env=env)
+
+    if version_resolver is not None:
+        version = version_resolver()
+    else:
+        from vivipi.core.version import resolve_version
+        version = resolve_version(repository_root)
+
+    if build_time_resolver is not None:
+        build_time = build_time_resolver()
+    else:
+        from datetime import datetime, timezone
+        build_time = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
 
     staging_dir = release_dir / "vivipi-device-fs"
     if staging_dir.exists():
@@ -347,7 +371,7 @@ def build_firmware_bundle(
         else:
             shutil.copy2(item, staging_dir / item.name)
     shutil.copytree(package_dir, staging_dir / "vivipi")
-    write_runtime_config(source_config_path, staging_dir / "config.json", env=env)
+    write_runtime_config(source_config_path, staging_dir / "config.json", env=env, version=version, build_time=build_time)
     write_install_manifest(settings, release_dir / "pico2w-micropython.txt")
 
     archive_path = release_dir / "vivipi-firmware-bundle"
