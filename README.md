@@ -193,7 +193,7 @@ Supports:
 
 ## Release Artifacts
 
-Tagging with `v*` triggers a release containing:
+Tagging with a x.y.z version triggers a release containing:
 
 - Python wheel and source distribution
 - Zipped MicroPython source bundle containing `boot.py`, `main.py`, `config.json`, and the `vivipi` package

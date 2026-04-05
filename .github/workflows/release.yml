@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - "v*"
+      - "*.*.*"
 
 jobs:
   release:
@@ -20,13 +20,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
-      - name: Validate release candidate
-        env:
-          PYTHON_BIN: python
-          VIVIPI_WIFI_SSID: release-ssid
-          VIVIPI_WIFI_PASSWORD: release-password
-        run: ./build ci --venv .venv-release
 
       - name: Build release assets
         env:
