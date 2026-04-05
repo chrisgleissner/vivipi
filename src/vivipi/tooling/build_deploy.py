@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
 import re
 import shutil
 import subprocess
 from pathlib import Path
+from urllib.parse import urlparse
 
 import yaml
 
 from vivipi.core.config import load_checks_config
-from vivipi.core.models import CheckDefinition
+from vivipi.core.models import CheckDefinition, CheckType
 
 
 PLACEHOLDER_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)\}")
@@ -62,6 +64,37 @@ def render_device_runtime_config(settings: dict[str, object], checks: tuple[Chec
     }
 
 
+def _is_loopback_host(host: str) -> bool:
+    normalized = host.strip().casefold()
+    if normalized in {"localhost", "::1"}:
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def _validate_device_reachable_url(url: str, context: str):
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if parsed.scheme not in {"http", "https"} or not host:
+        raise ValueError(f"{context} must be an absolute http or https URL")
+    if _is_loopback_host(host):
+        raise ValueError(f"{context} must use a host reachable from the Pico")
+
+
+def validate_runtime_settings(settings: dict[str, object], checks: tuple[CheckDefinition, ...]):
+    service = settings.get("service", {})
+    if isinstance(service, dict):
+        base_url = service.get("base_url")
+        if isinstance(base_url, str):
+            _validate_device_reachable_url(base_url, "service.base_url")
+
+    for check in checks:
+        if check.check_type == CheckType.SERVICE:
+            _validate_device_reachable_url(check.target, f"check {check.identifier}")
+
+
 def write_install_manifest(settings: dict[str, object], output_path: str | Path) -> Path:
     device = settings["device"]
     micropython = device.get("micropython", {}) if isinstance(device, dict) else {}
@@ -92,6 +125,7 @@ def write_runtime_config(
     source_config_path = Path(config_path).resolve()
     settings = load_build_deploy_settings(source_config_path, env=env)
     checks = load_checks_config(_resolve_checks_path(source_config_path, settings), env=env)
+    validate_runtime_settings(settings, checks)
     runtime_config = render_device_runtime_config(settings, checks)
 
     destination = Path(output_path)

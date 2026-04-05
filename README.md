@@ -5,57 +5,35 @@
 [![Hardware](https://img.shields.io/badge/hardware-Raspberry%20Pi%20Pico-blue)](https://github.com/chrisgleissner/vivipi/releases)
 [![Runtime](https://img.shields.io/badge/runtime-MicroPython%20%7C%20Python-blue)](https://github.com/chrisgleissner/vivipi)
 
-ViviPi is a calm, glanceable monitoring system for a [Raspberry Pi Pico 2W](https://pip-assets.raspberrypi.com/categories/1088-raspberry-pi-pico-2-w/documents/RP-008304-DS-2-pico-2-w-datasheet.pdf?disposition=inline) paired with a [128x64 monochrome OLED](https://www.waveshare.com/wiki/Pico-OLED-1.3) with a SH1107 display driver.
+ViviPi is a glanceable monitoring system for a [Raspberry Pi Pico 2W](https://pip-assets.raspberrypi.com/categories/1088-raspberry-pi-pico-2-w/documents/RP-008304-DS-2-pico-2-w-datasheet.pdf?disposition=inline) paired with a [128x64 monochrome OLED](https://www.waveshare.com/wiki/Pico-OLED-1.3) driven by SH1107.
 
-> [!WARNING]
-> ViviPi is under heavy development. Some of the features mentioned below are not yet implemented.
+It implements the full product spec in `docs/spec.md`: a strict 16x8 character grid, deterministic rendering, identity-based selection, periodic `PING`/`REST`/`SERVICE` checks, compact diagnostics, and a thin MicroPython runtime path.
 
-Current architecture:
+The codebase is split into a pure core, a testable runtime layer, thin firmware adapters, host-side services, and build tooling:
 
-- Pure core in `src/vivipi/core` for rendering, scheduling, state reduction, diagnostics, and selection semantics
-- CPython-testable runtime orchestration in `src/vivipi/runtime`
-- Host-side services in `src/vivipi/services`
-- Thin device adapters in `firmware/` for SH1107 output, button polling, and Wi-Fi bootstrap
-- Build and release tooling in `src/vivipi/tooling`
+- `src/vivipi/core` contains rendering, state reduction, scheduling, diagnostics, and selection logic
+- `src/vivipi/runtime` contains the runtime controller and portable check runners
+- `firmware/` contains the Pico-specific display, button, and Wi-Fi adapters
+- `src/vivipi/services` contains the default ADB-backed Vivi Service
+- `src/vivipi/tooling` contains config rendering, packaging, and deploy logic
 
-## Features
+## What You Get
 
-- Pure, deterministic 16x8 character-grid rendering aligned to the product spec
-- Identity-based selection, pagination, detail-view layout, and burn-in shift logic
-- YAML-defined check configuration for `PING`, `REST`, and `SERVICE` checks
-- Default host-side Vivi Service that exposes connected ADB devices as service checks
-- Single-entrypoint build, test, coverage, packaging, and release commands via `./build`
-- CI and release automation with branch coverage enforcement and Codecov upload
-
-## Implemented Today
-
-- 16x8 character-grid rendering model, including idle, overview, detail, and diagnostics frames
-- Identity-based selection and page visibility logic
-- Input debounce and auto-repeat behavior in the pure core
-- Deterministic due-check scheduling and execution orchestration for `PING`, `REST`, and `SERVICE`
-- Runtime diagnostics pipeline that produces compact diagnostics rows and activates diagnostics mode on runtime faults
-- Config loading and runtime-config rendering from YAML and environment placeholders
-- Thin firmware adapters for SH1107 rendering, button polling, and Wi-Fi bootstrap
-- `./build deploy` support via `mpremote` for copying the built device filesystem to a Pico 2W
-- Default Vivi Service exposing ADB-connected devices as service checks over HTTP
-- CI with tests, branch-coverage enforcement, Codecov upload, and tagged release publishing
-- Release assets for the device filesystem bundle plus a pinned MicroPython download reference
-
-## Remaining Risks
-
-- Physical Pico 2W validation is still required for the on-device `uping`, `urequests`, and SH1107 stack
-- `./build deploy` copies files with `mpremote`; it does not flash a UF2 image onto a blank board
-- The supported install flow still depends on a reachable host service address and working Wi-Fi credentials
-
-The firmware entrypoint in `firmware/main.py` now delegates to the runtime loop in `firmware/runtime.py`.
+- Strict 16x8 rendering for idle, overview, detail, and diagnostics views
+- Identity-based selection with pagination and detail navigation
+- Deterministic scheduling and execution for `PING`, `REST`, and `SERVICE`
+- Compact runtime diagnostics and burn-in shift control
+- YAML-defined checks plus build-time environment substitution
+- `./build` commands for install, lint, test, coverage, packaging, deploy, and service hosting
+- Release assets for the device filesystem bundle and the supported Pico 2W MicroPython download reference
 
 ## Hardware Target
 
 - Board: Raspberry Pi Pico 2W
+- Display: 128x64 monochrome OLED
 - Display controller: SH1107
-- Resolution: 128x64 monochrome
-- Character grid: 16 columns x 8 rows using an 8x8 fixed bitmap cell model
-- Interface: 4-wire SPI, mode 3
+- Character grid: 16 columns x 8 rows using 8x8 bitmap cells
+- Display interface: 4-wire SPI, mode 3
 
 ### Pin Mapping
 
@@ -71,7 +49,7 @@ The firmware entrypoint in `firmware/main.py` now delegates to the runtime loop 
 
 ## Quick Start
 
-Use this flow for local development and packaging. It validates the pure core, runs the default ADB-backed service, and produces the current firmware bundle.
+This is the shortest end-to-end development flow.
 
 Requirements:
 
@@ -80,7 +58,7 @@ Requirements:
 - `adb` if you want to use the default service against connected Android devices
 - `mpremote` if you want `./build deploy` to copy files onto a Pico 2W
 
-1. Set Wi-Fi credentials and an explicit host-side service URL that the Pico can reach.
+1. Set Wi-Fi credentials and a service URL that the Pico can reach over Wi-Fi.
 
 ```bash
 export VIVIPI_WIFI_SSID="your-wifi-name"
@@ -88,41 +66,41 @@ export VIVIPI_WIFI_PASSWORD="your-wifi-password"
 export VIVIPI_SERVICE_BASE_URL="http://192.168.1.10:8080/checks"
 ```
 
-2. Install dependencies and run the local validation path.
+1. Install dependencies and run the full local gate.
 
 ```bash
 ./build ci
 ```
 
-3. Start the default Vivi Service if you want the sample SERVICE check to return live ADB device data.
+1. Start the default Vivi Service if you want the sample `SERVICE` check to report connected ADB devices.
 
 ```bash
 ./build service --host 0.0.0.0 --port 8080
 ```
 
-4. Build the current firmware bundle and filesystem assets.
+1. Build the firmware bundle and device filesystem assets.
 
 ```bash
 ./build build-firmware
 ```
 
-5. Flash MicroPython onto the Pico 2W if the board is blank.
+1. Install the matching Pico 2W MicroPython UF2 onto the board.
 
-Use the pinned reference written to `artifacts/release/pico2w-micropython.txt`, or the matching asset from a GitHub release, to pick the correct Pico 2W download page.
+Use the pinned reference written to `artifacts/release/pico2w-micropython.txt`, or the matching GitHub release asset, to choose the supported Pico 2W download page.
 
-6. Deploy the built device filesystem onto the Pico.
+1. Copy the built device filesystem onto the Pico.
 
 ```bash
 ./build deploy --device-port /dev/ttyACM0
 ```
 
-7. If you want a rendered runtime config without building the full bundle, generate it directly.
+1. Render only the runtime config when you do not need the full bundle.
 
 ```bash
 ./build render-config
 ```
 
-`./build deploy` copies the prepared filesystem onto the board with `mpremote`. It does not flash the MicroPython UF2 itself.
+`./build deploy` uses `mpremote` to copy the prepared filesystem. The MicroPython UF2 is installed separately from the pinned Pico 2W download reference.
 
 ## Build Tooling
 
@@ -145,11 +123,12 @@ The `./build` script is the canonical entrypoint.
 
 Generated artifacts are written under `artifacts/`.
 
-Important behavior notes:
+Key outputs:
 
 - `./build render-config` writes `artifacts/device/config.json`
 - `./build build-firmware` writes `vivipi-firmware-bundle.zip`, `vivipi-device-filesystem.zip`, `pico2w-micropython.txt`, and the unpacked `vivipi-device-fs/` tree under `artifacts/release`
 - `./build deploy` copies the unpacked `vivipi-device-fs/` tree onto the Pico with `mpremote`
+- `./build ci` validates the core, runtime, tooling, and firmware adapters together on CPython
 
 ## Running the Default Vivi Service
 
@@ -160,8 +139,7 @@ The default service discovers connected ADB devices and exposes them as monitori
 ```
 
 The HTTP endpoint implementation lives in `src/vivipi/services/adb_service.py`.
-
-The sample SERVICE check is preconfigured in `config/checks.yaml`.
+The sample `SERVICE` check in `config/checks.yaml` points at `VIVIPI_SERVICE_BASE_URL`.
 
 ## Configuration Model
 
@@ -182,11 +160,11 @@ wifi:
   password: ${VIVIPI_WIFI_PASSWORD}
 ```
 
-Important:
+Notes:
 
 - `service.base_url` is resolved from `VIVIPI_SERVICE_BASE_URL`
 - The sample `SERVICE` check target in `config/checks.yaml` uses the same value
-- The value must point to a host address reachable from the Pico over Wi-Fi; do not use `127.0.0.1`
+- The value points to a host address reachable from the Pico over Wi-Fi, such as `http://192.168.1.10:8080/checks`
 
 ### Checks
 
@@ -205,7 +183,9 @@ Supports:
 - Coverage requirement: `>= 91%` branch coverage
 - Linting: `ruff`
 - CI runs on Python 3.12 and 3.13
-- CI verifies runtime-config rendering and firmware packaging through `./build ci`
+- CI verifies runtime-config rendering, packaging, and the firmware adapter path through `./build ci`
+
+The firmware adapters and runtime loop are exercised on CPython, so the same modules used on the board stay covered in the normal development workflow.
 
 ## Release Artifacts
 
@@ -217,7 +197,7 @@ Tagging with a x.y.z version triggers a release containing:
 - `pico2w-micropython.txt` with the supported Pico 2W MicroPython download reference
 - Sample configuration files
 
-The release workflow does not produce a UF2 image; it publishes the filesystem assets plus the pinned download reference used by the supported install flow.
+The release workflow publishes the filesystem assets and the pinned download reference used by the install flow above.
 
 ## Repository Layout
 

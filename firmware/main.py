@@ -1,6 +1,9 @@
 """MicroPython entrypoint for the ViviPi firmware bundle."""
 
-from runtime import run_forever
+try:
+    from runtime import run_forever
+except ImportError:  # pragma: no cover - used by CPython tests
+    from firmware.runtime import run_forever
 
 
 def main():

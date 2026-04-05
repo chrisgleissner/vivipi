@@ -11,6 +11,7 @@ from vivipi.tooling.build_deploy import (
     deploy_firmware,
     load_build_deploy_settings,
     render_device_runtime_config,
+    validate_runtime_settings,
     write_install_manifest,
     write_runtime_config,
 )
@@ -163,6 +164,37 @@ service:
             tmp_path / "config.json",
                         env=FIXTURE_ENV,
         )
+
+
+def test_validate_runtime_settings_rejects_loopback_service_urls():
+    settings = {
+        "device": {"board": "pico2w"},
+        "wifi": {"ssid": "wifi", "password": "secret"},
+        "service": {"base_url": "http://127.0.0.1:8080/checks"},
+    }
+    checks = ()
+
+    with pytest.raises(ValueError, match="reachable from the Pico"):
+        validate_runtime_settings(settings, checks)
+
+
+def test_validate_runtime_settings_rejects_service_check_targets_on_loopback():
+    settings = {
+        "device": {"board": "pico2w"},
+        "wifi": {"ssid": "wifi", "password": "secret"},
+        "service": {"base_url": "http://192.0.2.10:8080/checks"},
+    }
+    checks = (
+        CheckDefinition(
+            identifier="adb",
+            name="Android Devices",
+            check_type=CheckType.SERVICE,
+            target="http://localhost:8080/checks",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="reachable from the Pico"):
+        validate_runtime_settings(settings, checks)
 
 
 def test_build_deploy_main_dispatches_render_config(monkeypatch, tmp_path: Path):

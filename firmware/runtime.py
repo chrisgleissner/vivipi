@@ -13,8 +13,12 @@ from vivipi.core.input import InputController
 from vivipi.core.models import DiagnosticEvent
 from vivipi.runtime import RuntimeApp, build_executor, build_runtime_definitions
 
-from display import SH1107Display
-from input import ButtonReader
+try:
+    from display import SH1107Display
+    from input import ButtonReader
+except ImportError:  # pragma: no cover - used by CPython tests
+    from firmware.display import SH1107Display
+    from firmware.input import ButtonReader
 
 
 def load_config(path="config.json"):
@@ -60,25 +64,40 @@ def connect_wifi(config, timeout_s=10):
     return (DiagnosticEvent(code="WIFI", message="connect fail"),)
 
 
-def build_runtime_app(config):
-    input_controller = InputController()
-    display = SH1107Display(config["device"]["display"])
-    button_reader = ButtonReader(config["device"]["buttons"], input_controller=input_controller)
-    app = RuntimeApp(
-        definitions=build_runtime_definitions(config),
-        executor=build_executor(),
+def build_runtime_app(
+    config,
+    input_controller_factory=InputController,
+    display_factory=SH1107Display,
+    button_reader_factory=ButtonReader,
+    runtime_app_factory=RuntimeApp,
+    definitions_builder=build_runtime_definitions,
+    executor_factory=build_executor,
+    wifi_connector=connect_wifi,
+):
+    input_controller = input_controller_factory()
+    display = display_factory(config["device"]["display"])
+    button_reader = button_reader_factory(config["device"]["buttons"], input_controller=input_controller)
+    app = runtime_app_factory(
+        definitions=definitions_builder(config),
+        executor=executor_factory(),
         display=display,
         button_reader=button_reader,
         input_controller=input_controller,
     )
-    diagnostics = connect_wifi(config)
+    diagnostics = wifi_connector(config)
     if diagnostics:
         app.inject_diagnostics(diagnostics, activate=True)
     return app
 
 
+def run_loop(app, poll_interval_ms=50, iterations=None, now_provider=_now_s, sleep_ms=_sleep_ms):
+    iteration = 0
+    while iterations is None or iteration < iterations:  # pragma: no branch - tiny loop helper
+        app.tick(now_provider())
+        iteration += 1
+        sleep_ms(poll_interval_ms)
+
+
 def run_forever(config_path="config.json", poll_interval_ms=50):
     app = build_runtime_app(load_config(config_path))
-    while True:  # pragma: no cover - imported on-device
-        app.tick(_now_s())
-        _sleep_ms(poll_interval_ms)
+    run_loop(app, poll_interval_ms=poll_interval_ms)
