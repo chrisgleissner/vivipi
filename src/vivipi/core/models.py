@@ -58,6 +58,7 @@ class CheckObservation:
     details: str = ""
     latency_ms: float | None = None
     observed_at_s: float | None = None
+    source_identifier: str | None = None
 
 
 @dataclass(frozen=True)
@@ -70,6 +71,21 @@ class CheckRuntime:
     last_update_s: float | None = None
     consecutive_failures: int = 0
     consecutive_successes: int = 0
+    source_identifier: str | None = None
+
+
+@dataclass(frozen=True)
+class DiagnosticEvent:
+    code: str
+    message: str
+    observed_at_s: float | None = None
+    source_identifier: str | None = None
+
+    def __post_init__(self):
+        if not self.code.strip():
+            raise ValueError("diagnostic code must be a non-empty string")
+        if not self.message.strip():
+            raise ValueError("diagnostic message must be a non-empty string")
 
 
 @dataclass(frozen=True)

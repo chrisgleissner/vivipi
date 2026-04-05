@@ -1,5 +1,16 @@
-from vivipi.core.models import AppState
-from vivipi.core.scheduler import render_reason
+from vivipi.core.models import AppState, CheckDefinition, CheckType
+from vivipi.core.scheduler import due_checks, next_due_at, render_reason
+
+
+def make_definition(identifier: str, interval_s: int = 15) -> CheckDefinition:
+    return CheckDefinition(
+        identifier=identifier,
+        name=identifier.title(),
+        check_type=CheckType.PING,
+        target="127.0.0.1",
+        interval_s=interval_s,
+        timeout_s=max(1, int(interval_s * 0.6)),
+    )
 
 
 def test_render_reason_reports_bootstrap_when_no_previous_state_exists():
@@ -24,3 +35,25 @@ def test_render_reason_reports_none_for_identical_states():
     state = AppState()
 
     assert render_reason(state, state) == "none"
+
+
+def test_next_due_at_defaults_to_immediate_first_run():
+    definition = make_definition("router")
+
+    assert next_due_at(definition, None) == 0.0
+
+
+def test_due_checks_orders_by_due_time_then_identifier():
+    definitions = (
+        make_definition("router", interval_s=15),
+        make_definition("api", interval_s=30),
+        make_definition("backup", interval_s=15),
+    )
+
+    due = due_checks(
+        definitions,
+        last_started_at={"router": 30.0, "api": 0.0, "backup": 20.0},
+        now_s=40.0,
+    )
+
+    assert [item.definition.identifier for item in due] == ["api", "backup"]

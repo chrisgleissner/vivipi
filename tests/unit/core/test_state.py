@@ -1,5 +1,14 @@
-from vivipi.core.models import AppState, CheckObservation, CheckRuntime, Status, TransitionThresholds
-from vivipi.core.state import apply_observation, move_selection, selected_check, visible_checks, with_checks, with_diagnostics
+from vivipi.core.models import AppState, CheckObservation, CheckRuntime, DiagnosticEvent, Status, TransitionThresholds
+from vivipi.core.state import (
+    apply_observation,
+    integrate_observations,
+    move_selection,
+    record_diagnostic_events,
+    selected_check,
+    visible_checks,
+    with_checks,
+    with_diagnostics,
+)
 
 
 def make_check(name: str, status: Status = Status.OK) -> CheckRuntime:
@@ -123,3 +132,46 @@ def test_selected_check_and_diagnostics_helpers_preserve_state_shape():
     assert selected_check(state) is not None
     assert diagnostics.mode.value == "diagnostics"
     assert diagnostics.diagnostics == ("wifi disconnected",)
+
+
+def test_integrate_observations_replaces_previous_service_children_by_source_identifier():
+    state = AppState(
+        checks=(
+            CheckRuntime(identifier="router", name="Router"),
+            CheckRuntime(identifier="adb:pixel-8", name="Pixel 8", source_identifier="android-devices"),
+            CheckRuntime(identifier="adb:pixel-9", name="Pixel 9", source_identifier="android-devices"),
+        ),
+        selected_id="adb:pixel-9",
+    )
+
+    updated = integrate_observations(
+        state,
+        observations=(
+            CheckObservation(
+                identifier="adb:pixel-10",
+                name="Pixel 10",
+                status=Status.OK,
+                source_identifier="android-devices",
+            ),
+        ),
+        replace_source_identifier="android-devices",
+    )
+
+    assert [check.identifier for check in updated.checks] == ["router", "adb:pixel-10"]
+    assert updated.selected_id == "adb:pixel-10"
+
+
+def test_record_diagnostic_events_deduplicates_and_can_activate_mode():
+    state = AppState(diagnostics=("WIFI down",), selected_id=None)
+
+    updated = record_diagnostic_events(
+        state,
+        events=(
+            DiagnosticEvent(code="wifi", message="down"),
+            DiagnosticEvent(code="serv", message="schema error"),
+        ),
+        activate=True,
+    )
+
+    assert updated.mode.value == "diagnostics"
+    assert updated.diagnostics == ("WIFI down", "SERV schema err…")

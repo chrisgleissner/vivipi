@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from vivipi.core.models import AppMode, AppState, CheckObservation, CheckRuntime, Status, TransitionThresholds
+from vivipi.core.diagnostics import append_diagnostic_lines
+from vivipi.core.models import AppMode, AppState, CheckObservation, CheckRuntime, DiagnosticEvent, Status, TransitionThresholds
 
 
 def sort_checks(checks: tuple[CheckRuntime, ...]) -> tuple[CheckRuntime, ...]:
@@ -39,12 +40,14 @@ def apply_observation(
     if observation.status == Status.UNKNOWN:
         return replace(
             runtime,
+            name=observation.name,
             status=Status.UNKNOWN,
             details=observation.details,
             latency_ms=observation.latency_ms,
             last_update_s=observation.observed_at_s,
             consecutive_failures=0,
             consecutive_successes=0,
+            source_identifier=observation.source_identifier,
         )
 
     if observation.status == Status.OK:
@@ -57,35 +60,69 @@ def apply_observation(
             next_status = Status.OK
         return replace(
             runtime,
+            name=observation.name,
             status=next_status,
             details=observation.details,
             latency_ms=observation.latency_ms,
             last_update_s=observation.observed_at_s,
             consecutive_failures=0,
             consecutive_successes=successes,
+            source_identifier=observation.source_identifier,
         )
 
     if observation.status == Status.DEG:
         return replace(
             runtime,
+            name=observation.name,
             status=Status.DEG,
             details=observation.details,
             latency_ms=observation.latency_ms,
             last_update_s=observation.observed_at_s,
             consecutive_failures=max(policy.failures_to_degraded, runtime.consecutive_failures + 1),
             consecutive_successes=0,
+            source_identifier=observation.source_identifier,
         )
 
     failures = runtime.consecutive_failures + 1
     return replace(
         runtime,
+        name=observation.name,
         status=_failure_status(failures, policy),
         details=observation.details,
         latency_ms=observation.latency_ms,
         last_update_s=observation.observed_at_s,
         consecutive_failures=failures,
         consecutive_successes=0,
+        source_identifier=observation.source_identifier,
     )
+
+
+def integrate_observations(
+    state: AppState,
+    observations: tuple[CheckObservation, ...],
+    thresholds: TransitionThresholds | None = None,
+    replace_source_identifier: str | None = None,
+) -> AppState:
+    runtimes = {runtime.identifier: runtime for runtime in state.checks}
+    if replace_source_identifier is not None:
+        runtimes = {
+            identifier: runtime
+            for identifier, runtime in runtimes.items()
+            if runtime.source_identifier != replace_source_identifier
+        }
+
+    for observation in observations:
+        current = runtimes.get(
+            observation.identifier,
+            CheckRuntime(
+                identifier=observation.identifier,
+                name=observation.name,
+                source_identifier=observation.source_identifier,
+            ),
+        )
+        runtimes[observation.identifier] = apply_observation(current, observation, thresholds)
+
+    return with_checks(state, tuple(runtimes.values()))
 
 
 def _sorted_selected_index(state: AppState) -> int | None:
@@ -142,3 +179,13 @@ def exit_detail(state: AppState) -> AppState:
 
 def with_diagnostics(state: AppState, lines: tuple[str, ...]) -> AppState:
     return replace(state, mode=AppMode.DIAGNOSTICS, diagnostics=lines)
+
+
+def record_diagnostic_events(
+    state: AppState,
+    events: tuple[DiagnosticEvent, ...],
+    activate: bool = False,
+) -> AppState:
+    lines = append_diagnostic_lines(state.diagnostics, events)
+    mode = AppMode.DIAGNOSTICS if activate and lines else state.mode
+    return replace(state, mode=mode, diagnostics=lines)

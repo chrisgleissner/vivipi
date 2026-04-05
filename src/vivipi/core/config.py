@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from vivipi.core.models import CheckDefinition, CheckType
 
 
 SLUG_PATTERN = re.compile(r"[^a-z0-9]+")
+PLACEHOLDER_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)\}")
 
 
 def slugify(value: str) -> str:
@@ -27,6 +29,22 @@ def build_service_check_id(prefix: str | None, check_name: str) -> str:
     return check_id
 
 
+def _resolve_placeholders(value: object, env: dict[str, str]) -> object:
+    if isinstance(value, dict):
+        return {key: _resolve_placeholders(item, env) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_resolve_placeholders(item, env) for item in value]
+    if isinstance(value, str):
+        def replace_match(match: re.Match[str]) -> str:
+            variable_name = match.group(1)
+            if variable_name not in env:
+                raise KeyError(f"missing environment variable: {variable_name}")
+            return env[variable_name]
+
+        return PLACEHOLDER_PATTERN.sub(replace_match, value)
+    return value
+
+
 def _require_str(item: dict[str, object], key: str) -> str:
     value = item.get(key)
     if not isinstance(value, str) or not value.strip():
@@ -43,9 +61,10 @@ def _validate_timing(interval_s: int, timeout_s: int):
         raise ValueError("timeout_s must be at least 20% smaller than interval_s")
 
 
-def load_checks_config(path: str | Path) -> tuple[CheckDefinition, ...]:
+def load_checks_config(path: str | Path, env: dict[str, str] | None = None) -> tuple[CheckDefinition, ...]:
     config_path = Path(path)
     raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    raw = _resolve_placeholders(raw, env or dict(os.environ))
     checks = raw.get("checks")
     if not isinstance(checks, list):
         raise ValueError("checks must be a list")

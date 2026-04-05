@@ -8,6 +8,7 @@ def parse_service_payload(
     payload: object,
     service_prefix: str | None = None,
     observed_at_s: float | None = None,
+    source_identifier: str | None = None,
 ) -> tuple[CheckObservation, ...]:
     if not isinstance(payload, dict):
         raise ValueError("payload must be an object")
@@ -50,6 +51,7 @@ def parse_service_payload(
                 details=details,
                 latency_ms=float(latency_ms),
                 observed_at_s=observed_at_s,
+                source_identifier=source_identifier,
             )
         )
 

@@ -16,11 +16,17 @@ def test_parse_service_payload_validates_schema_and_builds_stable_ids():
         ]
     }
 
-    observations = parse_service_payload(payload, service_prefix="adb", observed_at_s=123.0)
+    observations = parse_service_payload(
+        payload,
+        service_prefix="adb",
+        observed_at_s=123.0,
+        source_identifier="android-devices",
+    )
 
     assert observations[0].identifier == "adb:pixel-8-pro"
     assert observations[0].status == Status.OK
     assert observations[0].observed_at_s == 123.0
+    assert observations[0].source_identifier == "android-devices"
 
 
 def test_parse_service_payload_accepts_unknown_status_display():
