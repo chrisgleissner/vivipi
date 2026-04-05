@@ -179,13 +179,15 @@ Supports:
 
 - PING
 - HTTP
-- SERVICE endpoints
+- TELNET
+- FTP
+- SERVICE endpoints for complex checks
 
 ## Testing and Quality Gates
 
 - Unified entrypoint: `./build`
 - Test framework: `pytest`
-- Coverage requirement: `>= 91%` branch coverage
+- Coverage requirement: `>= 96` branch coverage
 - Linting: `ruff`
 - CI runs on Python 3.12 and 3.13
 - CI verifies runtime-config rendering, packaging, and the firmware adapter path through `./build ci`
