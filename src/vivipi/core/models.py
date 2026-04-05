@@ -23,6 +23,11 @@ class AppMode(str, Enum):
     DIAGNOSTICS = "diagnostics"
 
 
+class DisplayMode(str, Enum):
+    STANDARD = "standard"
+    COMPACT = "compact"
+
+
 @dataclass(frozen=True)
 class TransitionThresholds:
     failures_to_degraded: int = 1
@@ -93,6 +98,26 @@ class AppState:
     checks: tuple[CheckRuntime, ...] = field(default_factory=tuple)
     selected_id: str | None = None
     mode: AppMode = AppMode.OVERVIEW
+    display_mode: DisplayMode = DisplayMode.STANDARD
+    overview_columns: int = 1
+    column_separator: str = " "
+    row_width: int = 16
     page_size: int = 8
+    page_index: int = 0
     shift_offset: tuple[int, int] = (0, 0)
     diagnostics: tuple[str, ...] = field(default_factory=tuple)
+
+    def __post_init__(self):
+        if self.row_width < 1:
+            raise ValueError("row_width must be positive")
+        if self.overview_columns < 1 or self.overview_columns > 4:
+            raise ValueError("overview_columns must be between 1 and 4")
+        if len(self.column_separator) != 1:
+            raise ValueError("column_separator must be exactly one character")
+        if self.page_size < 1:
+            raise ValueError("page_size must be positive")
+        if self.page_index < 0:
+            raise ValueError("page_index must not be negative")
+        minimum_width = self.overview_columns + ((self.overview_columns - 1) * len(self.column_separator))
+        if self.row_width < minimum_width:
+            raise ValueError("row_width is too small for the configured overview columns")

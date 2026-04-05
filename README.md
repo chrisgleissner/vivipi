@@ -142,9 +142,10 @@ The sample `SERVICE` check in `config/checks.yaml` points at `VIVIPI_SERVICE_BAS
 
 ### Build and Deployment
 
-`config/build-deploy.yaml` is the build-time source of truth for:
+[`./config/build-deploy.yaml`](./config/build-deploy.yaml) is the build-time source of truth for:
 
 - board and display metadata
+- display font sizing, overview mode, column layout, page rotation, and brightness defaults
 - Wi-Fi credentials
 - service endpoint defaults
 - the path to the checks config
@@ -163,6 +164,12 @@ Notes:
 - `service.base_url` is resolved from `VIVIPI_SERVICE_BASE_URL` when you want `SERVICE` checks
 - If `VIVIPI_SERVICE_BASE_URL` is omitted, build-time config keeps only the configured `PING` and `REST` checks
 - When used, the value points to a host address reachable from the Pico over Wi-Fi, such as `http://192.168.1.10:8080/checks`
+- `device.display.mode` accepts `standard` or `compact`
+- `device.display.columns` accepts integer values from `1` to `4`
+- `device.display.column_separator` must be exactly one character and is inserted only between overview columns
+- `device.display.font.width_px` and `device.display.font.height_px` control the fixed-width cell size from 6 to 32 pixels
+- `device.display.page_interval` controls automatic overview page rotation; use `0s` to disable automatic page cycling
+- `device.display.brightness` accepts `low`, `medium`, `high`, `max`, or a raw `0-255` contrast value
 
 ### Checks
 

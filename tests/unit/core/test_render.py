@@ -1,5 +1,5 @@
-from vivipi.core.models import AppMode, AppState, CheckRuntime, Status
-from vivipi.core.render import render_frame
+from vivipi.core.models import AppMode, AppState, CheckRuntime, DisplayMode, Status
+from vivipi.core.render import InvertedSpan, render_frame
 
 
 def make_check(
@@ -34,13 +34,24 @@ def test_overview_paginates_and_inverts_the_selected_row():
         make_check(identifier=name.casefold(), name=name)
         for name in ("Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel", "India")
     )
-    state = AppState(checks=checks, selected_id="india")
+    state = AppState(checks=checks, selected_id="india", page_index=1)
 
     frame = render_frame(state)
 
     assert frame.inverted_row == 0
     assert frame.rows[0].startswith("India")
     assert all(len(row) == 16 for row in frame.rows)
+
+
+def test_render_frame_respects_dynamic_grid_dimensions():
+    checks = tuple(make_check(identifier=name.casefold(), name=name) for name in ("Alpha", "Bravo", "Charlie", "Delta"))
+    state = AppState(checks=checks, selected_id="charlie", row_width=12, page_size=3, page_index=0)
+
+    frame = render_frame(state)
+
+    assert len(frame.rows) == 3
+    assert all(len(row) == 12 for row in frame.rows)
+    assert frame.rows[2].startswith("Charlie")
 
 
 def test_overview_normalizes_selection_when_checks_exist():
@@ -57,6 +68,82 @@ def test_overview_displays_unknown_status_as_question_mark():
     frame = render_frame(state)
 
     assert frame.rows[0].endswith("   ?")
+
+
+def test_standard_single_column_overview_keeps_legacy_output_exactly():
+    state = AppState(
+        checks=(make_check("router", "Router", status=Status.FAIL),),
+        selected_id="router",
+        display_mode=DisplayMode.STANDARD,
+        overview_columns=1,
+    )
+
+    frame = render_frame(state)
+
+    assert frame.rows[0] == "Router      FAIL"
+    assert frame.inverted_row == 0
+    assert frame.inverted_spans == ()
+
+
+def test_compact_mode_shows_all_healthy_checks_without_suffixes_when_no_failures_exist():
+    state = AppState(
+        checks=(
+            make_check("bravo", "Bravo", status=Status.OK),
+            make_check("alpha", "Alpha", status=Status.OK),
+        ),
+        selected_id="alpha",
+        display_mode=DisplayMode.COMPACT,
+        overview_columns=2,
+        column_separator="|",
+        page_size=1,
+    )
+
+    frame = render_frame(state)
+
+    assert frame.rows == ("Alpha   |Bravo  ",)
+    assert frame.inverted_spans == ()
+
+
+def test_compact_mode_filters_to_non_healthy_checks_and_inverts_only_failed_text_span():
+    state = AppState(
+        checks=(
+            make_check("alpha", "Alpha", status=Status.OK),
+            make_check("bravo", "Bravo", status=Status.FAIL),
+            make_check("charlie", "Charlie", status=Status.DEG),
+        ),
+        selected_id="charlie",
+        display_mode=DisplayMode.COMPACT,
+        overview_columns=2,
+        column_separator="|",
+        page_size=1,
+    )
+
+    frame = render_frame(state)
+
+    assert frame.rows == ("BravoX  |Charli!",)
+    assert frame.inverted_spans == (
+        InvertedSpan(row_index=0, start_column=0, end_column=6),
+    )
+
+
+def test_standard_multi_column_layout_uses_exact_column_math_and_no_overflow():
+    state = AppState(
+        checks=(
+            make_check("alpha", "Alpha", status=Status.OK),
+            make_check("bravo", "Bravo", status=Status.UNKNOWN),
+            make_check("charlie", "Charlie", status=Status.DEG),
+        ),
+        selected_id="alpha",
+        display_mode=DisplayMode.STANDARD,
+        overview_columns=3,
+        column_separator="|",
+        page_size=1,
+    )
+
+    frame = render_frame(state)
+
+    assert frame.rows == ("Alpha|Brav?|Cha!",)
+    assert len(frame.rows[0]) == 16
 
 
 def test_detail_view_omits_unavailable_lines():

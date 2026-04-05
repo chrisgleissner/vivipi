@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
 import firmware.runtime as firmware_runtime
-from vivipi.core.models import DiagnosticEvent
+from vivipi.core.models import DiagnosticEvent, DisplayMode
 
 
 class FakeTime:
@@ -74,12 +74,31 @@ def test_build_runtime_app_uses_injected_factories_and_records_wifi_diagnostics(
     called = {}
 
     class FakeApp:
-        def __init__(self, definitions, executor, display, button_reader, input_controller):
+        def __init__(
+            self,
+            definitions,
+            executor,
+            display,
+            button_reader,
+            input_controller,
+            page_interval_s,
+            page_size,
+            row_width,
+            display_mode,
+            overview_columns,
+            column_separator,
+        ):
             called["definitions"] = definitions
             called["executor"] = executor
             called["display"] = display
             called["button_reader"] = button_reader
             called["input_controller"] = input_controller
+            called["page_interval_s"] = page_interval_s
+            called["page_size"] = page_size
+            called["row_width"] = row_width
+            called["display_mode"] = display_mode
+            called["overview_columns"] = overview_columns
+            called["column_separator"] = column_separator
             called["diagnostics"] = None
 
         def inject_diagnostics(self, diagnostics, activate=True):
@@ -92,7 +111,20 @@ def test_build_runtime_app_uses_injected_factories_and_records_wifi_diagnostics(
     definitions = (object(),)
 
     app = firmware_runtime.build_runtime_app(
-        {"device": {"display": {"width_px": 128}, "buttons": {"a": "GP14", "b": "GP15"}}},
+        {
+            "device": {
+                "display": {
+                    "width_px": 128,
+                    "height_px": 64,
+                    "page_interval_s": 15,
+                    "mode": "compact",
+                    "columns": 3,
+                    "column_separator": "|",
+                    "font": {"width_px": 8, "height_px": 8},
+                },
+                "buttons": {"a": "GP14", "b": "GP15"},
+            }
+        },
         input_controller_factory=lambda: input_controller,
         display_factory=lambda config: display,
         button_reader_factory=lambda config, input_controller: button_reader,
@@ -108,6 +140,12 @@ def test_build_runtime_app_uses_injected_factories_and_records_wifi_diagnostics(
     assert called["display"] is display
     assert called["button_reader"] is button_reader
     assert called["input_controller"] is input_controller
+    assert called["page_interval_s"] == 15
+    assert called["page_size"] == 8
+    assert called["row_width"] == 16
+    assert called["display_mode"] == DisplayMode.COMPACT
+    assert called["overview_columns"] == 3
+    assert called["column_separator"] == "|"
     assert called["diagnostics"] == (((DiagnosticEvent(code="WIFI", message="connected"),)), True)
 
 

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
-from vivipi.core import InputController, PixelShiftController, due_checks, integrate_observations, record_diagnostic_events, render_frame, render_reason
-from vivipi.core.models import AppState, CheckDefinition
+from vivipi.core import InputController, PixelShiftController, due_checks, integrate_observations, page_count, record_diagnostic_events, render_frame, render_reason, set_page_index
+from vivipi.core.models import AppMode, AppState, CheckDefinition, DisplayMode
+from vivipi.core.state import overview_checks
 
 
 @dataclass(frozen=True)
@@ -21,15 +22,30 @@ class RuntimeApp:
         button_reader=None,
         input_controller: InputController | None = None,
         shift_controller: PixelShiftController | None = None,
+        page_interval_s: int = 15,
+        page_size: int = 8,
+        row_width: int = 16,
+        display_mode: DisplayMode = DisplayMode.STANDARD,
+        overview_columns: int = 1,
+        column_separator: str = " ",
     ):
+        if page_interval_s < 0:
+            raise ValueError("page_interval_s must not be negative")
         self.definitions = tuple(definitions)
         self.executor = executor
         self.display = display
         self.button_reader = button_reader
         self.input_controller = input_controller or InputController()
         self.shift_controller = shift_controller or PixelShiftController()
+        self.page_interval_s = page_interval_s
         self.last_started_at: dict[str, float] = {}
-        self.state = AppState()
+        self.state = AppState(
+            page_size=page_size,
+            row_width=row_width,
+            display_mode=display_mode,
+            overview_columns=overview_columns,
+            column_separator=column_separator,
+        )
         self.last_rendered_state: AppState | None = None
 
     def inject_diagnostics(self, events: tuple[object, ...], activate: bool = True):
@@ -58,6 +74,22 @@ class RuntimeApp:
         if offset != self.state.shift_offset:
             self.state = replace(self.state, shift_offset=offset)
 
+    def _apply_page_rotation(self, now_s: float):
+        normalized = set_page_index(self.state, self.state.page_index)
+        if normalized != self.state:
+            self.state = normalized
+
+        if self.state.mode != AppMode.OVERVIEW:
+            return
+
+        total_pages = page_count(overview_checks(self.state), self.state.page_size * self.state.overview_columns)
+        if total_pages <= 1 or self.page_interval_s == 0:
+            return
+
+        next_page = int(now_s // self.page_interval_s) % total_pages
+        if next_page != self.state.page_index:
+            self.state = set_page_index(self.state, next_page, select_visible=True)
+
     def tick(self, now_s: float, button_events: tuple[ButtonEvent, ...] | None = None) -> str:
         events = button_events
         if events is None:
@@ -68,6 +100,7 @@ class RuntimeApp:
 
         self._apply_button_events(events)
         self._run_due_checks(now_s)
+        self._apply_page_rotation(now_s)
         self._apply_shift(now_s)
 
         reason = render_reason(self.last_rendered_state, self.state)

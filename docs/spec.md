@@ -1,6 +1,6 @@
 # ViviPi Specification
 
-Version: 1.0
+Version: 1.2
 Status: Active
 
 A minimal, calm, glanceable monitoring system for a 128×64 monochrome display.
@@ -11,19 +11,42 @@ A minimal, calm, glanceable monitoring system for a 128×64 monochrome display.
 
 The system runs on a 128×64 pixel monochrome display (1-bit).
 
-The display is a strict character grid:
+The display is a fixed-width character grid.
+
+Default grid at the default font size:
 
 - 8 rows
 - 16 characters per row
-- Font: fixed 8×8 bitmap
+- Font: fixed 8×8 bitmap scaled into the configured cell size
+
+Display configuration:
+
+- Character cell width and height are configurable from 6 to 32 pixels
+- Visible columns = `floor(128 / cell_width)`
+- Visible rows = `floor(64 / cell_height)`
 
 Rules:
 
 - No anti-aliasing
-- No scaling
-- Pixel-perfect rendering only
+- Monochrome bitmap scaling only
+- Rendering remains deterministic and pixel-aligned
 
 [VIVIPI-DISPLAY-001]
+
+Display brightness MUST be configurable at build time.
+
+- SH1107 contrast range: 0 to 255
+- Default brightness: medium
+
+[VIVIPI-DISPLAY-002]
+
+Overview rendering MUST support configurable modes and multi-column packing.
+
+- `device.display.mode` supports `standard` and `compact`
+- `device.display.columns` supports `1` to `4`
+- `device.display.column_separator` MUST be exactly one character
+
+[VIVIPI-DISPLAY-003]
 
 ---
 
@@ -41,7 +64,7 @@ Rules:
 - STATUS is right-aligned
 - STATUS occupies up to 4 characters
 - NAME is truncated only if necessary using "…"
-- Maximum 8 checks visible at once
+- Maximum visible checks per page equals the number of rows that fit on screen
 
 Example:
 
@@ -52,22 +75,47 @@ Example:
 
 [VIVIPI-UX-GRID-001]
 
+## Compact Overview Layout
+
+Compact overview mode packs multiple checks into each rendered row.
+
+Given `16` total character cells and `C` columns:
+
+- separators = `C - 1`
+- available characters = `16 - separators`
+- base width = `floor(available / C)`
+- remainder = `available % C`
+- the first `remainder` columns use `base width + 1`
+- the remaining columns use `base width`
+
+Per rendered column:
+
+- `OK` displays `NAME`
+- `DEG` displays `NAME!`
+- `FAIL` displays `NAMEX`
+- `UNKNOWN` displays `NAME?`
+- STATUS suffixes are appended with no padding
+- Truncation is hard truncation only, with no ellipsis
+- Separators appear only between columns, never after the last column
+
+[VIVIPI-UX-COLUMNS-001]
+
 ---
 
 # 3. Typography
 
-- The system MUST use a fixed-width 8×8 bitmap font.
-- Each character cell is 8×8 pixels.
+- The system MUST use a fixed-width bitmap font derived from the 8×8 base glyph set.
+- Each character cell uses the configured width and height.
 
 Character rendering rules:
 
-- The bottom row (row 7) and right-most column (column 7) of each character cell SHOULD be treated as spacing.
+- The bottom row and right-most column of each character cell SHOULD be treated as spacing.
 - Glyphs MAY use these pixels only when required for correct shape (e.g. characters such as "Q" or "g").
 
 Layout constraints:
 
-- Exactly 16 characters per row (128 px / 8 px)
-- Exactly 8 rows (64 px / 8 px)
+- Visible columns are derived from the configured character cell width
+- Visible rows are derived from the configured character cell height
 - No text wrapping is allowed
 
 [VIVIPI-UX-TYPO-001]
@@ -222,13 +270,15 @@ Timeout is treated as FAIL.
 # 8. Ordering & Pagination
 
 - Checks are sorted alphabetically by display name
-- Maximum 8 visible per page
+- Maximum visible checks per page equals the number of rows that fit on screen
 - Unlimited total checks supported
 
-If more than 8 checks:
+If more checks exist than fit on the current page:
 
 - Pagination is used
 - Pages are cyclic
+- Default automatic page interval: 15 seconds
+- Automatic page cycling MAY be disabled with a `0s` interval
 
 [VIVIPI-UX-PAGE-001]
 
@@ -245,6 +295,14 @@ Visual indicator:
 - Full row inversion
 
 [VIVIPI-UX-SELECT-001]
+
+In compact overview mode, failed checks invert only the glyph pixels of `NAME + STATUS`.
+
+- Background pixels remain unchanged
+- Padding remains unchanged
+- Separators remain unchanged
+
+[VIVIPI-RENDER-INVERT-001]
 
 ---
 
@@ -273,7 +331,7 @@ Debounce:
 
 Each check has exactly one detail page.
 
-Layout (max 8 rows):
+Layout (max visible rows):
 
 ```
 <CHECK NAME>
@@ -315,7 +373,7 @@ Returning preserves selection.
 - Structured short messages only
 - No raw logs
 - No wrapping
-- Max 8 rows
+- Max visible rows
 
 [VIVIPI-UX-DIAG-001]
 

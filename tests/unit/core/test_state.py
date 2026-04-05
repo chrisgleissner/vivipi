@@ -1,8 +1,9 @@
-from vivipi.core.models import AppState, CheckObservation, CheckRuntime, DiagnosticEvent, Status, TransitionThresholds
+from vivipi.core.models import AppState, CheckObservation, CheckRuntime, DiagnosticEvent, DisplayMode, Status, TransitionThresholds
 from vivipi.core.state import (
     apply_observation,
     integrate_observations,
     move_selection,
+    set_page_index,
     record_diagnostic_events,
     selected_check,
     visible_checks,
@@ -78,14 +79,50 @@ def test_with_checks_preserves_identity_and_falls_back_to_first_visible_check():
     assert replaced.selected_id == "bravo"
 
 
-def test_visible_checks_keeps_selected_check_on_current_page():
+def test_visible_checks_uses_explicit_page_index():
     checks = tuple(make_check(name) for name in ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel", "India"])
-    state = AppState(checks=checks, selected_id="india")
+    state = AppState(checks=checks, selected_id="alpha", page_index=1)
 
     visible = visible_checks(state)
 
-    assert len(visible) == 1
-    assert visible[0].identifier == "india"
+    assert [check.identifier for check in visible] == ["india"]
+
+
+def test_set_page_index_can_keep_selection_visible():
+    checks = tuple(make_check(name) for name in ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel", "India"])
+    state = AppState(checks=checks, selected_id="alpha")
+
+    updated = set_page_index(state, 1, select_visible=True)
+
+    assert updated.page_index == 1
+    assert updated.selected_id == "india"
+
+
+def test_visible_checks_use_page_capacity_when_multiple_columns_are_enabled():
+    checks = tuple(make_check(name) for name in ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot"])
+    state = AppState(checks=checks, selected_id="alpha", overview_columns=2, page_size=2, page_index=1)
+
+    visible = visible_checks(state)
+
+    assert [check.identifier for check in visible] == ["echo", "foxtrot"]
+
+
+def test_with_checks_keeps_selection_visible_in_compact_mode():
+    state = AppState(
+        checks=(make_check("Alpha"), make_check("Bravo")),
+        selected_id="alpha",
+        display_mode=DisplayMode.COMPACT,
+    )
+
+    updated = with_checks(
+        state,
+        (
+            make_check("Alpha", status=Status.OK),
+            make_check("Bravo", status=Status.FAIL),
+        ),
+    )
+
+    assert updated.selected_id == "bravo"
 
 
 def test_unknown_observation_resets_runtime_state():

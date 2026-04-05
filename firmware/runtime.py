@@ -10,7 +10,7 @@ except ImportError:  # pragma: no cover - imported on-device
     time = None
 
 from vivipi.core.input import InputController
-from vivipi.core.models import DiagnosticEvent
+from vivipi.core.models import DiagnosticEvent, DisplayMode
 from vivipi.runtime import RuntimeApp, build_executor, build_runtime_definitions
 
 try:
@@ -75,7 +75,11 @@ def build_runtime_app(
     wifi_connector=connect_wifi,
 ):
     input_controller = input_controller_factory()
-    display = display_factory(config["device"]["display"])
+    display_config = config["device"]["display"]
+    font = display_config.get("font", {}) if isinstance(display_config, dict) else {}
+    font_width = int(font.get("width_px", 8)) if isinstance(font, dict) else 8
+    font_height = int(font.get("height_px", 8)) if isinstance(font, dict) else 8
+    display = display_factory(display_config)
     button_reader = button_reader_factory(config["device"]["buttons"], input_controller=input_controller)
     app = runtime_app_factory(
         definitions=definitions_builder(config),
@@ -83,6 +87,12 @@ def build_runtime_app(
         display=display,
         button_reader=button_reader,
         input_controller=input_controller,
+        page_interval_s=int(display_config.get("page_interval_s", 15)),
+        page_size=max(1, int(display_config.get("height_px", 64)) // font_height),
+        row_width=max(1, int(display_config.get("width_px", 128)) // font_width),
+        display_mode=DisplayMode(str(display_config.get("mode", DisplayMode.STANDARD.value))),
+        overview_columns=int(display_config.get("columns", 1)),
+        column_separator=str(display_config.get("column_separator", " ")),
     )
     diagnostics = wifi_connector(config)
     if diagnostics:

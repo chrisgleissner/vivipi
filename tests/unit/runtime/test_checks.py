@@ -1,5 +1,6 @@
 import sys
 from types import SimpleNamespace
+from urllib.error import HTTPError
 
 import pytest
 
@@ -109,6 +110,56 @@ def test_portable_http_runner_falls_back_to_response_text_when_json_parsing_fail
     result = portable_http_runner("GET", "http://192.0.2.10:8080/checks", 10)
 
     assert result.body == "plain text"
+
+
+def test_portable_http_runner_uses_urllib_fallback_for_success_and_http_error(monkeypatch):
+    monkeypatch.delitem(sys.modules, "urequests", raising=False)
+
+    class FakeSuccessResponse:
+        def __init__(self, body, status_code):
+            self._body = body
+            self._status_code = status_code
+
+        def read(self):
+            return self._body.encode("utf-8")
+
+        def getcode(self):
+            return self._status_code
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_urlopen_success(request, timeout):
+        return FakeSuccessResponse('{"checks": []}', 200)
+
+    import urllib.request
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen_success)
+
+    success = portable_http_runner("GET", "http://192.0.2.10:8080/checks", 10)
+
+    assert success.status_code == 200
+    assert success.body == {"checks": []}
+
+    class FakeErrorResponse:
+        def read(self):
+            return b"plain error"
+
+        def close(self):
+            return None
+
+    def fake_urlopen_error(request, timeout):
+        raise HTTPError(request.full_url, 503, "down", hdrs=None, fp=FakeErrorResponse())
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen_error)
+
+    failure = portable_http_runner("GET", "http://192.0.2.10:8080/checks", 10)
+
+    assert failure.status_code == 503
+    assert failure.body == "plain error"
 
 
 def test_portable_ping_runner_uses_uping_when_available(monkeypatch):

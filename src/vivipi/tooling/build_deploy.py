@@ -18,6 +18,23 @@ from vivipi.core.models import CheckDefinition, CheckType
 
 PLACEHOLDER_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)\}")
 OPTIONAL_PLACEHOLDERS = frozenset({"VIVIPI_SERVICE_BASE_URL"})
+DURATION_PATTERN = re.compile(r"^(\d+)(?:\s*s)?$", re.IGNORECASE)
+DEFAULT_FONT_WIDTH_PX = 8
+DEFAULT_FONT_HEIGHT_PX = 8
+MIN_FONT_SIZE_PX = 6
+MAX_FONT_SIZE_PX = 32
+DEFAULT_PAGE_INTERVAL_S = 15
+DEFAULT_BRIGHTNESS = 128
+DEFAULT_DISPLAY_MODE = "standard"
+DEFAULT_COLUMNS = 1
+DEFAULT_COLUMN_SEPARATOR = " "
+DISPLAY_MODES = frozenset({"standard", "compact"})
+BRIGHTNESS_PRESETS = {
+    "low": 64,
+    "medium": DEFAULT_BRIGHTNESS,
+    "high": 192,
+    "max": 255,
+}
 
 
 def _resolve_placeholders(value: object, env: dict[str, str], optional_placeholders: frozenset[str] = frozenset()) -> object:
@@ -51,7 +68,138 @@ def load_build_deploy_settings(path: str | Path, env: dict[str, str] | None = No
         if isinstance(base_url, str) and not base_url.strip():
             service.pop("base_url", None)
 
+    _normalize_device_display_settings(resolved)
+
     return resolved
+
+
+def _parse_duration_s(value: object, context: str) -> int:
+    if isinstance(value, int):
+        seconds = value
+    elif isinstance(value, float) and value.is_integer():
+        seconds = int(value)
+    elif isinstance(value, str):
+        match = DURATION_PATTERN.fullmatch(value.strip())
+        if match is None:
+            raise ValueError(f"{context} must be an integer number of seconds or use the '<seconds>s' format")
+        seconds = int(match.group(1))
+    else:
+        raise ValueError(f"{context} must be an integer number of seconds")
+
+    if seconds < 0:
+        raise ValueError(f"{context} must not be negative")
+    return seconds
+
+
+def _parse_font_size_px(value: object, context: str, default: int) -> int:
+    if value is None:
+        size = default
+    elif isinstance(value, int):
+        size = value
+    elif isinstance(value, float) and value.is_integer():
+        size = int(value)
+    elif isinstance(value, str) and value.strip().isdigit():
+        size = int(value.strip())
+    else:
+        raise ValueError(f"{context} must be an integer number of pixels")
+
+    if size < MIN_FONT_SIZE_PX or size > MAX_FONT_SIZE_PX:
+        raise ValueError(f"{context} must be between {MIN_FONT_SIZE_PX} and {MAX_FONT_SIZE_PX} pixels")
+    return size
+
+
+def _parse_brightness(value: object) -> int:
+    if value is None:
+        return DEFAULT_BRIGHTNESS
+    if isinstance(value, str):
+        normalized = value.strip().casefold()
+        if normalized in BRIGHTNESS_PRESETS:
+            return BRIGHTNESS_PRESETS[normalized]
+        if normalized.isdigit():
+            value = int(normalized)
+        else:
+            raise ValueError("device.display.brightness must be 0-255 or one of low, medium, high, max")
+
+    if isinstance(value, int):
+        brightness = value
+    elif isinstance(value, float) and value.is_integer():
+        brightness = int(value)
+    else:
+        raise ValueError("device.display.brightness must be 0-255 or one of low, medium, high, max")
+
+    if brightness < 0 or brightness > 255:
+        raise ValueError("device.display.brightness must be between 0 and 255")
+    return brightness
+
+
+def _parse_display_mode(value: object) -> str:
+    if value is None:
+        return DEFAULT_DISPLAY_MODE
+    if not isinstance(value, str):
+        raise ValueError("device.display.mode must be 'standard' or 'compact'")
+
+    normalized = value.strip().casefold()
+    if normalized not in DISPLAY_MODES:
+        raise ValueError("device.display.mode must be 'standard' or 'compact'")
+    return normalized
+
+
+def _parse_columns(value: object) -> int:
+    if value is None:
+        return DEFAULT_COLUMNS
+    if isinstance(value, int):
+        columns = value
+    elif isinstance(value, float) and value.is_integer():
+        columns = int(value)
+    elif isinstance(value, str) and value.strip().isdigit():
+        columns = int(value.strip())
+    else:
+        raise ValueError("device.display.columns must be an integer from 1 to 4")
+
+    if columns < 1 or columns > 4:
+        raise ValueError("device.display.columns must be an integer from 1 to 4")
+    return columns
+
+
+def _parse_column_separator(value: object) -> str:
+    if value is None:
+        return DEFAULT_COLUMN_SEPARATOR
+    if not isinstance(value, str):
+        raise ValueError("device.display.column_separator must be exactly one character")
+    if len(value) != 1:
+        raise ValueError("device.display.column_separator must be exactly one character")
+    return value
+
+
+def _normalize_device_display_settings(settings: dict[str, object]):
+    device = settings.get("device")
+    if not isinstance(device, dict):
+        return
+
+    display = device.get("display")
+    if not isinstance(display, dict):
+        return
+
+    font_config = display.get("font")
+    if font_config is None:
+        font = {}
+    elif isinstance(font_config, dict):
+        font = dict(font_config)
+    else:
+        raise ValueError("device.display.font must be a mapping")
+
+    display["font"] = {
+        "width_px": _parse_font_size_px(font.get("width_px"), "device.display.font.width_px", DEFAULT_FONT_WIDTH_PX),
+        "height_px": _parse_font_size_px(font.get("height_px"), "device.display.font.height_px", DEFAULT_FONT_HEIGHT_PX),
+    }
+
+    interval_value = display.get("page_interval", display.get("page_interval_s", DEFAULT_PAGE_INTERVAL_S))
+    display["page_interval_s"] = _parse_duration_s(interval_value, "device.display.page_interval")
+    display.pop("page_interval", None)
+    display["brightness"] = _parse_brightness(display.get("brightness"))
+    display["mode"] = _parse_display_mode(display.get("mode"))
+    display["columns"] = _parse_columns(display.get("columns"))
+    display["column_separator"] = _parse_column_separator(display.get("column_separator"))
 
 
 def _check_to_dict(check: CheckDefinition) -> dict[str, object]:

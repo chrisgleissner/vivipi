@@ -7,6 +7,12 @@ import pytest
 from vivipi.core.models import CheckDefinition, CheckType
 from vivipi.tooling import build_deploy
 from vivipi.tooling.build_deploy import (
+    _parse_brightness,
+    _parse_column_separator,
+    _parse_columns,
+    _parse_display_mode,
+    _parse_duration_s,
+    _parse_font_size_px,
     build_firmware_bundle,
     deploy_firmware,
     load_build_deploy_settings,
@@ -54,6 +60,17 @@ checks:
                 "  buttons:",
                 "    a: GP14",
                 "    b: GP15",
+                "  display:",
+                "    width_px: 128",
+                "    height_px: 64",
+                "    brightness: medium",
+                "    page_interval: 15s",
+                "    mode: standard",
+                "    columns: 1",
+                "    column_separator: ' '",
+                "    font:",
+                "      width_px: 8",
+                "      height_px: 8",
                 "wifi:",
                 "  ssid: ${VIVIPI_WIFI_SSID}",
                 "  password: ${VIVIPI_WIFI_PASSWORD}",
@@ -78,6 +95,12 @@ def test_load_build_deploy_settings_substitutes_environment_placeholders(tmp_pat
     assert settings["wifi"]["ssid"] == "TestWifi"
     assert settings["wifi"]["password"] == "TestPassword"
     assert settings["service"]["base_url"] == FIXTURE_ENV["VIVIPI_SERVICE_BASE_URL"]
+    assert settings["device"]["display"]["font"] == {"width_px": 8, "height_px": 8}
+    assert settings["device"]["display"]["page_interval_s"] == 15
+    assert settings["device"]["display"]["brightness"] == 128
+    assert settings["device"]["display"]["mode"] == "standard"
+    assert settings["device"]["display"]["columns"] == 1
+    assert settings["device"]["display"]["column_separator"] == " "
 
 
 def test_write_runtime_config_embeds_wifi_and_checks(tmp_path: Path):
@@ -133,6 +156,162 @@ def test_load_build_deploy_settings_allows_missing_service_base_url(tmp_path: Pa
 
     assert settings["wifi"]["ssid"] == "TestWifi"
     assert settings["service"] == {}
+
+
+def test_load_build_deploy_settings_validates_display_limits(tmp_path: Path):
+    config_path = tmp_path / "build-deploy.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "device:",
+                "  display:",
+                "    width_px: 128",
+                "    height_px: 64",
+                "    page_interval: nope",
+                "    font:",
+                "      width_px: 4",
+                "      height_px: 8",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="device.display.font.width_px"):
+        load_build_deploy_settings(config_path, env={})
+
+
+def test_load_build_deploy_settings_supports_numeric_brightness_and_disabled_paging(tmp_path: Path):
+    config_path = tmp_path / "build-deploy.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "device:",
+                "  display:",
+                "    width_px: 128",
+                "    height_px: 64",
+                "    brightness: 32",
+                "    page_interval: 0s",
+                "    font:",
+                "      width_px: 6",
+                "      height_px: 10",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    settings = load_build_deploy_settings(config_path, env={})
+
+    assert settings["device"]["display"]["brightness"] == 32
+    assert settings["device"]["display"]["page_interval_s"] == 0
+    assert settings["device"]["display"]["font"] == {"width_px": 6, "height_px": 10}
+
+
+def test_load_build_deploy_settings_validates_display_mode_columns_and_separator(tmp_path: Path):
+    config_path = tmp_path / "build-deploy.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "device:",
+                "  display:",
+                "    width_px: 128",
+                "    height_px: 64",
+                "    mode: dense",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="device.display.mode"):
+        load_build_deploy_settings(config_path, env={})
+
+
+def test_load_build_deploy_settings_rejects_invalid_column_count(tmp_path: Path):
+    config_path = tmp_path / "build-deploy.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "device:",
+                "  display:",
+                "    width_px: 128",
+                "    height_px: 64",
+                "    mode: compact",
+                "    columns: 5",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="device.display.columns"):
+        load_build_deploy_settings(config_path, env={})
+
+
+def test_load_build_deploy_settings_rejects_invalid_column_separator(tmp_path: Path):
+    config_path = tmp_path / "build-deploy.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "device:",
+                "  display:",
+                "    width_px: 128",
+                "    height_px: 64",
+                "    mode: compact",
+                "    columns: 2",
+                "    column_separator: '::'",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="device.display.column_separator"):
+        load_build_deploy_settings(config_path, env={})
+
+
+def test_load_build_deploy_settings_defaults_overview_fields_when_omitted(tmp_path: Path):
+    config_path = tmp_path / "build-deploy.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "device:",
+                "  display:",
+                "    width_px: 128",
+                "    height_px: 64",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    settings = load_build_deploy_settings(config_path, env={})
+
+    assert settings["device"]["display"]["mode"] == "standard"
+    assert settings["device"]["display"]["columns"] == 1
+    assert settings["device"]["display"]["column_separator"] == " "
+
+
+def test_build_deploy_helper_parsers_cover_string_float_and_error_paths():
+    assert _parse_duration_s(15.0, "duration") == 15
+    assert _parse_font_size_px("10", "font", 8) == 10
+    assert _parse_brightness("high") == 192
+    assert _parse_display_mode(" Compact ") == "compact"
+    assert _parse_columns("4") == 4
+    assert _parse_column_separator("|") == "|"
+
+    with pytest.raises(ValueError, match="must not be negative"):
+        _parse_duration_s(-1, "duration")
+
+    with pytest.raises(ValueError, match="integer number of pixels"):
+        _parse_font_size_px("abc", "font", 8)
+
+    with pytest.raises(ValueError, match="0-255"):
+        _parse_brightness("bright")
+
+    with pytest.raises(ValueError, match="standard' or 'compact"):
+        _parse_display_mode(3)
+
+    with pytest.raises(ValueError, match="integer from 1 to 4"):
+        _parse_columns("abc")
+
+    with pytest.raises(ValueError, match="exactly one character"):
+        _parse_column_separator(1)
 
 
 def test_render_device_runtime_config_uses_empty_project_when_omitted():

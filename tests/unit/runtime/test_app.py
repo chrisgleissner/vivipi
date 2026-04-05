@@ -1,6 +1,6 @@
 from vivipi.core.execution import CheckExecutionResult
 from vivipi.core.input import Button
-from vivipi.core.models import CheckDefinition, CheckObservation, CheckType, DiagnosticEvent, Status
+from vivipi.core.models import CheckDefinition, CheckObservation, CheckType, DiagnosticEvent, DisplayMode, Status
 from vivipi.runtime import ButtonEvent, RuntimeApp
 
 
@@ -72,6 +72,80 @@ def test_runtime_app_renders_when_shift_changes_without_other_state_changes():
     assert reason == "shift"
     assert len(display.frames) == 2
     assert display.frames[-1].shift_offset == (1, 0)
+
+
+def test_runtime_app_rotates_pages_when_interval_elapsed():
+    display = FakeDisplay()
+    definitions = tuple(make_definition(identifier) for identifier in ("alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india"))
+
+    def executor(definition, now_s):
+        return CheckExecutionResult(
+            source_identifier=definition.identifier,
+            observations=(
+                CheckObservation(
+                    identifier=definition.identifier,
+                    name=definition.name,
+                    status=Status.OK,
+                    observed_at_s=now_s,
+                ),
+            ),
+        )
+
+    app = RuntimeApp(
+        definitions=definitions,
+        executor=executor,
+        display=display,
+        page_interval_s=15,
+    )
+
+    app.tick(0.0)
+    reason = app.tick(15.0)
+
+    assert reason == "state"
+    assert app.state.page_index == 1
+    assert app.state.selected_id == "india"
+    assert display.frames[-1].rows[0].startswith("India")
+
+
+def test_runtime_app_rotates_over_filtered_compact_pages_only():
+    display = FakeDisplay()
+    definitions = tuple(make_definition(identifier) for identifier in ("alpha", "bravo", "charlie", "delta", "echo"))
+    statuses = {
+        "alpha": Status.OK,
+        "bravo": Status.FAIL,
+        "charlie": Status.OK,
+        "delta": Status.FAIL,
+        "echo": Status.FAIL,
+    }
+
+    def executor(definition, now_s):
+        return CheckExecutionResult(
+            source_identifier=definition.identifier,
+            observations=(
+                CheckObservation(
+                    identifier=definition.identifier,
+                    name=definition.name,
+                    status=statuses[definition.identifier],
+                    observed_at_s=now_s,
+                ),
+            ),
+        )
+
+    app = RuntimeApp(
+        definitions=definitions,
+        executor=executor,
+        display=display,
+        page_interval_s=15,
+        display_mode=DisplayMode.COMPACT,
+        overview_columns=1,
+        page_size=2,
+    )
+
+    app.tick(0.0)
+    app.tick(15.0)
+
+    assert app.state.page_index == 1
+    assert display.frames[-1].rows[0].startswith("Echo")
 
 
 def test_runtime_app_applies_button_events_and_activates_diagnostics():

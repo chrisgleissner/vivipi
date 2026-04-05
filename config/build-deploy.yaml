@@ -16,6 +16,14 @@ device:
     height_px: 64
     interface: spi
     spi_mode: 3
+    mode: standard
+    columns: 2
+    column_separator: " "
+    brightness: compact
+    page_interval: 15s
+    font:
+      width_px: 16
+      height_px: 16
     pins:
       vcc: VSYS
       gnd: GND
