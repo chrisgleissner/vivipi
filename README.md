@@ -7,6 +7,9 @@
 
 ViviPi is a glanceable monitoring system for a [Raspberry Pi Pico 2W](https://pip-assets.raspberrypi.com/categories/1088-raspberry-pi-pico-2-w/documents/RP-008304-DS-2-pico-2-w-datasheet.pdf?disposition=inline) paired with a [128x64 monochrome OLED](https://www.waveshare.com/wiki/Pico-OLED-1.3) driven by SH1107.
 
+> [!NOTE]
+> This project is under active development. Some documented features may not yet be fully functional.
+
 It implements the full product spec in `docs/spec.md`: a strict 16x8 character grid, deterministic rendering, identity-based selection, periodic `PING`/`REST`/`SERVICE` checks, compact diagnostics, and a thin MicroPython runtime path.
 
 The codebase is split into a pure core, a testable runtime layer, thin firmware adapters, host-side services, and build tooling:
