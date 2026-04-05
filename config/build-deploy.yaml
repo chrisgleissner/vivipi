@@ -19,7 +19,7 @@ device:
     mode: standard
     columns: 2
     column_separator: " "
-    brightness: compact
+    brightness: medium
     page_interval: 15s
     font:
       width_px: 16

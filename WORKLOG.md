@@ -10,4 +10,6 @@
 - 2026-04-05T21:08:29+01:00 Built firmware artifacts under `artifacts/release/`, including `vivipi-firmware-bundle.zip`, `vivipi-device-filesystem.zip`, and `display-validation-snapshots.txt`.
 - 2026-04-05T21:08:29+01:00 Installed `mpremote` in the project virtualenv and retried deploy. Deployment remains blocked because `/dev/ttyACM0` is not accessible from this environment (`mpremote: failed to access /dev/ttyACM0`).
 - 2026-04-05T21:08:29+01:00 Captured deterministic renderer snapshots for `standard` and `compact` modes across `1` to `4` columns in `artifacts/release/display-validation-snapshots.txt` as non-hardware evidence for layout, truncation, and failed-only inversion spans.
+- 2026-04-05T21:25:23+01:00 Reproduced the failing GitHub Actions `./build ci` workflow locally. Root cause was an invalid checked-in sample config value: `device.display.brightness: compact` in `config/build-deploy.yaml`.
+- 2026-04-05T21:25:23+01:00 Restored `device.display.brightness` to `medium` and reran `./build ci` with CI-like environment variables. The full local CI entrypoint now passes with `142` tests green and `93.38%` branch coverage.
 - 2026-04-05T21:01:38+01:00 Replaced the SH1107 text draw path with a pure framebuffer renderer and added unit coverage for layout math, filtering, runtime wiring, and byte-level inversion.
