@@ -30,6 +30,7 @@ jobs:
           PYTHON_BIN: python
           VIVIPI_WIFI_SSID: ci-ssid
           VIVIPI_WIFI_PASSWORD: ci-password
+          VIVIPI_SERVICE_BASE_URL: http://192.0.2.10:8080/checks
         run: ./build ci --venv .venv-${{ matrix.python-version }}
 
       - name: Upload coverage to Codecov

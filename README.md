@@ -12,9 +12,10 @@ ViviPi is a calm, glanceable monitoring system for a [Raspberry Pi Pico 2W](http
 
 Current architecture:
 
-- Pure core in `src/vivipi/core` for rendering, selection, input semantics, pagination, and burn-in shift
+- Pure core in `src/vivipi/core` for rendering, scheduling, state reduction, diagnostics, and selection semantics
+- CPython-testable runtime orchestration in `src/vivipi/runtime`
 - Host-side services in `src/vivipi/services`
-- Firmware scaffold in `firmware/`
+- Thin device adapters in `firmware/` for SH1107 output, button polling, and Wi-Fi bootstrap
 - Build and release tooling in `src/vivipi/tooling`
 
 ## Features
@@ -31,21 +32,22 @@ Current architecture:
 - 16x8 character-grid rendering model, including idle, overview, detail, and diagnostics frames
 - Identity-based selection and page visibility logic
 - Input debounce and auto-repeat behavior in the pure core
-- Config loading and runtime-config rendering from YAML
+- Deterministic due-check scheduling and execution orchestration for `PING`, `REST`, and `SERVICE`
+- Runtime diagnostics pipeline that produces compact diagnostics rows and activates diagnostics mode on runtime faults
+- Config loading and runtime-config rendering from YAML and environment placeholders
+- Thin firmware adapters for SH1107 rendering, button polling, and Wi-Fi bootstrap
+- `./build deploy` support via `mpremote` for copying the built device filesystem to a Pico 2W
 - Default Vivi Service exposing ADB-connected devices as service checks over HTTP
 - CI with tests, branch-coverage enforcement, Codecov upload, and tagged release publishing
+- Release assets for the device filesystem bundle plus a pinned MicroPython download reference
 
-## Not Yet Implemented
+## Remaining Risks
 
-- SH1107 display driver and actual pixel output on the Pico 2W
-- GPIO button polling and hardware debounce wiring
-- Wi-Fi connection/bootstrap on-device
-- Periodic PING, REST, and SERVICE check execution runtime
-- End-to-end state-machine orchestration on device
-- Diagnostics production pipeline
-- Board flashing from the `./build deploy` command
+- Physical Pico 2W validation is still required for the on-device `uping`, `urequests`, and SH1107 stack
+- `./build deploy` copies files with `mpremote`; it does not flash a UF2 image onto a blank board
+- The supported install flow still depends on a reachable host service address and working Wi-Fi credentials
 
-The current firmware entrypoint in `firmware/main.py` only loads `config.json` and prints the configured board name.
+The firmware entrypoint in `firmware/main.py` now delegates to the runtime loop in `firmware/runtime.py`.
 
 ## Hardware Target
 
@@ -64,6 +66,8 @@ The current firmware entrypoint in `firmware/main.py` only loads `config.json` a
 | CS     | GP9  |
 | DC     | GP8  |
 | RST    | GP12 |
+| BTN A  | GP14 |
+| BTN B  | GP15 |
 
 ## Quick Start
 
@@ -74,12 +78,14 @@ Requirements:
 - Python 3.12+
 - `python3 -m venv`
 - `adb` if you want to use the default service against connected Android devices
+- `mpremote` if you want `./build deploy` to copy files onto a Pico 2W
 
-1. Set Wi-Fi credentials for runtime-config generation.
+1. Set Wi-Fi credentials and an explicit host-side service URL that the Pico can reach.
 
 ```bash
 export VIVIPI_WIFI_SSID="your-wifi-name"
 export VIVIPI_WIFI_PASSWORD="your-wifi-password"
+export VIVIPI_SERVICE_BASE_URL="http://192.168.1.10:8080/checks"
 ```
 
 2. Install dependencies and run the local validation path.
@@ -94,19 +100,29 @@ export VIVIPI_WIFI_PASSWORD="your-wifi-password"
 ./build service --host 0.0.0.0 --port 8080
 ```
 
-4. Build the current firmware bundle.
+4. Build the current firmware bundle and filesystem assets.
 
 ```bash
 ./build build-firmware
 ```
 
-5. If you want a rendered runtime config without building the full bundle, generate it directly.
+5. Flash MicroPython onto the Pico 2W if the board is blank.
+
+Use the pinned reference written to `artifacts/release/pico2w-micropython.txt`, or the matching asset from a GitHub release, to pick the correct Pico 2W download page.
+
+6. Deploy the built device filesystem onto the Pico.
+
+```bash
+./build deploy --device-port /dev/ttyACM0
+```
+
+7. If you want a rendered runtime config without building the full bundle, generate it directly.
 
 ```bash
 ./build render-config
 ```
 
-At the moment, `./build deploy` only extracts the generated bundle into a target directory. It does not flash files onto a Pico 2W.
+`./build deploy` copies the prepared filesystem onto the board with `mpremote`. It does not flash the MicroPython UF2 itself.
 
 ## Build Tooling
 
@@ -123,7 +139,7 @@ The `./build` script is the canonical entrypoint.
 ./build render-config
 ./build build-firmware
 ./build release-assets
-./build deploy --deploy-dir /tmp/vivipi-device
+./build deploy --device-port /dev/ttyACM0
 ./build service --host 0.0.0.0 --port 8080
 ```
 
@@ -132,8 +148,8 @@ Generated artifacts are written under `artifacts/`.
 Important behavior notes:
 
 - `./build render-config` writes `artifacts/device/config.json`
-- `./build build-firmware` writes the release bundle under `artifacts/release`
-- `./build deploy` currently extracts the bundle into a target directory; it does not flash the Pico
+- `./build build-firmware` writes `vivipi-firmware-bundle.zip`, `vivipi-device-filesystem.zip`, `pico2w-micropython.txt`, and the unpacked `vivipi-device-fs/` tree under `artifacts/release`
+- `./build deploy` copies the unpacked `vivipi-device-fs/` tree onto the Pico with `mpremote`
 
 ## Running the Default Vivi Service
 
@@ -168,9 +184,9 @@ wifi:
 
 Important:
 
-- The checked-in `service.base_url` default is `http://127.0.0.1:8080/checks`
-- That loopback address is suitable for local host testing only
-- For real Pico 2W deployment, replace it with a host address reachable over Wi-Fi
+- `service.base_url` is resolved from `VIVIPI_SERVICE_BASE_URL`
+- The sample `SERVICE` check target in `config/checks.yaml` uses the same value
+- The value must point to a host address reachable from the Pico over Wi-Fi; do not use `127.0.0.1`
 
 ### Checks
 
@@ -196,10 +212,12 @@ Supports:
 Tagging with a x.y.z version triggers a release containing:
 
 - Python wheel and source distribution
-- Zipped MicroPython source bundle containing `boot.py`, `main.py`, `config.json`, and the `vivipi` package
+- Zipped MicroPython source bundle containing the firmware files, `config.json`, and the `vivipi` package
+- Zipped device filesystem bundle ready for `mpremote fs cp`
+- `pico2w-micropython.txt` with the supported Pico 2W MicroPython download reference
 - Sample configuration files
 
-The current release workflow does not produce a UF2 image.
+The release workflow does not produce a UF2 image; it publishes the filesystem assets plus the pinned download reference used by the supported install flow.
 
 ## Repository Layout
 

@@ -8,10 +8,19 @@ from vivipi.core.models import CheckDefinition, CheckType
 from vivipi.tooling import build_deploy
 from vivipi.tooling.build_deploy import (
     build_firmware_bundle,
+    deploy_firmware,
     load_build_deploy_settings,
     render_device_runtime_config,
+    write_install_manifest,
     write_runtime_config,
 )
+
+
+FIXTURE_ENV = {
+    "VIVIPI_WIFI_SSID": "TestWifi",
+    "VIVIPI_WIFI_PASSWORD": "TestPassword",
+    "VIVIPI_SERVICE_BASE_URL": "http://192.0.2.10:8080/checks",
+}
 
 
 def write_fixture_files(tmp_path: Path) -> Path:
@@ -30,18 +39,27 @@ checks:
 
     config_path = tmp_path / "build-deploy.yaml"
     config_path.write_text(
-        """
-project:
-  name: vivipi
-device:
-  board: pico2w
-wifi:
-  ssid: ${VIVIPI_WIFI_SSID}
-  password: ${VIVIPI_WIFI_PASSWORD}
-service:
-  base_url: http://127.0.0.1:8080/checks
-checks_config: checks.yaml
-""".strip(),
+        "\n".join(
+            [
+                "project:",
+                "  name: vivipi",
+                "device:",
+                "  board: pico2w",
+                "  micropython_port: /dev/ttyACM0",
+                "  micropython:",
+                "    version: 1.25.0",
+                "    download_page: https://micropython.org/download/RPI_PICO2_W/",
+                "  buttons:",
+                "    a: GP14",
+                "    b: GP15",
+                "wifi:",
+                "  ssid: ${VIVIPI_WIFI_SSID}",
+                "  password: ${VIVIPI_WIFI_PASSWORD}",
+                "service:",
+                "  base_url: ${VIVIPI_SERVICE_BASE_URL}",
+                "checks_config: checks.yaml",
+            ]
+        ),
         encoding="utf-8",
     )
     return config_path
@@ -52,11 +70,12 @@ def test_load_build_deploy_settings_substitutes_environment_placeholders(tmp_pat
 
     settings = load_build_deploy_settings(
         config_path,
-        env={"VIVIPI_WIFI_SSID": "TestWifi", "VIVIPI_WIFI_PASSWORD": "TestPassword"},
+        env=FIXTURE_ENV,
     )
 
     assert settings["wifi"]["ssid"] == "TestWifi"
     assert settings["wifi"]["password"] == "TestPassword"
+    assert settings["service"]["base_url"] == FIXTURE_ENV["VIVIPI_SERVICE_BASE_URL"]
 
 
 def test_write_runtime_config_embeds_wifi_and_checks(tmp_path: Path):
@@ -66,7 +85,7 @@ def test_write_runtime_config_embeds_wifi_and_checks(tmp_path: Path):
     write_runtime_config(
         config_path,
         output_path,
-        env={"VIVIPI_WIFI_SSID": "TestWifi", "VIVIPI_WIFI_PASSWORD": "TestPassword"},
+        env=FIXTURE_ENV,
     )
     rendered = json.loads(output_path.read_text(encoding="utf-8"))
 
@@ -79,7 +98,7 @@ def test_build_firmware_bundle_creates_a_releaseable_zip_archive(tmp_path: Path)
     archive_path = build_firmware_bundle(
         config_path,
         tmp_path / "release",
-        env={"VIVIPI_WIFI_SSID": "TestWifi", "VIVIPI_WIFI_PASSWORD": "TestPassword"},
+        env=FIXTURE_ENV,
     )
 
     assert archive_path.exists()
@@ -87,22 +106,26 @@ def test_build_firmware_bundle_creates_a_releaseable_zip_archive(tmp_path: Path)
         names = set(archive.namelist())
     assert "boot.py" in names
     assert "config.json" in names
+    assert "display.py" in names
+    assert "input.py" in names
     assert "main.py" in names
     assert "vivipi/__init__.py" in names
+    assert (tmp_path / "release" / "vivipi-device-filesystem.zip").exists()
+    assert (tmp_path / "release" / "pico2w-micropython.txt").exists()
 
 
 def test_load_build_deploy_settings_requires_all_environment_placeholders(tmp_path: Path):
     config_path = write_fixture_files(tmp_path)
 
     with pytest.raises(KeyError, match="VIVIPI_WIFI_PASSWORD"):
-        load_build_deploy_settings(config_path, env={"VIVIPI_WIFI_SSID": "TestWifi"})
+        load_build_deploy_settings(config_path, env={"VIVIPI_WIFI_SSID": "TestWifi", "VIVIPI_SERVICE_BASE_URL": "http://192.0.2.10:8080/checks"})
 
 
 def test_render_device_runtime_config_uses_empty_project_when_omitted():
     settings = {
-        "device": {"board": "pico2w"},
+        "device": {"board": "pico2w", "buttons": {"a": "GP14", "b": "GP15"}},
         "wifi": {"ssid": "wifi", "password": "secret"},
-        "service": {"base_url": "http://127.0.0.1:8080/checks"},
+        "service": {"base_url": "http://192.0.2.10:8080/checks"},
     }
     checks = (
         CheckDefinition(
@@ -129,7 +152,7 @@ wifi:
   ssid: ${VIVIPI_WIFI_SSID}
   password: ${VIVIPI_WIFI_PASSWORD}
 service:
-  base_url: http://127.0.0.1:8080/checks
+    base_url: ${VIVIPI_SERVICE_BASE_URL}
 """.strip(),
         encoding="utf-8",
     )
@@ -138,7 +161,7 @@ service:
         write_runtime_config(
             config_path,
             tmp_path / "config.json",
-            env={"VIVIPI_WIFI_SSID": "TestWifi", "VIVIPI_WIFI_PASSWORD": "TestPassword"},
+                        env=FIXTURE_ENV,
         )
 
 
@@ -172,3 +195,74 @@ def test_build_deploy_main_dispatches_build_firmware(monkeypatch, tmp_path: Path
 
     assert exit_code == 0
     assert called == {"config": "config.yaml", "output_dir": "release-dir"}
+
+
+def test_write_install_manifest_records_supported_install_metadata(tmp_path: Path):
+    output_path = tmp_path / "pico2w-micropython.txt"
+
+    write_install_manifest(
+        {
+            "device": {
+                "board": "pico2w",
+                "micropython_port": "/dev/ttyACM0",
+                "micropython": {
+                    "version": "1.25.0",
+                    "download_page": "https://micropython.org/download/RPI_PICO2_W/",
+                },
+            }
+        },
+        output_path,
+    )
+
+    content = output_path.read_text(encoding="utf-8")
+
+    assert "micropython_version: 1.25.0" in content
+    assert "download_page: https://micropython.org/download/RPI_PICO2_W/" in content
+
+
+def test_deploy_firmware_copies_files_via_mpremote(tmp_path: Path):
+    config_path = write_fixture_files(tmp_path)
+    commands = []
+
+    deploy_firmware(
+        config_path,
+        tmp_path / "release",
+        env=FIXTURE_ENV,
+        port="/dev/ttyUSB0",
+        run_command=lambda command, check: commands.append(command),
+    )
+
+    assert any(command[:4] == ["mpremote", "connect", "/dev/ttyUSB0", "fs"] for command in commands)
+    assert any(command[-1] == ":boot.py" for command in commands)
+    assert any(command[-1] == ":config.json" for command in commands)
+
+
+def test_deploy_firmware_reports_missing_mpremote(tmp_path: Path):
+    config_path = write_fixture_files(tmp_path)
+
+    with pytest.raises(RuntimeError, match="mpremote"):
+        deploy_firmware(
+            config_path,
+            tmp_path / "release",
+            env=FIXTURE_ENV,
+            port="/dev/ttyUSB0",
+            run_command=lambda command, check: (_ for _ in ()).throw(FileNotFoundError("mpremote")),
+        )
+
+
+def test_build_deploy_main_dispatches_deploy_firmware(monkeypatch):
+    called = {}
+
+    def fake_deploy_firmware(config_path, output_dir, port=None):
+        called["config"] = config_path
+        called["output_dir"] = output_dir
+        called["port"] = port
+
+    monkeypatch.setattr(build_deploy, "deploy_firmware", fake_deploy_firmware)
+
+    exit_code = build_deploy.main(
+        ["deploy-firmware", "--config", "config.yaml", "--output-dir", "release-dir", "--port", "/dev/ttyUSB0"]
+    )
+
+    assert exit_code == 0
+    assert called == {"config": "config.yaml", "output_dir": "release-dir", "port": "/dev/ttyUSB0"}

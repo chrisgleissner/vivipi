@@ -100,3 +100,47 @@ def test_execute_check_reports_service_schema_errors_via_diagnostics():
     assert result.observations[0].identifier == "android-devices"
     assert result.observations[0].status == Status.FAIL
     assert result.diagnostics[0].code == "SERV"
+
+
+def test_execute_check_reports_ping_and_rest_executor_failures_via_diagnostics():
+    ping_definition = make_definition("router", CheckType.PING)
+    rest_definition = make_definition("nas-api", CheckType.REST)
+
+    ping_result = execute_check(
+        ping_definition,
+        observed_at_s=10.0,
+        ping_runner=lambda target, timeout_s: (_ for _ in ()).throw(RuntimeError("boom")),
+        http_runner=None,
+    )
+    rest_result = execute_check(
+        rest_definition,
+        observed_at_s=10.0,
+        ping_runner=None,
+        http_runner=lambda method, target, timeout_s: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    assert ping_result.diagnostics[0].code == "PING"
+    assert ping_result.observations[0].details == "executor error"
+    assert rest_result.diagnostics[0].code == "REST"
+
+
+def test_execute_check_handles_service_request_failures_and_non_2xx_responses():
+    definition = make_definition("android-devices", CheckType.SERVICE)
+
+    failed_request = execute_check(
+        definition,
+        observed_at_s=10.0,
+        ping_runner=None,
+        http_runner=lambda method, target, timeout_s: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    failed_response = execute_check(
+        definition,
+        observed_at_s=10.0,
+        ping_runner=None,
+        http_runner=lambda method, target, timeout_s: HttpResponseResult(status_code=503, details="HTTP 503"),
+    )
+
+    assert failed_request.replace_source is True
+    assert failed_request.diagnostics[0].code == "SERV"
+    assert failed_response.replace_source is True
+    assert failed_response.observations[0].details == "HTTP 503"

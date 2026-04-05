@@ -10,12 +10,13 @@ OUTPUT_DIR="$ROOT_DIR/artifacts/release"
 RUNTIME_CONFIG_OUTPUT="$ROOT_DIR/artifacts/device/config.json"
 HOST="0.0.0.0"
 PORT="8080"
-DEPLOY_DIR=""
+DEVICE_PORT=""
 COMMAND="help"
 VERBOSE=0
 USE_VENV=1
 WIFI_SSID="${VIVIPI_WIFI_SSID:-}"
 WIFI_PASSWORD="${VIVIPI_WIFI_PASSWORD:-}"
+SERVICE_BASE_URL="${VIVIPI_SERVICE_BASE_URL:-}"
 
 usage() {
     cat <<'EOF'
@@ -30,7 +31,7 @@ Commands:
     render-config    Render artifacts/device/config.json from the build config
     build-firmware   Build the zipped firmware bundle into artifacts/release
   release-assets   Build Python distributions and the firmware release bundle
-  deploy           Build the firmware bundle and extract it into --deploy-dir
+    deploy           Build the firmware bundle and copy it to the Pico via mpremote
   service          Run the default ADB-backed Vivi Service
   all              Install dependencies, lint, test, and build firmware
   help             Show this help text
@@ -41,12 +42,13 @@ Options:
   --runtime-config PATH      Runtime config JSON output path
   --host HOST                Host for the Vivi Service
   --port PORT                Port for the Vivi Service
-  --deploy-dir PATH          Directory to receive extracted deploy files
+    --device-port PATH         Serial or USB path for mpremote deploy
   --python PATH              Python executable to use when not in venv
   --venv PATH                Virtualenv directory
   --no-venv                  Use the current Python environment directly
   --wifi-ssid VALUE          Override VIVIPI_WIFI_SSID for this invocation
   --wifi-password VALUE      Override VIVIPI_WIFI_PASSWORD for this invocation
+    --service-base-url VALUE   Override VIVIPI_SERVICE_BASE_URL for this invocation
   -v, --verbose              Print commands before running them
   -h, --help                 Show this help text
 EOF
@@ -96,6 +98,9 @@ with_wifi_env() {
     if [[ -n "$WIFI_PASSWORD" ]]; then
         export VIVIPI_WIFI_PASSWORD="$WIFI_PASSWORD"
     fi
+    if [[ -n "$SERVICE_BASE_URL" ]]; then
+        export VIVIPI_SERVICE_BASE_URL="$SERVICE_BASE_URL"
+    fi
 }
 
 run_python_module() {
@@ -124,14 +129,13 @@ build_python_distributions() {
 }
 
 deploy_bundle() {
-    if [[ -z "$DEPLOY_DIR" ]]; then
-        log "--deploy-dir is required for the deploy command"
-        exit 2
+    ensure_dependencies
+    with_wifi_env
+    local args=(vivipi.tooling.build_deploy deploy-firmware --config "$CONFIG_PATH" --output-dir "$OUTPUT_DIR")
+    if [[ -n "$DEVICE_PORT" ]]; then
+        args+=(--port "$DEVICE_PORT")
     fi
-
-    build_firmware_bundle
-    mkdir -p "$DEPLOY_DIR"
-    run_cmd unzip -oq "$OUTPUT_DIR/vivipi-firmware-bundle.zip" -d "$DEPLOY_DIR"
+    run_python_module "${args[@]}"
 }
 
 parse_args() {
@@ -161,8 +165,8 @@ parse_args() {
                 PORT="$2"
                 shift 2
                 ;;
-            --deploy-dir)
-                DEPLOY_DIR="$2"
+            --device-port)
+                DEVICE_PORT="$2"
                 shift 2
                 ;;
             --python)
@@ -183,6 +187,10 @@ parse_args() {
                 ;;
             --wifi-password)
                 WIFI_PASSWORD="$2"
+                shift 2
+                ;;
+            --service-base-url)
+                SERVICE_BASE_URL="$2"
                 shift 2
                 ;;
             -v|--verbose)

@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -61,6 +62,21 @@ def render_device_runtime_config(settings: dict[str, object], checks: tuple[Chec
     }
 
 
+def write_install_manifest(settings: dict[str, object], output_path: str | Path) -> Path:
+    device = settings["device"]
+    micropython = device.get("micropython", {}) if isinstance(device, dict) else {}
+    lines = [
+        f"board: {device.get('board', 'unknown')}",
+        f"micropython_version: {micropython.get('version', 'unspecified')}",
+        f"download_page: {micropython.get('download_page', 'https://micropython.org/download/')}",
+        f"port: {device.get('micropython_port', '')}",
+    ]
+    destination = Path(output_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return destination
+
+
 def _resolve_checks_path(config_path: Path, settings: dict[str, object]) -> Path:
     checks_config = settings.get("checks_config")
     if not isinstance(checks_config, str) or not checks_config.strip():
@@ -75,7 +91,7 @@ def write_runtime_config(
 ) -> Path:
     source_config_path = Path(config_path).resolve()
     settings = load_build_deploy_settings(source_config_path, env=env)
-    checks = load_checks_config(_resolve_checks_path(source_config_path, settings))
+    checks = load_checks_config(_resolve_checks_path(source_config_path, settings), env=env)
     runtime_config = render_device_runtime_config(settings, checks)
 
     destination = Path(output_path)
@@ -93,7 +109,10 @@ def build_firmware_bundle(
     release_dir = Path(output_dir)
     release_dir.mkdir(parents=True, exist_ok=True)
 
-    staging_dir = release_dir / "vivipi-firmware"
+    source_config_path = Path(config_path).resolve()
+    settings = load_build_deploy_settings(source_config_path, env=env)
+
+    staging_dir = release_dir / "vivipi-device-fs"
     if staging_dir.exists():
         shutil.rmtree(staging_dir)
     staging_dir.mkdir(parents=True)
@@ -101,15 +120,48 @@ def build_firmware_bundle(
     firmware_dir = repository_root / "firmware"
     package_dir = repository_root / "src" / "vivipi"
 
-    shutil.copy2(firmware_dir / "boot.py", staging_dir / "boot.py")
-    shutil.copy2(firmware_dir / "main.py", staging_dir / "main.py")
+    for item in firmware_dir.iterdir():
+        if item.is_dir():
+            shutil.copytree(item, staging_dir / item.name)
+        else:
+            shutil.copy2(item, staging_dir / item.name)
     shutil.copytree(package_dir, staging_dir / "vivipi")
-    write_runtime_config(config_path, staging_dir / "config.json", env=env)
+    write_runtime_config(source_config_path, staging_dir / "config.json", env=env)
+    write_install_manifest(settings, release_dir / "pico2w-micropython.txt")
 
     archive_path = release_dir / "vivipi-firmware-bundle"
     built_archive = shutil.make_archive(str(archive_path), "zip", root_dir=staging_dir)
-    shutil.rmtree(staging_dir)
+    shutil.make_archive(str(release_dir / "vivipi-device-filesystem"), "zip", root_dir=staging_dir)
     return Path(built_archive)
+
+
+def deploy_firmware(
+    config_path: str | Path,
+    output_dir: str | Path,
+    env: dict[str, str] | None = None,
+    port: str | None = None,
+    run_command=subprocess.run,
+) -> Path:
+    source_config_path = Path(config_path).resolve()
+    settings = load_build_deploy_settings(source_config_path, env=env)
+    bundle_path = build_firmware_bundle(source_config_path, output_dir, env=env)
+    device_root = Path(output_dir) / "vivipi-device-fs"
+    resolved_port = port or str(settings["device"].get("micropython_port", "")).strip()
+    if not resolved_port:
+        raise ValueError("device.micropython_port must be configured for deploy")
+
+    try:
+        for item in sorted(device_root.iterdir(), key=lambda value: value.name):
+            command = ["mpremote", "connect", resolved_port, "fs", "cp"]
+            if item.is_dir():
+                command.extend(["-r", str(item), ":"])
+            else:
+                command.extend([str(item), f":{item.name}"])
+            run_command(command, check=True)
+    except FileNotFoundError as error:
+        raise RuntimeError("mpremote is required for deploy") from error
+
+    return bundle_path
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -124,12 +176,20 @@ def main(argv: list[str] | None = None) -> int:
     bundle_parser.add_argument("--config", required=True)
     bundle_parser.add_argument("--output-dir", required=True)
 
+    deploy_parser = subparsers.add_parser("deploy-firmware", help="Copy the firmware bundle onto a Pico via mpremote")
+    deploy_parser.add_argument("--config", required=True)
+    deploy_parser.add_argument("--output-dir", required=True)
+    deploy_parser.add_argument("--port")
+
     args = parser.parse_args(argv)
     if args.command == "render-config":
         write_runtime_config(args.config, args.output)
         return 0
     if args.command == "build-firmware":
         build_firmware_bundle(args.config, args.output_dir)
+        return 0
+    if args.command == "deploy-firmware":
+        deploy_firmware(args.config, args.output_dir, port=args.port)
         return 0
     raise ValueError(f"unsupported command: {args.command}")
 

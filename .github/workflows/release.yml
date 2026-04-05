@@ -26,6 +26,7 @@ jobs:
           PYTHON_BIN: python
           VIVIPI_WIFI_SSID: release-ssid
           VIVIPI_WIFI_PASSWORD: release-password
+          VIVIPI_SERVICE_BASE_URL: http://192.0.2.10:8080/checks
         run: ./build release-assets --venv .venv-release
 
       - name: Stage release extras

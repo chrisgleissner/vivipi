@@ -18,14 +18,15 @@
 ./build render-config
 ./build build-firmware
 ./build release-assets
+./build deploy --device-port /dev/ttyACM0
 ./build service --host 0.0.0.0 --port 8080
 ```
 
 ## Current repo realities
 
-- `firmware/main.py` is a scaffold only. It loads `config.json` and prints the configured board name; it does not yet drive the SH1107 display or poll checks.
-- `config/build-deploy.yaml` and `config/checks.yaml` ship with a sample service endpoint on `127.0.0.1`. That must be replaced with a host address reachable from the Pico 2W for real device deployment.
-- `./build deploy` currently extracts the firmware bundle into a directory. It does not flash the Pico or talk to a serial or USB transport.
+- `firmware/main.py` delegates to `firmware/runtime.py`, which wires Wi-Fi bootstrap, button polling, SH1107 output, and the runtime loop together.
+- `config/build-deploy.yaml` and `config/checks.yaml` resolve the service endpoint from `VIVIPI_SERVICE_BASE_URL`; the value must be reachable from the Pico over Wi-Fi.
+- `./build deploy` uses `mpremote` to copy the prepared device filesystem to the Pico. It does not flash a UF2 image onto a blank board.
 
 ## Implementation boundaries
 

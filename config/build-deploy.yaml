@@ -4,6 +4,12 @@ project:
 device:
   board: pico2w
   micropython_port: /dev/ttyACM0
+  micropython:
+    version: 1.25.0
+    download_page: https://micropython.org/download/RPI_PICO2_W/
+  buttons:
+    a: GP14
+    b: GP15
   display:
     controller: sh1107
     width_px: 128
@@ -24,7 +30,7 @@ wifi:
   password: ${VIVIPI_WIFI_PASSWORD}
 
 service:
-  base_url: http://127.0.0.1:8080/checks
+  base_url: ${VIVIPI_SERVICE_BASE_URL}
   default_prefix: adb
 
 checks_config: checks.yaml

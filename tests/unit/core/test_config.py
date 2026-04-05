@@ -147,3 +147,24 @@ checks:
     assert definitions[0].timeout_s == 10
     assert definitions[0].method == "POST"
     assert definitions[0].service_prefix is None
+
+
+def test_load_checks_config_substitutes_environment_placeholders(tmp_path: Path):
+    config_path = tmp_path / "checks.yaml"
+    config_path.write_text(
+        """
+checks:
+  - name: Android Devices
+    type: service
+    target: ${VIVIPI_SERVICE_BASE_URL}
+    prefix: adb
+""".strip(),
+        encoding="utf-8",
+    )
+
+    definitions = load_checks_config(
+        config_path,
+        env={"VIVIPI_SERVICE_BASE_URL": "http://192.0.2.10:8080/checks"},
+    )
+
+    assert definitions[0].target == "http://192.0.2.10:8080/checks"

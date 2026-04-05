@@ -22,3 +22,29 @@ def test_build_handler_overrides_logging():
     handler = adb_service.build_handler(payload_factory=lambda: {"checks": []})
 
     assert handler.log_message is not None
+
+
+def test_route_request_handles_health_checks_and_missing_routes():
+    assert adb_service.route_request("/health") == (200, {"status": "OK"})
+    assert adb_service.route_request("/missing") == (404, {"error": "not_found"})
+
+
+def test_serve_closes_the_server(monkeypatch):
+    called = {"closed": False, "served": False}
+
+    class FakeServer:
+        def __init__(self, address, handler):
+            self.address = address
+            self.handler = handler
+
+        def serve_forever(self):
+            called["served"] = True
+
+        def server_close(self):
+            called["closed"] = True
+
+    monkeypatch.setattr(adb_service, "ThreadingHTTPServer", FakeServer)
+
+    adb_service.serve(host="127.0.0.1", port=8080, payload_factory=lambda: {"checks": []})
+
+    assert called == {"served": True, "closed": True}
