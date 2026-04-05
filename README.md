@@ -6,7 +6,7 @@
 [![Hardware](https://img.shields.io/badge/hardware-Raspberry%20Pi%20Pico-blue)](https://github.com/chrisgleissner/vivipi/releases)
 [![Runtime](https://img.shields.io/badge/runtime-MicroPython%20%7C%20Python-blue)](https://github.com/chrisgleissner/vivipi)
 
-ViviPi (pronounced “VEE-vee-pie”, from Latin *viv-* “to live”) is a minimal, glanceable monitoring system built on the Raspberry Pi Pico 2W, paired with a 128×64 monochrome OLED.
+ViviPi (pronounced “VEE-vee-pie”, from the Latin *viv-* in *vivere*, “to live”) is a minimal, glanceable monitoring system built on the Raspberry Pi Pico 2W, paired with a 128×64 monochrome OLED.
 
 ## What You Get
 
@@ -37,22 +37,16 @@ ViviPi (pronounced “VEE-vee-pie”, from Latin *viv-* “to live”) is a mini
 
 ## Quick Start
 
-This is the shortest end-to-end development flow.
+This is the shortest useful path.
 
 Requirements:
 
 - Python 3.12+
 - `python3 -m venv`
-- `adb` if you want to use the default service against connected Android devices
-- `mpremote` if you want `./build deploy` to copy files onto a Pico 2W
+- `adb` only if you want the default service against connected Android devices
+- `mpremote` only if you want `./build deploy` to copy files onto a Pico 2W
 
-Commands that render or package device config need three values:
-
-- `VIVIPI_WIFI_SSID`
-- `VIVIPI_WIFI_PASSWORD`
-- `VIVIPI_SERVICE_BASE_URL`
-
-1. Set Wi-Fi credentials and a service URL that the Pico can reach over Wi-Fi.
+Step 1: Set Wi-Fi credentials. Add `VIVIPI_SERVICE_BASE_URL` only if you want `SERVICE` checks.
 
 ```bash
 export VIVIPI_WIFI_SSID="your-wifi-name"
@@ -60,40 +54,26 @@ export VIVIPI_WIFI_PASSWORD="your-wifi-password"
 export VIVIPI_SERVICE_BASE_URL="http://192.168.1.10:8080/checks"
 ```
 
-1. Install dependencies and run the full local gate.
+Step 2: Run the default local workflow.
 
 ```bash
-./build ci
+./build
 ```
 
-`./build`, `./build ci`, `./build render-config`, `./build build-firmware`, and `./build deploy` all use those same values.
+Without `VIVIPI_SERVICE_BASE_URL`, ViviPi builds only the `PING` and `REST` checks from `config/checks.yaml`.
 
-1. Start the default Vivi Service if you want the sample `SERVICE` check to report connected ADB devices.
+Step 3: Start the default Vivi Service only if you want the sample `SERVICE` check.
 
 ```bash
+export VIVIPI_SERVICE_BASE_URL="http://192.168.1.10:8080/checks"
 ./build service --host 0.0.0.0 --port 8080
 ```
 
-1. Build the firmware bundle and device filesystem assets.
+Step 4: Build and deploy to the Pico when hardware is connected.
 
 ```bash
 ./build build-firmware
-```
-
-1. Install the matching Pico 2W MicroPython UF2 onto the board.
-
-Use the pinned reference written to `artifacts/release/pico2w-micropython.txt`, or the matching GitHub release asset, to choose the supported Pico 2W download page.
-
-1. Copy the built device filesystem onto the Pico.
-
-```bash
 ./build deploy --device-port /dev/ttyACM0
-```
-
-1. Render only the runtime config when you do not need the full bundle.
-
-```bash
-./build render-config
 ```
 
 `./build deploy` uses `mpremote` to copy the prepared filesystem. The MicroPython UF2 is installed separately from the pinned Pico 2W download reference.
@@ -120,6 +100,12 @@ Running `./build` with no command is equivalent to `./build ci`.
 ```
 
 Typical examples:
+
+```bash
+VIVIPI_WIFI_SSID="your-wifi" \
+VIVIPI_WIFI_PASSWORD="your-password" \
+./build build-firmware
+```
 
 ```bash
 VIVIPI_WIFI_SSID="your-wifi" \
@@ -173,9 +159,10 @@ wifi:
 
 Notes:
 
-- `service.base_url` is resolved from `VIVIPI_SERVICE_BASE_URL`
-- The sample `SERVICE` check target in `config/checks.yaml` uses the same value
-- The value points to a host address reachable from the Pico over Wi-Fi, such as `http://192.168.1.10:8080/checks`
+- `VIVIPI_WIFI_SSID` and `VIVIPI_WIFI_PASSWORD` are required for device config
+- `service.base_url` is resolved from `VIVIPI_SERVICE_BASE_URL` when you want `SERVICE` checks
+- If `VIVIPI_SERVICE_BASE_URL` is omitted, build-time config keeps only the configured `PING` and `REST` checks
+- When used, the value points to a host address reachable from the Pico over Wi-Fi, such as `http://192.168.1.10:8080/checks`
 
 ### Checks
 

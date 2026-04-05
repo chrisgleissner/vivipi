@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from vivipi.core.config import build_direct_check_id, build_service_check_id, load_checks_config, slugify
+from vivipi.core.config import build_direct_check_id, build_service_check_id, load_checks_config, parse_checks_config, slugify
 from vivipi.core.models import CheckType
 
 
@@ -168,3 +168,8 @@ checks:
     )
 
     assert definitions[0].target == "http://192.0.2.10:8080/checks"
+
+
+def test_parse_checks_config_rejects_non_mapping_root():
+    with pytest.raises(ValueError, match="mapping"):
+        parse_checks_config([])

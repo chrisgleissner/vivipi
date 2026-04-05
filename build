@@ -25,9 +25,10 @@ Usage: ./build [command] [options]
 Running ./build with no command is equivalent to: ./build ci
 
 Commands that render or package device config require:
-    VIVIPI_WIFI_SSID, VIVIPI_WIFI_PASSWORD, and VIVIPI_SERVICE_BASE_URL
-You can provide them as environment variables or with:
-    --wifi-ssid, --wifi-password, and --service-base-url
+    VIVIPI_WIFI_SSID and VIVIPI_WIFI_PASSWORD
+Optional for SERVICE checks:
+    VIVIPI_SERVICE_BASE_URL
+You can provide them as environment variables or with CLI flags.
 
 Commands:
   ci               Install dependencies, run Ruff, run pytest, and build firmware assets
@@ -125,18 +126,16 @@ require_runtime_env() {
     if [[ -z "$WIFI_PASSWORD" ]]; then
         missing+=("VIVIPI_WIFI_PASSWORD")
     fi
-    if [[ -z "$SERVICE_BASE_URL" ]]; then
-        missing+=("VIVIPI_SERVICE_BASE_URL")
-    fi
 
     if [[ ${#missing[@]} -eq 0 ]]; then
         return
     fi
 
     log "Missing required runtime configuration: ${missing[*]}"
-    log "Set them in the environment or pass --wifi-ssid, --wifi-password, and --service-base-url."
+    log "Set them in the environment or pass --wifi-ssid and --wifi-password."
     log "Example:"
-    log "  VIVIPI_WIFI_SSID=wifi VIVIPI_WIFI_PASSWORD=secret VIVIPI_SERVICE_BASE_URL=http://192.168.1.10:8080/checks ./build $COMMAND"
+    log "  VIVIPI_WIFI_SSID=wifi VIVIPI_WIFI_PASSWORD=secret ./build $COMMAND"
+    log "If you want SERVICE checks, also set VIVIPI_SERVICE_BASE_URL or pass --service-base-url."
     exit 2
 }
 

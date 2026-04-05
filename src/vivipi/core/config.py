@@ -61,10 +61,10 @@ def _validate_timing(interval_s: int, timeout_s: int):
         raise ValueError("timeout_s must be at least 20% smaller than interval_s")
 
 
-def load_checks_config(path: str | Path, env: dict[str, str] | None = None) -> tuple[CheckDefinition, ...]:
-    config_path = Path(path)
-    raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-    raw = _resolve_placeholders(raw, env or dict(os.environ))
+def parse_checks_config(raw: object) -> tuple[CheckDefinition, ...]:
+    if not isinstance(raw, dict):
+        raise ValueError("checks config must be a mapping")
+
     checks = raw.get("checks")
     if not isinstance(checks, list):
         raise ValueError("checks must be a list")
@@ -106,3 +106,10 @@ def load_checks_config(path: str | Path, env: dict[str, str] | None = None) -> t
         )
 
     return tuple(definitions)
+
+
+def load_checks_config(path: str | Path, env: dict[str, str] | None = None) -> tuple[CheckDefinition, ...]:
+    config_path = Path(path)
+    raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    raw = _resolve_placeholders(raw, env or dict(os.environ))
+    return parse_checks_config(raw)

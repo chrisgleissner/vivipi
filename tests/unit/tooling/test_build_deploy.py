@@ -10,6 +10,7 @@ from vivipi.tooling.build_deploy import (
     build_firmware_bundle,
     deploy_firmware,
     load_build_deploy_settings,
+    load_runtime_checks,
     render_device_runtime_config,
     validate_runtime_settings,
     write_install_manifest,
@@ -122,6 +123,18 @@ def test_load_build_deploy_settings_requires_all_environment_placeholders(tmp_pa
         load_build_deploy_settings(config_path, env={"VIVIPI_WIFI_SSID": "TestWifi", "VIVIPI_SERVICE_BASE_URL": "http://192.0.2.10:8080/checks"})
 
 
+def test_load_build_deploy_settings_allows_missing_service_base_url(tmp_path: Path):
+    config_path = write_fixture_files(tmp_path)
+
+    settings = load_build_deploy_settings(
+        config_path,
+        env={"VIVIPI_WIFI_SSID": "TestWifi", "VIVIPI_WIFI_PASSWORD": "TestPassword"},
+    )
+
+    assert settings["wifi"]["ssid"] == "TestWifi"
+    assert settings["service"] == {}
+
+
 def test_render_device_runtime_config_uses_empty_project_when_omitted():
     settings = {
         "device": {"board": "pico2w", "buttons": {"a": "GP14", "b": "GP15"}},
@@ -141,6 +154,83 @@ def test_render_device_runtime_config_uses_empty_project_when_omitted():
 
     assert rendered["project"] == {}
     assert rendered["checks"][0]["type"] == "PING"
+
+
+def test_load_runtime_checks_skips_unconfigured_service_checks(tmp_path: Path):
+    checks_path = tmp_path / "checks.yaml"
+    checks_path.write_text(
+        """
+checks:
+  - name: Router
+    type: ping
+    target: 192.168.1.1
+  - name: NAS API
+    type: rest
+    target: https://nas.example.local/health
+  - name: Android Devices
+    type: service
+    target: ${VIVIPI_SERVICE_BASE_URL}
+    prefix: adb
+""".strip(),
+        encoding="utf-8",
+    )
+
+    definitions = load_runtime_checks(
+        checks_path,
+        env={"VIVIPI_WIFI_SSID": "TestWifi", "VIVIPI_WIFI_PASSWORD": "TestPassword"},
+    )
+
+    assert [definition.identifier for definition in definitions] == ["router", "nas-api"]
+    assert all(definition.check_type != CheckType.SERVICE for definition in definitions)
+
+
+def test_write_runtime_config_excludes_service_checks_without_service_url(tmp_path: Path):
+    checks_path = tmp_path / "checks.yaml"
+    checks_path.write_text(
+        """
+checks:
+  - name: Router
+    type: ping
+    target: 192.168.1.1
+  - name: NAS API
+    type: rest
+    target: https://nas.example.local/health
+  - name: Android Devices
+    type: service
+    target: ${VIVIPI_SERVICE_BASE_URL}
+    prefix: adb
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "build-deploy.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "device:",
+                "  board: pico2w",
+                "wifi:",
+                "  ssid: ${VIVIPI_WIFI_SSID}",
+                "  password: ${VIVIPI_WIFI_PASSWORD}",
+                "service:",
+                "  base_url: ${VIVIPI_SERVICE_BASE_URL}",
+                "checks_config: checks.yaml",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "config.json"
+
+    write_runtime_config(
+        config_path,
+        output_path,
+        env={"VIVIPI_WIFI_SSID": "TestWifi", "VIVIPI_WIFI_PASSWORD": "TestPassword"},
+    )
+
+    rendered = json.loads(output_path.read_text(encoding="utf-8"))
+
+    assert [check["id"] for check in rendered["checks"]] == ["router", "nas-api"]
+    assert rendered["service"] == {}
 
 
 def test_write_runtime_config_requires_checks_config_key(tmp_path: Path):

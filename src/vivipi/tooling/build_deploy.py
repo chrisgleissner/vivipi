@@ -12,22 +12,27 @@ from urllib.parse import urlparse
 
 import yaml
 
-from vivipi.core.config import load_checks_config
+from vivipi.core.config import parse_checks_config
 from vivipi.core.models import CheckDefinition, CheckType
 
 
 PLACEHOLDER_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)\}")
+OPTIONAL_PLACEHOLDERS = frozenset({"VIVIPI_SERVICE_BASE_URL"})
 
 
-def _resolve_placeholders(value: object, env: dict[str, str]) -> object:
+def _resolve_placeholders(value: object, env: dict[str, str], optional_placeholders: frozenset[str] = frozenset()) -> object:
     if isinstance(value, dict):
-        return {key: _resolve_placeholders(item, env) for key, item in value.items()}
+        return {key: _resolve_placeholders(item, env, optional_placeholders) for key, item in value.items()}
     if isinstance(value, list):
-        return [_resolve_placeholders(item, env) for item in value]
+        return [_resolve_placeholders(item, env, optional_placeholders) for item in value]
     if isinstance(value, str):
+        full_match = PLACEHOLDER_PATTERN.fullmatch(value)
+
         def replace_match(match: re.Match[str]) -> str:
             variable_name = match.group(1)
             if variable_name not in env:
+                if variable_name in optional_placeholders and full_match is not None:
+                    return ""
                 raise KeyError(f"missing environment variable: {variable_name}")
             return env[variable_name]
 
@@ -38,7 +43,15 @@ def _resolve_placeholders(value: object, env: dict[str, str]) -> object:
 def load_build_deploy_settings(path: str | Path, env: dict[str, str] | None = None) -> dict[str, object]:
     config_path = Path(path)
     raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-    return _resolve_placeholders(raw, env or dict(os.environ))
+    resolved = _resolve_placeholders(raw, env or dict(os.environ), optional_placeholders=OPTIONAL_PLACEHOLDERS)
+
+    service = resolved.get("service")
+    if isinstance(service, dict):
+        base_url = service.get("base_url")
+        if isinstance(base_url, str) and not base_url.strip():
+            service.pop("base_url", None)
+
+    return resolved
 
 
 def _check_to_dict(check: CheckDefinition) -> dict[str, object]:
@@ -59,9 +72,33 @@ def render_device_runtime_config(settings: dict[str, object], checks: tuple[Chec
         "project": settings.get("project", {}),
         "device": settings["device"],
         "wifi": settings["wifi"],
-        "service": settings["service"],
+        "service": settings.get("service", {}),
         "checks": [_check_to_dict(check) for check in checks],
     }
+
+
+def load_runtime_checks(path: str | Path, env: dict[str, str] | None = None) -> tuple[CheckDefinition, ...]:
+    checks_path = Path(path)
+    raw = yaml.safe_load(checks_path.read_text(encoding="utf-8")) or {}
+    resolved = _resolve_placeholders(raw, env or dict(os.environ), optional_placeholders=OPTIONAL_PLACEHOLDERS)
+
+    checks = resolved.get("checks")
+    if not isinstance(checks, list):
+        raise ValueError("checks must be a list")
+
+    filtered_checks = []
+    for item in checks:
+        if not isinstance(item, dict):
+            filtered_checks.append(item)
+            continue
+
+        item_type = item.get("type")
+        target = item.get("target")
+        if isinstance(item_type, str) and item_type.strip().casefold() == "service" and isinstance(target, str) and not target.strip():
+            continue
+        filtered_checks.append(item)
+
+    return parse_checks_config({"checks": filtered_checks})
 
 
 def _is_loopback_host(host: str) -> bool:
@@ -87,7 +124,7 @@ def validate_runtime_settings(settings: dict[str, object], checks: tuple[CheckDe
     service = settings.get("service", {})
     if isinstance(service, dict):
         base_url = service.get("base_url")
-        if isinstance(base_url, str):
+        if isinstance(base_url, str) and base_url.strip():
             _validate_device_reachable_url(base_url, "service.base_url")
 
     for check in checks:
@@ -124,7 +161,7 @@ def write_runtime_config(
 ) -> Path:
     source_config_path = Path(config_path).resolve()
     settings = load_build_deploy_settings(source_config_path, env=env)
-    checks = load_checks_config(_resolve_checks_path(source_config_path, settings), env=env)
+    checks = load_runtime_checks(_resolve_checks_path(source_config_path, settings), env=env)
     validate_runtime_settings(settings, checks)
     runtime_config = render_device_runtime_config(settings, checks)
 
