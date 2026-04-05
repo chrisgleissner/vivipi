@@ -2,6 +2,7 @@
 
 [![Build](https://github.com/chrisgleissner/vivipi/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/chrisgleissner/vivipi/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/chrisgleissner/vivipi/graph/badge.svg)](https://codecov.io/gh/chrisgleissner/vivipi)
+[![License: GPL v3](https://img.shields.io/badge/License-GPL%20v3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0.en.html)
 [![Hardware](https://img.shields.io/badge/hardware-Raspberry%20Pi%20Pico-blue)](https://github.com/chrisgleissner/vivipi/releases)
 [![Runtime](https://img.shields.io/badge/runtime-MicroPython%20%7C%20Python-blue)](https://github.com/chrisgleissner/vivipi)
 
@@ -9,7 +10,7 @@ ViviPi (pronounced “VEE-vee-pie”, from Latin *viv-* “to live”) is a mini
 
 ## What You Get
 
-- Strict 16x8 rendering for idle, overview, detail, and diagnostics views
+- Strict 16x8 character rendering for idle, overview, detail, and diagnostics view
 - Deterministic scheduling and execution for `PING`, `REST`, and `SERVICE`
 - Compact runtime diagnostics and burn-in shift control
 - `./build` commands for install, lint, test, coverage, packaging, deploy, and service hosting
