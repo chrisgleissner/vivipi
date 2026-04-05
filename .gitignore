@@ -1,0 +1,15 @@
+.coverage
+.pytest_cache/
+.ruff_cache/
+.venv/
+.venv*/
+__pycache__/
+artifacts/
+dist/
+htmlcov/
+*.egg-info/
+*.pyc
+coverage.xml
+
+# Local build and deployment overrides.
+config/build-deploy.local.yaml

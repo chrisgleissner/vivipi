@@ -1,0 +1,30 @@
+project:
+  name: vivipi
+
+device:
+  board: pico2w
+  micropython_port: /dev/ttyACM0
+  display:
+    controller: sh1107
+    width_px: 128
+    height_px: 64
+    interface: spi
+    spi_mode: 3
+    pins:
+      vcc: VSYS
+      gnd: GND
+      din: GP11
+      clk: GP10
+      cs: GP9
+      dc: GP8
+      rst: GP12
+
+wifi:
+  ssid: ${VIVIPI_WIFI_SSID}
+  password: ${VIVIPI_WIFI_PASSWORD}
+
+service:
+  base_url: http://127.0.0.1:8080/checks
+  default_prefix: adb
+
+checks_config: checks.yaml
