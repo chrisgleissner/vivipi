@@ -1,0 +1,265 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+VENV_DIR="${VENV_DIR:-$ROOT_DIR/.venv}"
+CONFIG_PATH="$ROOT_DIR/config/build-deploy.yaml"
+OUTPUT_DIR="$ROOT_DIR/artifacts/release"
+RUNTIME_CONFIG_OUTPUT="$ROOT_DIR/artifacts/device/config.json"
+HOST="0.0.0.0"
+PORT="8080"
+DEPLOY_DIR=""
+COMMAND="help"
+VERBOSE=0
+USE_VENV=1
+WIFI_SSID="${VIVIPI_WIFI_SSID:-}"
+WIFI_PASSWORD="${VIVIPI_WIFI_PASSWORD:-}"
+
+usage() {
+    cat <<'EOF'
+Usage: ./build <command> [options]
+
+Commands:
+  install          Create the local virtual environment and install dev dependencies
+  lint             Run Ruff
+  test             Run pytest
+  coverage         Run pytest with branch coverage output
+  ci               Run lint, tests, and firmware bundle build
+    render-config    Render artifacts/device/config.json from the build config
+    build-firmware   Build the zipped firmware bundle into artifacts/release
+  release-assets   Build Python distributions and the firmware release bundle
+  deploy           Build the firmware bundle and extract it into --deploy-dir
+  service          Run the default ADB-backed Vivi Service
+  all              Install dependencies, lint, test, and build firmware
+  help             Show this help text
+
+Options:
+  -c, --config PATH          Build/deploy config path
+  -o, --output-dir PATH      Release output directory
+  --runtime-config PATH      Runtime config JSON output path
+  --host HOST                Host for the Vivi Service
+  --port PORT                Port for the Vivi Service
+  --deploy-dir PATH          Directory to receive extracted deploy files
+  --python PATH              Python executable to use when not in venv
+  --venv PATH                Virtualenv directory
+  --no-venv                  Use the current Python environment directly
+  --wifi-ssid VALUE          Override VIVIPI_WIFI_SSID for this invocation
+  --wifi-password VALUE      Override VIVIPI_WIFI_PASSWORD for this invocation
+  -v, --verbose              Print commands before running them
+  -h, --help                 Show this help text
+EOF
+}
+
+log() {
+    printf '%s\n' "$*"
+}
+
+run_cmd() {
+    if [[ "$VERBOSE" -eq 1 ]]; then
+        log "+ $*"
+    fi
+    "$@"
+}
+
+ensure_venv() {
+    if [[ "$USE_VENV" -eq 0 ]]; then
+        return
+    fi
+
+    if [[ ! -d "$VENV_DIR" ]]; then
+        run_cmd "$PYTHON_BIN" -m venv "$VENV_DIR"
+    fi
+}
+
+python_cmd() {
+    if [[ "$USE_VENV" -eq 1 ]]; then
+        printf '%s\n' "$VENV_DIR/bin/python"
+        return
+    fi
+    printf '%s\n' "$PYTHON_BIN"
+}
+
+ensure_dependencies() {
+    ensure_venv
+    local python_path
+    python_path="$(python_cmd)"
+    run_cmd "$python_path" -m pip install --upgrade pip
+    run_cmd "$python_path" -m pip install -e '.[dev]'
+}
+
+with_wifi_env() {
+    if [[ -n "$WIFI_SSID" ]]; then
+        export VIVIPI_WIFI_SSID="$WIFI_SSID"
+    fi
+    if [[ -n "$WIFI_PASSWORD" ]]; then
+        export VIVIPI_WIFI_PASSWORD="$WIFI_PASSWORD"
+    fi
+}
+
+run_python_module() {
+    local python_path
+    python_path="$(python_cmd)"
+    run_cmd "$python_path" -m "$@"
+}
+
+build_firmware_bundle() {
+    ensure_dependencies
+    with_wifi_env
+    run_python_module vivipi.tooling.build_deploy build-firmware --config "$CONFIG_PATH" --output-dir "$OUTPUT_DIR"
+}
+
+render_runtime_config() {
+    ensure_dependencies
+    with_wifi_env
+    run_python_module vivipi.tooling.build_deploy render-config --config "$CONFIG_PATH" --output "$RUNTIME_CONFIG_OUTPUT"
+}
+
+build_python_distributions() {
+    ensure_dependencies
+    local python_path
+    python_path="$(python_cmd)"
+    run_cmd "$python_path" -m build
+}
+
+deploy_bundle() {
+    if [[ -z "$DEPLOY_DIR" ]]; then
+        log "--deploy-dir is required for the deploy command"
+        exit 2
+    fi
+
+    build_firmware_bundle
+    mkdir -p "$DEPLOY_DIR"
+    run_cmd unzip -oq "$OUTPUT_DIR/vivipi-firmware-bundle.zip" -d "$DEPLOY_DIR"
+}
+
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            install|lint|test|coverage|ci|render-config|build-firmware|release-assets|deploy|service|all|help)
+                COMMAND="$1"
+                shift
+                ;;
+            -c|--config)
+                CONFIG_PATH="$2"
+                shift 2
+                ;;
+            -o|--output-dir)
+                OUTPUT_DIR="$2"
+                shift 2
+                ;;
+            --runtime-config)
+                RUNTIME_CONFIG_OUTPUT="$2"
+                shift 2
+                ;;
+            --host)
+                HOST="$2"
+                shift 2
+                ;;
+            --port)
+                PORT="$2"
+                shift 2
+                ;;
+            --deploy-dir)
+                DEPLOY_DIR="$2"
+                shift 2
+                ;;
+            --python)
+                PYTHON_BIN="$2"
+                shift 2
+                ;;
+            --venv)
+                VENV_DIR="$2"
+                shift 2
+                ;;
+            --no-venv)
+                USE_VENV=0
+                shift
+                ;;
+            --wifi-ssid)
+                WIFI_SSID="$2"
+                shift 2
+                ;;
+            --wifi-password)
+                WIFI_PASSWORD="$2"
+                shift 2
+                ;;
+            -v|--verbose)
+                VERBOSE=1
+                shift
+                ;;
+            -h|--help)
+                COMMAND="help"
+                shift
+                ;;
+            *)
+                log "Unknown argument: $1"
+                usage
+                exit 2
+                ;;
+        esac
+    done
+}
+
+main() {
+    cd "$ROOT_DIR"
+    parse_args "$@"
+
+    case "$COMMAND" in
+        install)
+            ensure_dependencies
+            ;;
+        lint)
+            ensure_dependencies
+            run_python_module ruff check .
+            ;;
+        test)
+            ensure_dependencies
+            run_python_module pytest
+            ;;
+        coverage)
+            ensure_dependencies
+            run_python_module pytest --cov=src/vivipi --cov-branch --cov-report=term-missing --cov-report=xml
+            ;;
+        ci)
+            ensure_dependencies
+            run_python_module ruff check .
+            run_python_module pytest
+            with_wifi_env
+            run_python_module vivipi.tooling.build_deploy build-firmware --config "$CONFIG_PATH" --output-dir "$OUTPUT_DIR"
+            ;;
+        render-config)
+            render_runtime_config
+            ;;
+        build-firmware)
+            build_firmware_bundle
+            ;;
+        release-assets)
+            build_python_distributions
+            build_firmware_bundle
+            ;;
+        deploy)
+            deploy_bundle
+            ;;
+        service)
+            ensure_dependencies
+            run_python_module vivipi.services.adb_service --host "$HOST" --port "$PORT"
+            ;;
+        all)
+            ensure_dependencies
+            run_python_module ruff check .
+            run_python_module pytest
+            build_firmware_bundle
+            ;;
+        help)
+            usage
+            ;;
+        *)
+            log "Unsupported command: $COMMAND"
+            exit 2
+            ;;
+    esac
+}
+
+main "$@"
