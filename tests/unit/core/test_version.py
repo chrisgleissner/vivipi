@@ -29,6 +29,16 @@ def test_resolve_version_returns_tag_when_on_tag(monkeypatch, tmp_path):
     assert resolve_version(tmp_path) == "0.1.0"
 
 
+def test_resolve_version_returns_bare_tag_when_on_tag(monkeypatch, tmp_path):
+    def fake_run(args, **kwargs):
+        if "describe" in args and "[0-9]*" in args:
+            return subprocess.CompletedProcess(args, 0, stdout="0.2.0-0-gabcdef12\n")
+        return subprocess.CompletedProcess(args, 128, stdout="", stderr="fatal")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert resolve_version(tmp_path) == "0.2.0"
+
+
 def test_resolve_version_appends_hash_when_ahead_of_tag(monkeypatch, tmp_path):
     def fake_run(args, **kwargs):
         if "describe" in args:
@@ -76,6 +86,19 @@ def test_git_describe_version_returns_none_on_parse_failure(monkeypatch, tmp_pat
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     assert _git_describe_version(tmp_path) is None
+
+
+def test_git_describe_version_requests_eight_character_abbrev(monkeypatch, tmp_path):
+    observed = {}
+
+    def fake_run(args, **kwargs):
+        observed["args"] = args
+        return subprocess.CompletedProcess(args, 0, stdout="0.2.0-0-gabcdef12\n")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert _git_describe_version(tmp_path) == "0.2.0"
+    assert "--abbrev=8" in observed["args"]
 
 
 def test_git_head_hash_returns_none_on_error(monkeypatch, tmp_path):

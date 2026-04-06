@@ -123,7 +123,7 @@ Generated artifacts are written under `artifacts/`.
 Key outputs:
 
 - `./build render-config` writes `artifacts/device/config.json`
-- `./build build-firmware` writes `vivipi-firmware-bundle.zip`, `vivipi-device-filesystem.zip`, `pico2w-micropython.txt`, and the unpacked `vivipi-device-fs/` tree under `artifacts/release`
+- `./build build-firmware` writes `vivipi-device-filesystem.zip`, `pico2w-micropython.txt`, and the unpacked `vivipi-device-fs/` tree under `artifacts/release`
 - `./build deploy` copies the unpacked `vivipi-device-fs/` tree onto the Pico with `mpremote`
 - `./build` and `./build ci` validate the core, runtime, tooling, and firmware adapters together on CPython
 
@@ -281,13 +281,12 @@ The display backend boundary lives under `firmware/displays/`, while rendering i
 
 Tagging with a x.y.z version triggers a release containing:
 
-- Python wheel and source distribution
-- Zipped MicroPython source bundle containing the firmware files, `config.json`, and the `vivipi` package
+- Python wheel for starting the local Vivi service
 - Zipped device filesystem bundle ready for `mpremote fs cp`
 - `pico2w-micropython.txt` with the supported Pico 2W MicroPython download reference
-- Sample configuration files
+- GitHub's built-in source archives for the tagged source tree
 
-The release workflow publishes the filesystem assets and the pinned download reference used by the install flow above.
+The release workflow publishes only the wheel, the device filesystem bundle, and the pinned MicroPython download reference. Sample configuration files stay in the repository and the tagged source archives are provided by GitHub.
 
 ## Repository Layout
 

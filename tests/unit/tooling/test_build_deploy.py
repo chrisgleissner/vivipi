@@ -136,8 +136,24 @@ def test_build_firmware_bundle_creates_a_releaseable_zip_archive(tmp_path: Path)
     assert "input.py" in names
     assert "main.py" in names
     assert "vivipi/__init__.py" in names
-    assert (tmp_path / "release" / "vivipi-device-filesystem.zip").exists()
+    assert archive_path == tmp_path / "release" / "vivipi-device-filesystem.zip"
     assert (tmp_path / "release" / "pico2w-micropython.txt").exists()
+    assert not (tmp_path / "release" / "vivipi-firmware-bundle.zip").exists()
+
+
+def test_build_firmware_bundle_removes_stale_legacy_archive(tmp_path: Path):
+    config_path = write_fixture_files(tmp_path)
+    legacy_archive_path = tmp_path / "release" / "vivipi-firmware-bundle.zip"
+    legacy_archive_path.parent.mkdir(parents=True, exist_ok=True)
+    legacy_archive_path.write_text("stale", encoding="utf-8")
+
+    build_firmware_bundle(
+        config_path,
+        tmp_path / "release",
+        env=FIXTURE_ENV,
+    )
+
+    assert not legacy_archive_path.exists()
 
 
 def test_load_build_deploy_settings_requires_all_environment_placeholders(tmp_path: Path):

@@ -1,10 +1,10 @@
 [build-system]
-requires = ["hatchling>=1.27.0"]
+requires = ["hatchling>=1.27.0", "hatch-vcs>=0.4.0"]
 build-backend = "hatchling.build"
 
 [project]
 name = "vivipi"
-version = "0.1.0"
+dynamic = ["version"]
 description = "ViviPi scaffold for a Pico 2W-driven glanceable OLED monitor"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -47,6 +47,10 @@ include = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/vivipi"]
+
+[tool.hatch.version]
+source = "vcs"
+tag-pattern = '^(?:v)?(?P<version>\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)$'
 
 [tool.pytest.ini_options]
 addopts = "--cov=src/vivipi --cov-branch --cov-report=term-missing --cov-report=xml --cov-fail-under=96"

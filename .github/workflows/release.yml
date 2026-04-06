@@ -15,6 +15,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -24,19 +26,16 @@ jobs:
       - name: Build release assets
         env:
           PYTHON_BIN: python
+          SETUPTOOLS_SCM_PRETEND_VERSION: ${{ github.ref_name }}
           VIVIPI_WIFI_SSID: release-ssid
           VIVIPI_WIFI_PASSWORD: release-password
           VIVIPI_SERVICE_BASE_URL: http://192.0.2.10:8080/checks
         run: ./build release-assets --venv .venv-release
 
-      - name: Stage release extras
-        run: |
-          cp config/build-deploy.yaml artifacts/release/build-deploy.template.yaml
-          cp config/checks.yaml artifacts/release/checks.yaml
-
       - name: Publish GitHub release assets
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/*
-            artifacts/release/*
+            dist/*.whl
+            artifacts/release/vivipi-device-filesystem.zip
+            artifacts/release/pico2w-micropython.txt

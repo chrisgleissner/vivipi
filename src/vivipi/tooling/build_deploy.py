@@ -255,9 +255,12 @@ def build_firmware_bundle(
     write_runtime_config(source_config_path, staging_dir / "config.json", env=env, version=version, build_time=build_time)
     write_install_manifest(settings, release_dir / "pico2w-micropython.txt")
 
-    archive_path = release_dir / "vivipi-firmware-bundle"
+    legacy_archive_path = release_dir / "vivipi-firmware-bundle.zip"
+    if legacy_archive_path.exists():
+        legacy_archive_path.unlink()
+
+    archive_path = release_dir / "vivipi-device-filesystem"
     built_archive = shutil.make_archive(str(archive_path), "zip", root_dir=staging_dir)
-    shutil.make_archive(str(release_dir / "vivipi-device-filesystem"), "zip", root_dir=staging_dir)
     return Path(built_archive)
 
 

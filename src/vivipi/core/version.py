@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 
 GIT_DESCRIBE_PATTERN = re.compile(r"^v?(.+)-(\d+)-g([0-9a-f]+)$")
+GIT_TAG_MATCH_PATTERNS = ("[0-9]*", "v[0-9]*")
 
 
 def resolve_version(repo_root: str | Path, fallback_version: str = "0.0.0") -> str:
@@ -20,9 +21,29 @@ def resolve_version(repo_root: str | Path, fallback_version: str = "0.0.0") -> s
 
 
 def _git_describe_version(repo_root: Path) -> str | None:
+    for match_pattern in GIT_TAG_MATCH_PATTERNS:
+        output = _run_git_describe(repo_root, match_pattern)
+        if output is None:
+            continue
+
+        match = GIT_DESCRIBE_PATTERN.match(output)
+        if match is None:
+            continue
+
+        tag = match.group(1)
+        count = int(match.group(2))
+        commit_hash = match.group(3)
+        if count == 0:
+            return tag
+        return f"{tag}-{commit_hash[:8]}"
+
+    return None
+
+
+def _run_git_describe(repo_root: Path, match_pattern: str) -> str | None:
     try:
         result = subprocess.run(
-            ["git", "describe", "--tags", "--long", "--match", "v*"],
+            ["git", "describe", "--tags", "--long", "--abbrev=8", "--match", match_pattern],
             capture_output=True,
             text=True,
             cwd=repo_root,
@@ -30,16 +51,7 @@ def _git_describe_version(repo_root: Path) -> str | None:
         )
         if result.returncode != 0:
             return None
-        output = result.stdout.strip()
-        match = GIT_DESCRIBE_PATTERN.match(output)
-        if match is None:
-            return None
-        tag = match.group(1)
-        count = int(match.group(2))
-        commit_hash = match.group(3)
-        if count == 0:
-            return tag
-        return f"{tag}-{commit_hash[:8]}"
+        return result.stdout.strip()
     except (subprocess.SubprocessError, FileNotFoundError, OSError):
         return None
 
