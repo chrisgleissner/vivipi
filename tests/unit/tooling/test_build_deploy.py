@@ -151,8 +151,11 @@ def test_build_firmware_bundle_creates_a_releaseable_zip_archive(tmp_path: Path)
     assert "boot.py" in names
     assert "config.json" in names
     assert "display.py" in names
+    assert "control.py" in names
+    assert "debug.py" in names
     assert "input.py" in names
     assert "main.py" in names
+    assert "state.py" in names
     assert "vivipi/__init__.py" in names
     assert not any("__pycache__/" in name for name in names)
     assert not any(name.endswith(".pyc") for name in names)

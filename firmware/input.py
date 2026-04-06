@@ -31,6 +31,7 @@ class ButtonReader:
     def poll(self):
         now_ms = time.ticks_ms()
         events = []
+        # Hot path: keep polling log-free and only allocate when emitting a button event.
         for button, pin in self.pins.items():
             pressed = pin.value() == 0
             if not pressed:

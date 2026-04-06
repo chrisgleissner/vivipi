@@ -319,6 +319,7 @@ def render_to_surface(frame, surface, font_width, font_height, glyph_lookup, fai
 
     failure_color_supported = surface.can_render_color(failure_color)
 
+    # Hot path: rendering stays deterministic and free of logging or dynamic state growth.
     for row_index, row in enumerate(frame.rows):
         y = (row_index * font_height) + y_offset
         row_inverted = frame.inverted_row == row_index

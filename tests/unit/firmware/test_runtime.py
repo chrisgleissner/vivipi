@@ -31,8 +31,11 @@ class FakeWlan:
         self.connected = connected
         self.active_calls = []
         self.connect_calls = []
+        self.disconnect_calls = 0
 
-    def active(self, enabled):
+    def active(self, enabled=None):
+        if enabled is None:
+            return bool(self.active_calls[-1]) if self.active_calls else False
         self.active_calls.append(enabled)
 
     def isconnected(self):
@@ -41,6 +44,13 @@ class FakeWlan:
     def connect(self, ssid, password):
         self.connect_calls.append((ssid, password))
         self.connected = True
+
+    def disconnect(self):
+        self.disconnect_calls += 1
+        self.connected = False
+
+    def ifconfig(self):
+        return ("192.0.2.50", "255.255.255.0", "192.0.2.1", "192.0.2.1")
 
 
 def test_connect_wifi_requires_ssid(monkeypatch):
@@ -67,6 +77,29 @@ def test_connect_wifi_joins_network_when_available(monkeypatch):
 
     assert diagnostics == ()
     assert wlan.active_calls == [True]
+    assert wlan.connect_calls == [("Office", "secret")]
+
+
+def test_read_wifi_state_and_reconnect_wifi_capture_current_link_details(monkeypatch):
+    fake_time = FakeTime()
+    wlan = FakeWlan(connected=True)
+    wlan.active(True)
+    fake_network = SimpleNamespace(STA_IF="sta", WLAN=lambda interface: wlan)
+
+    monkeypatch.setattr(firmware_runtime, "time", fake_time)
+    monkeypatch.setattr(firmware_runtime, "network", fake_network)
+
+    snapshot = firmware_runtime.read_wifi_state({"wifi": {"ssid": "Office"}})
+    diagnostics = firmware_runtime.reconnect_wifi({"wifi": {"ssid": "Office", "password": "secret"}})
+
+    assert snapshot == {
+        "ssid": "Office",
+        "connected": True,
+        "active": True,
+        "ip_address": "192.0.2.50",
+    }
+    assert diagnostics == ()
+    assert wlan.disconnect_calls == 1
     assert wlan.connect_calls == [("Office", "secret")]
 
 

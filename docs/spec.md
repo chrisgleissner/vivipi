@@ -585,4 +585,50 @@ The build time is recorded at firmware build time in UTC.
 
 ---
 
+## 22. Observability & REPL
+
+Runtime observability MUST provide structured, bounded, machine-parseable logs.
+
+- Supported levels: `DEBUG`, `INFO`, `WARN`, `ERROR`
+- Every line MUST include a component tag
+- Log records MUST be retained in a fixed-size in-memory ring buffer
+- Hot paths MUST avoid per-iteration debug spam and MUST keep repeated healthy-check summaries sampled and bounded
+- Unhealthy checks MUST log a summary plus additional bounded failure detail
+
+[VIVIPI-OBS-001]
+
+Critical runtime state MUST be inspectable through REPL-safe APIs.
+
+- Registered checks
+- Latest check state
+- Current failures
+- Network state
+- Retained logs
+- Retained errors
+
+[VIVIPI-OBS-002]
+
+REPL control MUST expose safe runtime operations without reflashing firmware.
+
+- Run all checks manually
+- Reset runtime state
+- Reconnect Wi-Fi
+- Change log level
+- Toggle debug mode
+- Query memory metrics and trigger GC collection
+
+[VIVIPI-OBS-003]
+
+Runtime instrumentation MUST retain enough information to reproduce failures deterministically.
+
+- Per-check duration and latency metrics
+- Cycle timing metrics
+- Captured exceptions with retained trace lines
+- Periodic and manual memory snapshots
+- Deterministic state snapshots and bounded log retrieval
+
+[VIVIPI-OBS-004]
+
+---
+
 ## END

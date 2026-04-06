@@ -1,3 +1,46 @@
+## Observability / REPL Convergence
+
+Status: DONE
+Started: 2026-04-06T17:28:25+01:00
+Completed: 2026-04-06T17:49:09+01:00
+
+- [x] T1 Structured Logging System
+	Dependencies: none
+	Success criteria: add a deterministic logging module with `DEBUG`/`INFO`/`WARN`/`ERROR`, component tags, fixed-format bounded records, ring-buffer integration hooks, and unit coverage for formatting, truncation, and level gating.
+- [x] T2 Hot Path Logging Guardrails
+	Dependencies: T1
+	Success criteria: annotate runtime hot paths, keep debug logging off by default, prevent per-iteration logging in tight loops, and prove bounded log emission with targeted tests or measurements.
+- [x] T3 Runtime State Introspection
+	Dependencies: T1
+	Success criteria: expose registered checks, latest results, last errors, timings, and network state through a read-only state registry with REPL-safe accessors and tests.
+- [x] T4 REPL Control Surface
+	Dependencies: T3
+	Success criteria: expose safe idempotent controls to run checks, reset runtime state, reconnect Wi-Fi, dump logs, and change log levels at runtime with tests covering state safety.
+- [x] T5 Ring Buffer Log Storage
+	Dependencies: T1
+	Success criteria: add a fixed-size constant-time in-memory ring buffer, integrate it with the logger, expose retrieval APIs, and document explicit memory bounds.
+- [x] T6 Error Capture And Retention
+	Dependencies: T3, T5
+	Success criteria: capture runtime exceptions and per-check failures, retain them for REPL retrieval, and cover the behavior with tests.
+- [x] T7 Memory Observability
+	Dependencies: T3
+	Success criteria: expose free/allocated memory and GC counters through a debug surface, collect snapshots outside hot paths, and cover the fallback behavior in tests.
+- [x] T8 Timing / Latency Instrumentation
+	Dependencies: T3
+	Success criteria: record check duration, network latency, and cycle timing using lightweight timers, surface the metrics through REPL APIs, and validate with tests.
+- [x] T9 Debug Mode Switch
+	Dependencies: T1, T3, T4, T8
+	Success criteria: add a runtime-toggleable debug mode that enables debug logs and deeper instrumentation while remaining off by default.
+- [x] T10 Failure Reproducibility
+	Dependencies: T1, T3, T5, T6, T8, T9
+	Success criteria: provide deterministic snapshots, retained logs/errors, and documented reproduction steps sufficient to diagnose failures without reflashing.
+- [x] T11 Testing Requirements
+	Dependencies: T1, T3, T4, T5, T6, T7, T8, T9, T10
+	Success criteria: add focused tests for the new modules and behaviors, keep requirement traceability current, and maintain repository branch coverage at or above the enforced gate.
+- [x] T12 Performance Validation
+	Dependencies: T2, T5, T7, T8, T9, T11
+	Success criteria: collect before/after measurements for cycle latency, logging overhead, and memory stability, and record the evidence in `WORKLOG.md`.
+
 ## Display Mode + Multi-Column Convergence
 
 Status: BLOCKED ON HARDWARE ACCESS
