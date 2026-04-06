@@ -6,16 +6,16 @@
 [![Hardware](https://img.shields.io/badge/hardware-Raspberry%20Pi%20Pico-blue)](https://github.com/chrisgleissner/vivipi/releases)
 [![Runtime](https://img.shields.io/badge/runtime-MicroPython%20%7C%20Python-blue)](https://github.com/chrisgleissner/vivipi)
 
-ViviPi (pronounced “VEE-vee-pie”, from the Latin *viv-* in *vivere*, “to live”) is a minimal, glanceable monitoring system built on the Raspberry Pi Pico 2W, paired with a 128×64 monochrome OLED.
+ViviPi (pronounced “VEE-vee-pie”, from the Latin *viv-* in *vivere*, “to live”) is a minimal, glanceable monitoring system for Raspberry Pi Pico display modules. The default target is a Pico 2W with a 128x64 SH1107 OLED, but the runtime and build pipeline also support Waveshare Pico OLED, LCD, and e-paper modules.
 
 ## What You Get
 
-- Strict 16x8 character rendering for idle, overview, detail, and diagnostics view
+- Deterministic fixed-width rendering across supported Pico OLED, LCD, and e-paper modules
+- Legacy `16 x 8` grid preserved on the default 1.3 inch OLED at the `medium` font preset
 - Deterministic scheduling and execution for `PING`, `HTTP`, `FTP`, `TELNET`, and `SERVICE`
-- Compact runtime diagnostics and burn-in shift control
-- `./build` commands for install, lint, test, coverage, packaging, deploy, and service hosting
+- One `./build` entrypoint for install, lint, test, coverage, packaging, deploy, and service hosting
 
-## Hardware Target
+## Default Hardware Target
 
 - Board: Raspberry Pi Pico 2W
 - Display: 128x64 monochrome OLED
@@ -144,13 +144,13 @@ The sample `SERVICE` check in `config/checks.yaml` points at `VIVIPI_SERVICE_BAS
 
 [`./config/build-deploy.yaml`](./config/build-deploy.yaml) is the build-time source of truth for:
 
-- board and display metadata
-- display type selection, inferred display geometry and pins, overview mode, column layout, page rotation, failure highlighting, and brightness defaults when supported
+- device metadata and default board wiring
+- display selection and layout behavior
 - Wi-Fi credentials
 - service endpoint defaults
 - the path to the checks config
 
-Wi-Fi credentials are injected via environment variables:
+Environment variables are injected into `build-deploy.yaml` placeholders:
 
 ```yaml
 wifi:
@@ -158,23 +158,68 @@ wifi:
   password: ${VIVIPI_WIFI_PASSWORD}
 ```
 
-Notes:
+### Configuration Reference
 
-- `VIVIPI_WIFI_SSID` and `VIVIPI_WIFI_PASSWORD` are required for device config
-- `service.base_url` is resolved from `VIVIPI_SERVICE_BASE_URL` when you want `SERVICE` checks
-- If `VIVIPI_SERVICE_BASE_URL` is omitted, build-time config keeps only the configured `PING` and `HTTP` checks
-- When used, the value points to a host address reachable from the Pico over Wi-Fi, such as `http://192.168.1.10:8080/checks`
-- `device.display.type` selects a supported display and infers controller, SPI mode, geometry, and default pin wiring
-- Supported built-ins span OLED, LCD, and e-paper families; use the display matrix below for the exact `device.display.type` string
-- `device.display.mode` accepts `standard` or `compact`
-- `device.display.columns` accepts integer values from `1` to `4`
-- `device.display.column_separator` must be exactly one character and is inserted only between overview columns
-- `device.display.font` accepts `extrasmall`, `small`, `medium`, `large`, or `extralarge`; `medium` is the default and targets approximately the same physical glyph size across supported displays
-- Visible rows and columns are derived automatically from the chosen display geometry and the resolved character cell size
-- `device.display.font.width_px` and `device.display.font.height_px` remain available only as backward-compatible overrides for advanced tuning
-- `device.display.page_interval` controls automatic overview page rotation; use `0s` to disable automatic page cycling. The inferred default is `15s` for OLED and LCD, `180s` for the smaller e-paper panels, and `300s` for the 4.2 inch e-paper
-- `device.display.failure_color` configures the failed-check accent color and defaults to `red`
-- `device.display.brightness` accepts `low`, `medium`, `high`, `max`, or a raw `0-255` value on OLED and LCD types. It is not supported on e-paper types
+#### Environment Variables
+
+| Variable | Required | Used by | Notes |
+| --- | --- | --- | --- |
+| `VIVIPI_WIFI_SSID` | Yes | `wifi.ssid` | Required to build device config |
+| `VIVIPI_WIFI_PASSWORD` | Yes | `wifi.password` | Required to build device config |
+| `VIVIPI_SERVICE_BASE_URL` | No | `service.base_url`, sample `SERVICE` checks | Must be reachable from the Pico over Wi-Fi, for example `http://192.168.1.10:8080/checks` |
+
+If `VIVIPI_SERVICE_BASE_URL` is omitted, build-time filtering drops `SERVICE` checks and keeps the direct checks defined in [config/checks.yaml](config/checks.yaml).
+
+#### `build-deploy.yaml`
+
+| Key | Values | Default | Notes |
+| --- | --- | --- | --- |
+| `project.name` | string | `vivipi` | Project name stored in the rendered runtime config |
+| `device.board` | string | `pico2w` | Board identifier used for packaging and install metadata |
+| `device.micropython_port` | path-like string | `/dev/ttyACM0` | Default port for `./build deploy` |
+| `device.micropython.version` | string | `1.25.0` | Pinned MicroPython version reference |
+| `device.micropython.download_page` | absolute URL | Pico 2W download page | Included in the install manifest |
+| `device.buttons.a` | GPIO pin name | `GP14` | Left button pin |
+| `device.buttons.b` | GPIO pin name | `GP15` | Right button pin |
+| `device.display.type` | see display matrix below | `waveshare-pico-oled-1.3` | Selects the backend and infers controller, SPI mode, geometry, default pins, and default page interval |
+| `device.display.mode` | `standard`, `compact` | `standard` | Overview layout mode |
+| `device.display.columns` | integer `1` to `4` | `1` | Number of overview columns |
+| `device.display.column_separator` | exactly one character | space | Inserted only between overview columns |
+| `device.display.font` | `extrasmall`, `small`, `medium`, `large`, `extralarge` | `medium` | Resolves the character cell size from the selected display geometry |
+| `device.display.font.width_px` | integer `6` to `32` | inferred | Optional backward-compatible override |
+| `device.display.font.height_px` | integer `6` to `32` | inferred | Optional backward-compatible override |
+| `device.display.page_interval` | integer seconds or `Ns` | inferred by display | Use `0s` to disable automatic page cycling |
+| `device.display.failure_color` | color name string | `red` | Used for failed-check accent rendering on color-capable displays |
+| `device.display.brightness` | `low`, `medium`, `high`, `max`, or `0` to `255` | `medium` on OLED/LCD | Unsupported on e-paper display types |
+| `wifi.ssid` | placeholder or string | none | Normally `${VIVIPI_WIFI_SSID}` |
+| `wifi.password` | placeholder or string | none | Normally `${VIVIPI_WIFI_PASSWORD}` |
+| `service.base_url` | absolute `http` or `https` URL | omitted | Required only when using `SERVICE` checks |
+| `service.default_prefix` | string | `adb` | Default prefix for service-discovered checks |
+| `checks_config` | relative path | `checks.yaml` | Path to the checks definition file |
+
+Visible rows and columns are derived automatically from the selected display geometry and the resolved font size.
+
+`device.display.page_interval` defaults by display family:
+
+| Display family | Default page interval |
+| --- | --- |
+| OLED and LCD | `15s` |
+| 2.13 inch e-paper | `180s` |
+| 2.7 to 2.9 inch e-paper | `240s` |
+| 3.7 to 4.2 inch e-paper | `300s` |
+| 7.5 inch e-paper | `600s` |
+
+Example:
+
+```yaml
+device:
+  display:
+    type: waveshare-pico-lcd-1.3
+    mode: compact
+    columns: 2
+    font: medium
+    page_interval: 15s
+```
 
 ### Supported Display Types
 
@@ -201,26 +246,21 @@ Notes:
 | `eink` | Waveshare Pico e-Paper 4.2 V2 | `4.2"` | `400 × 300` | `waveshare-pico-epaper-4.2-v2` |
 | `eink` | Waveshare Pico e-Paper 7.5 B V2 | `7.5"` | `800 × 480` | `waveshare-pico-epaper-7.5-b-v2` |
 
-Use the exact string from the last column in `config/build-deploy.yaml`:
-
-```yaml
-device:
-  display:
-    type: waveshare-pico-lcd-1.3
-    font: medium
-```
-
 ### Checks
 
-[`config/checks.yaml`](./config/checks.yaml) defines build-time checks.
+[config/checks.yaml](config/checks.yaml) defines build-time checks.
 
-Supports:
-
-- PING
-- HTTP
-- TELNET
-- FTP
-- SERVICE endpoints for complex checks
+| Field | Required | Notes |
+| --- | --- | --- |
+| `name` | Yes | Label shown on the display |
+| `type` | Yes | `ping`, `http`, `telnet`, `ftp`, or `service` |
+| `target` | Yes | Host, URL, or service endpoint target |
+| `interval_s` | Yes | Check cadence in seconds |
+| `timeout_s` | Yes | Per-check timeout in seconds |
+| `method` | HTTP only | Request method, for example `GET` |
+| `username` | Optional | Used by FTP and TELNET checks when needed |
+| `password` | Optional | Used by FTP and TELNET checks when needed |
+| `prefix` | `service` only | Prefix applied to service-discovered checks |
 
 ## Testing and Quality Gates
 
@@ -284,40 +324,5 @@ Because of that, `device.display.type` remains the explicit selector when you ar
 
 The current implementation directly covers every bundled Pico OLED/LCD MicroPython sample in the vendor tree and the bundled Pico e-paper MicroPython drivers for `2.13`, `2.13-B`, `2.7`, `2.7-V2`, `2.9`, `3.7`, `4.2`, `4.2-V2`, and `7.5-B`.
 
-## Build Config Enum Defaults
+For normative product behavior and requirement wording, use [docs/spec.md](docs/spec.md) as the source of truth.
 
-The following `build-deploy.yaml` fields accept a defined set of string values.
-
-`device.display.type`
-
-- Values: see the supported display matrix above
-- Default when omitted: `waveshare-pico-oled-1.3`
-- Effect: selects the display backend and infers controller, SPI mode, pixel geometry, default pins, and default page interval
-
-`device.display.mode`
-
-- Values: `standard`, `compact`
-- Default when omitted: `standard`
-- Effect: selects legacy one-check-per-row overview or compact packed overview rendering
-
-`device.display.brightness`
-
-- Preset string values: `low`, `medium`, `high`, `max`
-- Default when omitted on OLED and LCD types: `medium`
-- Default when omitted on e-paper types: not applicable, because brightness is unsupported
-- Alternative accepted value: raw integer `0-255` on OLED and LCD types
-
-`device.display.font`
-
-- Values: `extrasmall`, `small`, `medium`, `large`, `extralarge`
-- Default when omitted: `medium`
-- Effect: resolves the character cell size from the selected display geometry so visible rows and columns are derived automatically
-
-Related non-enum fields with important defaults:
-
-- `device.display.columns`: default `1`
-- `device.display.column_separator`: default single space
-- `device.display.failure_color`: default `red`
-- `device.display.page_interval`: default `15s` for OLED and LCD, `180s` for 2.13 to 2.9 inch e-paper, `300s` for 4.2 inch e-paper
-- `device.display.page_interval`: default `15s` for OLED and LCD, `180s` for 2.13 inch e-paper, `240s` for 2.7 to 2.9 inch e-paper, `300s` for 3.7 to 4.2 inch e-paper, `600s` for 7.5 inch e-paper
-- `device.display.font.width_px` and `device.display.font.height_px`: optional backward-compatible overrides for advanced tuning
