@@ -6,14 +6,64 @@
 [![Hardware](https://img.shields.io/badge/hardware-Raspberry%20Pi%20Pico-blue)](https://github.com/chrisgleissner/vivipi/releases)
 [![Runtime](https://img.shields.io/badge/runtime-MicroPython%20%7C%20Python-blue)](https://github.com/chrisgleissner/vivipi)
 
-ViviPi (pronounced “VEE-vee-pie”, from the Latin *viv-* in *vivere*, “to live”) is a minimal, glanceable monitoring system for Raspberry Pi Pico display modules. The default target is a Pico 2W with a 128x64 SH1107 OLED, but the runtime and build pipeline also support Waveshare Pico OLED, LCD, and e-paper modules.
+ViviPi (pronounced "VEE-vee-pie", from the Latin *viv-* in *vivere*, "to live") is a minimal, glanceable monitoring system for Raspberry Pi Pico display modules. The default target is a Pico 2W with a 128x64 SH1107 OLED, but the runtime and build pipeline also support Waveshare Pico OLED, LCD, and e-paper modules.
 
-## What You Get
+The project is intentionally narrow:
 
-- Deterministic fixed-width rendering across supported Pico OLED, LCD, and e-paper modules
-- Legacy `16 x 8` grid preserved on the default 1.3 inch OLED at the `medium` font preset
-- Deterministic scheduling and execution for `PING`, `HTTP`, `FTP`, `TELNET`, and `SERVICE`
-- One `./build` entrypoint for install, lint, test, coverage, packaging, deploy, and service hosting
+- deterministic fixed-width rendering across supported Pico OLED, LCD, and e-paper modules
+- deterministic scheduling and execution for `PING`, `HTTP`, `FTP`, `TELNET`, and `SERVICE`
+- one `./build` entrypoint for install, lint, test, coverage, packaging, deploy, and service hosting
+
+Behavioral requirements live in [docs/spec.md](docs/spec.md). Requirement-to-test coverage lives in [docs/spec-traceability.md](docs/spec-traceability.md).
+
+## System Architecture
+
+ViviPi runs on the Pico and evaluates checks through two paths: direct network probes (`PING`, `HTTP`, `FTP`, `TELNET`) and `SERVICE` probes.
+
+```mermaid
+flowchart TB
+  Pico[Pico runtime]
+
+  subgraph Direct[Direct probes from the Pico]
+    direction LR
+    Ping[PING]
+    Http[HTTP]
+    Ftp[FTP]
+    Telnet[TELNET]
+  end
+
+  subgraph ServicePath[SERVICE probe path]
+    direction LR
+    ServiceProbe[SERVICE]
+    ServiceAPI[Vivi Service /checks endpoint]
+    AdbBackend[Default backend: adb service]
+    Android[Android phone availability]
+    CustomChecks[Custom checks from any backend]
+
+    ServiceProbe -->|GET VIVIPI_SERVICE_BASE_URL| ServiceAPI
+    ServiceAPI --> AdbBackend
+    AdbBackend --> Android
+    ServiceAPI --> CustomChecks
+  end
+
+  Pico --> Ping
+  Pico --> Http
+  Pico --> Ftp
+  Pico --> Telnet
+  Pico --> ServiceProbe
+```
+
+Direct probes run from the Pico itself. `SERVICE` is the extension point for any kind of check driven not by the Pico, but by another device.
+
+### Probe Reference
+
+| Probe | Performs | Success condition | Failure condition or note |
+| --- | --- | --- | --- |
+| `PING` | ICMP ping | Response received; latency measured locally | No response or timeout |
+| `HTTP` | HTTP request | Response status is `2xx` or `3xx`; latency measured locally | Non-`2xx`/`3xx` response or timeout |
+| `FTP` | FTP control session with optional credentials | Login succeeds and the top-level directory can be listed via passive mode | Login failure, invalid listing, or timeout |
+| `TELNET` | Telnet session with optional credentials | Login succeeds when prompted and valid prompt or session output is observed | Login failure, invalid output, or timeout |
+| `SERVICE` | HTTP request to a `/checks` endpoint | Response returns a valid checks payload; each returned check becomes an independent ViviPi check | Default backend uses `adb` to report Android availability, but any backend can return checks through the same schema |
 
 ## Default Hardware Target
 
@@ -26,18 +76,18 @@ ViviPi (pronounced “VEE-vee-pie”, from the Latin *viv-* in *vivere*, “to l
 ### Pin Mapping
 
 | Signal | GPIO |
-|--------|------|
-| DIN    | GP11 |
-| CLK    | GP10 |
-| CS     | GP9  |
-| DC     | GP8  |
-| RST    | GP12 |
-| BTN A  | GP14 |
-| BTN B  | GP15 |
+| --- | --- |
+| DIN | GP11 |
+| CLK | GP10 |
+| CS | GP9 |
+| DC | GP8 |
+| RST | GP12 |
+| BTN A | GP14 |
+| BTN B | GP15 |
 
 ## Quick Start
 
-This is the shortest useful path.
+This is the shortest useful path from clone to running device.
 
 Requirements:
 
@@ -46,7 +96,7 @@ Requirements:
 - `adb` only if you want the default service against connected Android devices
 - `mpremote` only if you want `./build deploy` to copy files onto a Pico 2W
 
-Step 1: Set Wi-Fi credentials. Add `VIVIPI_SERVICE_BASE_URL` only if you want `SERVICE` checks.
+1. Set Wi-Fi credentials. Add `VIVIPI_SERVICE_BASE_URL` only if you want `SERVICE` checks.
 
 ```bash
 export VIVIPI_WIFI_SSID="your-wifi-name"
@@ -54,31 +104,47 @@ export VIVIPI_WIFI_PASSWORD="your-wifi-password"
 export VIVIPI_SERVICE_BASE_URL="http://192.168.1.10:8080/checks"
 ```
 
-Step 2: Run the default local workflow.
+1. Run the default local workflow.
 
 ```bash
 ./build
 ```
 
-Without `VIVIPI_SERVICE_BASE_URL`, ViviPi builds only the direct `PING`, `HTTP`, `FTP`, and `TELNET` checks from `config/checks.yaml`.
+`./build` with no command is equivalent to `./build ci`.
 
-Step 3: Start the default Vivi Service only if you want the sample `SERVICE` check.
+Without `VIVIPI_SERVICE_BASE_URL`, ViviPi builds only the direct `PING`, `HTTP`, `FTP`, and `TELNET` checks from [config/checks.yaml](config/checks.yaml).
+
+1. Start the default Vivi Service only if you want the sample `SERVICE` check.
 
 ```bash
-export VIVIPI_SERVICE_BASE_URL="http://192.168.1.10:8080/checks"
 ./build service --host 0.0.0.0 --port 8080
 ```
 
-Step 4: Build and deploy to the Pico when hardware is connected.
+1. Build and deploy to the Pico when hardware is connected.
 
 ```bash
 ./build build-firmware
 ./build deploy --device-port /dev/ttyACM0
 ```
 
-`./build deploy` uses `mpremote` to copy the prepared filesystem. The MicroPython UF2 is installed separately from the pinned Pico 2W download reference.
+`./build deploy` uses `mpremote` to copy the prepared filesystem. It does not flash a MicroPython UF2 onto a blank board.
 
-## Install From GitHub Releases
+## Install Paths
+
+### Develop From Source
+
+Use the source checkout when you want the full local workflow:
+
+```bash
+./build install
+./build test
+./build build-firmware
+./build service --host 0.0.0.0 --port 8080
+```
+
+The canonical entrypoint is `./build`. Run `./build help` for the full CLI surface.
+
+### Install From GitHub Releases
 
 Each GitHub release publishes a small, versioned set of assets. Download the files that match the tag you want to install.
 
@@ -90,16 +156,14 @@ Each GitHub release publishes a small, versioned set of assets. Download the fil
 | `vivipi-source-<version>.zip` | Tagged source snapshot | Inspecting or rebuilding the exact source used for the release | Download if you want a ZIP source archive with the release tag in the filename |
 | `vivipi-source-<version>.tar.gz` | Tagged source snapshot | Inspecting or rebuilding the exact source used for the release | Download if you want a tarball source archive with the release tag in the filename |
 
-GitHub also adds built-in `Source code (zip)` and `Source code (tar.gz)` links to every release page. Those filenames are controlled by GitHub. Use the versioned `vivipi-source-<version>.*` assets above when you need filenames that explicitly include the release tag.
-
-### Device Install From A Release
+#### Device Install From A Release
 
 1. Download `pico2w-micropython-<version>.txt` and `vivipi-device-filesystem-<version>.zip` from the release page.
 2. Use the URL in `pico2w-micropython-<version>.txt` to install the base MicroPython UF2 on the Pico if the board is blank.
 3. Copy the contents of `vivipi-device-filesystem-<version>.zip` onto the Pico with `mpremote fs cp`, or unzip it locally and use `./build deploy --device-port ...` against the unpacked `vivipi-device-fs/` tree.
 4. Point `VIVIPI_SERVICE_BASE_URL` at a reachable host only if you want `SERVICE` checks baked into `config.json`.
 
-### Service Install From A Release
+#### Service Install From A Release
 
 1. Download and unzip `vivipi-service-bundle-<version>.zip`.
 2. Install the bundled wheel with `python -m pip install vivipi-*.whl`.
@@ -107,26 +171,25 @@ GitHub also adds built-in `Source code (zip)` and `Source code (tar.gz)` links t
 4. Or start `custom-service-example.py --host 0.0.0.0 --port 8080` and adapt its `/checks` payload to expose your own checks.
 5. Set `VIVIPI_SERVICE_BASE_URL` in your build configuration to `http://<host>:8080/checks` before building the device filesystem.
 
-## Build Tooling
+## Build, Test, and Package
 
-The `./build` script is the canonical entrypoint.
-Running `./build` with no command is equivalent to `./build ci`.
+`./build` is the canonical entrypoint. Running it with no command is equivalent to `./build ci`, and `./build all` is an alias for the same workflow.
 
-### Common commands
+### Common Commands
 
-```bash
-./build
-./build install
-./build lint
-./build test
-./build coverage
-./build ci
-./build render-config
-./build build-firmware
-./build release-assets
-./build deploy --device-port /dev/ttyACM0
-./build service --host 0.0.0.0 --port 8080
-```
+| Command | What it does |
+| --- | --- |
+| `./build` | Install dependencies, run Ruff, run pytest, and build firmware assets |
+| `./build install` | Create the local virtual environment and install dev dependencies |
+| `./build lint` | Run Ruff |
+| `./build test` | Run pytest |
+| `./build coverage` | Run pytest with branch coverage output |
+| `./build ci` | Run the full local CI workflow |
+| `./build render-config` | Render `artifacts/device/config.json` from the build config |
+| `./build build-firmware` | Build the firmware bundle into `artifacts/release` |
+| `./build release-assets` | Build the versioned GitHub release assets |
+| `./build deploy --device-port /dev/ttyACM0` | Build the firmware bundle and copy it to the Pico via `mpremote` |
+| `./build service --host 0.0.0.0 --port 8080` | Run the default ADB-backed Vivi Service |
 
 Typical examples:
 
@@ -149,30 +212,30 @@ VIVIPI_SERVICE_BASE_URL="http://192.168.1.10:8080/checks" \
 
 Generated artifacts are written under `artifacts/`.
 
-Key outputs:
+### Key Outputs
 
-- `./build render-config` writes `artifacts/device/config.json`
-- `./build build-firmware` writes `vivipi-device-filesystem-<version>.zip`, `pico2w-micropython-<version>.txt`, and the unpacked `vivipi-device-fs/` tree under `artifacts/release`
-- `./build release-assets` writes the versioned release assets under `artifacts/release`
-- `./build deploy` copies the unpacked `vivipi-device-fs/` tree onto the Pico with `mpremote`
-- `./build` and `./build ci` validate the core, runtime, tooling, and firmware adapters together on CPython
+| Output | Produced by | Purpose |
+| --- | --- | --- |
+| `artifacts/device/config.json` | `./build render-config` | Rendered runtime config |
+| `artifacts/release/vivipi-device-fs/` | `./build build-firmware` | Unpacked device filesystem tree |
+| `artifacts/release/vivipi-device-filesystem-<version>.zip` | `./build build-firmware` and `./build release-assets` | Deployable device bundle |
+| `artifacts/release/pico2w-micropython-<version>.txt` | `./build build-firmware` and `./build release-assets` | Pinned MicroPython download reference |
+| `artifacts/release/vivipi-service-bundle-<version>.zip` | `./build release-assets` | Service starter bundle |
+| `artifacts/release/vivipi-source-<version>.zip` and `artifacts/release/vivipi-source-<version>.tar.gz` | `./build release-assets` | Tagged source archives |
 
-## Running the Default Vivi Service
+## Default Vivi Service
 
-The default service discovers connected ADB devices and exposes them as monitoring checks.
+The default host-side service discovers connected ADB devices and exposes them as monitoring checks.
 
 ```bash
 ./build service --host 0.0.0.0 --port 8080
 ```
 
-The HTTP endpoint implementation lives in `src/vivipi/services/adb_service.py`.
-The sample `SERVICE` check in `config/checks.yaml` points at `VIVIPI_SERVICE_BASE_URL`.
+The HTTP endpoint implementation lives in [src/vivipi/services/adb_service.py](src/vivipi/services/adb_service.py). The sample `SERVICE` check in [config/checks.yaml](config/checks.yaml) points at `VIVIPI_SERVICE_BASE_URL`.
 
-## Configuration Model
+## Configuration
 
-### Build and Deployment
-
-[`./config/build-deploy.yaml`](./config/build-deploy.yaml) is the build-time source of truth for:
+[config/build-deploy.yaml](config/build-deploy.yaml) is the build-time source of truth for:
 
 - device metadata and default board wiring
 - display selection and layout behavior
@@ -188,9 +251,7 @@ wifi:
   password: ${VIVIPI_WIFI_PASSWORD}
 ```
 
-### Configuration Reference
-
-#### Environment Variables
+### Environment Variables
 
 | Variable | Required | Used by | Notes |
 | --- | --- | --- | --- |
@@ -200,7 +261,7 @@ wifi:
 
 If `VIVIPI_SERVICE_BASE_URL` is omitted, build-time filtering drops `SERVICE` checks and keeps the direct checks defined in [config/checks.yaml](config/checks.yaml).
 
-#### `build-deploy.yaml`
+### build-deploy.yaml Reference
 
 | Key | Values | Default | Notes |
 | --- | --- | --- | --- |
@@ -294,7 +355,7 @@ Published specs below are based on current The Pi Hut Waveshare product listings
 | `password` | Optional | Used by FTP and TELNET checks when needed |
 | `prefix` | `service` only | Prefix applied to service-discovered checks |
 
-## Testing and Quality Gates
+## Testing, Releases, and Architecture Notes
 
 - Unified entrypoint: `./build`
 - Test framework: `pytest`
@@ -303,20 +364,11 @@ Published specs below are based on current The Pi Hut Waveshare product listings
 - CI runs on Python 3.12 and 3.13
 - CI verifies runtime-config rendering, packaging, and the firmware adapter path through `./build ci`
 
-The firmware adapters and runtime loop are exercised on CPython, so the same modules used on the board stay covered in the normal development workflow.
+The firmware adapters and runtime loop are exercised on CPython, so the same modules used on the board stay covered in the normal development workflow. `./build` and `./build ci` validate the core, runtime, tooling, and firmware adapters together.
 
 The display backend boundary lives under `firmware/displays/`, while rendering intent stays in `src/vivipi/core/`. New panel support should be added by registering a display type and backend rather than branching through the core renderer.
 
-## Release Artifacts
-
-Tagging with a x.y.z version triggers a release containing:
-
-- `vivipi-device-filesystem-<version>.zip` for copying ViviPi onto a Pico
-- `pico2w-micropython-<version>.txt` with the supported Pico 2W MicroPython download reference
-- `vivipi-service-bundle-<version>.zip` containing the installable wheel plus minimal files for starting the default or a custom service
-- `vivipi-source-<version>.zip` and `vivipi-source-<version>.tar.gz` for tagged source downloads
-
-The release workflow publishes only the versioned firmware bundle, the versioned MicroPython reference, the versioned service starter bundle, and versioned source archives. GitHub's built-in source archive links still appear automatically, but the explicit release assets above are the supported downloads.
+Tagging with an `x.y.z` version publishes the same versioned device, service, and source assets listed in [Install From GitHub Releases](#install-from-github-releases). GitHub's built-in source archive links still appear automatically, but the explicit versioned release assets are the supported downloads.
 
 ## Repository Layout
 
@@ -330,4 +382,3 @@ src/vivipi/services/     Host-side services
 src/vivipi/tooling/      Build and deploy logic
 tests/                   All test suites
 ```
-
