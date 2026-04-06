@@ -1,4 +1,5 @@
 from vivipi.core.config import build_direct_check_id, build_service_check_id, load_checks_config
+from vivipi.core.display import get_display_definition, infer_default_font, normalize_display_config, normalize_display_type, supported_display_types, supported_font_sizes
 from vivipi.core.diagnostics import append_diagnostic_lines, format_diagnostic_line
 from vivipi.core.execution import CheckExecutionResult, HttpResponseResult, PingProbeResult, execute_check
 from vivipi.core.input import Button, InputController
@@ -33,15 +34,21 @@ __all__ = [
     "due_checks",
     "execute_check",
     "format_diagnostic_line",
+    "get_display_definition",
+    "infer_default_font",
     "integrate_observations",
     "load_checks_config",
     "move_selection",
     "next_due_at",
+    "normalize_display_config",
+    "normalize_display_type",
     "page_count",
     "record_diagnostic_events",
     "render_frame",
     "render_reason",
     "set_page_index",
+    "supported_display_types",
+    "supported_font_sizes",
     "visible_checks",
     "would_wrap_selection",
 ]

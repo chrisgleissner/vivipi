@@ -159,6 +159,50 @@ def test_build_runtime_app_uses_injected_factories_and_records_wifi_diagnostics(
     assert called["diagnostics"] == (((DiagnosticEvent(code="WIFI", message="connected"),)), True)
 
 
+def test_build_runtime_app_infers_geometry_and_page_interval_from_display_type():
+    called = {}
+
+    class FakeApp:
+        def __init__(self, **kwargs):
+            called.update(kwargs)
+
+        def inject_diagnostics(self, diagnostics, activate=True):
+            called["diagnostics"] = diagnostics
+
+    captured_display = {}
+
+    def fake_display_factory(config):
+        captured_display["config"] = config
+        return SimpleNamespace(show_boot_logo=lambda version: None)
+
+    firmware_runtime.build_runtime_app(
+        {
+            "project": {},
+            "device": {
+                "display": {"type": "waveshare-pico-epaper-2.13-b-v4"},
+                "buttons": {"a": "GP14", "b": "GP15"},
+            },
+        },
+        input_controller_factory=lambda: object(),
+        display_factory=fake_display_factory,
+        button_reader_factory=lambda config, input_controller: object(),
+        runtime_app_factory=FakeApp,
+        definitions_builder=lambda config: (),
+        executor_factory=lambda: object(),
+        wifi_connector=lambda config: (),
+        now_provider=lambda: 0.0,
+        sleep_ms=lambda ms: None,
+    )
+
+    assert captured_display["config"]["width_px"] == 250
+    assert captured_display["config"]["height_px"] == 122
+    assert captured_display["config"]["font_size"] == "medium"
+    assert captured_display["config"]["font"] == {"width_px": 10, "height_px": 10}
+    assert called["row_width"] == 25
+    assert called["page_size"] == 12
+    assert called["page_interval_s"] == 180
+
+
 def test_boot_logo_shown_for_minimum_duration_by_waiting_after_fast_wifi():
     called = {}
     sleep_calls = []

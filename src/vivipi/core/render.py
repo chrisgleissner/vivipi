@@ -8,10 +8,13 @@ from vivipi.core.text import center_text, column_widths, compact_overview_cell, 
 
 
 @dataclass(frozen=True)
-class InvertedSpan:
+class TextSpan:
     row_index: int
     start_column: int
     end_column: int
+
+
+InvertedSpan = TextSpan
 
 
 @dataclass(frozen=True)
@@ -20,6 +23,7 @@ class Frame:
     inverted_row: int | None = None
     shift_offset: tuple[int, int] = (0, 0)
     inverted_spans: tuple[InvertedSpan, ...] = ()
+    failure_spans: tuple[TextSpan, ...] = ()
 
 
 def _blank_rows(row_width: int, page_size: int) -> list[str]:
@@ -53,6 +57,12 @@ def _detail_rows(check: CheckRuntime | None, now_s: float | None, row_width: int
     return tuple(rows[:page_size])
 
 
+def _status_span(row_index: int, row_width: int, status_value: str) -> TextSpan:
+    end_column = row_width
+    start_column = max(0, end_column - len(status_value))
+    return TextSpan(row_index=row_index, start_column=start_column, end_column=end_column)
+
+
 def _diagnostic_rows(lines: tuple[str, ...], row_width: int, page_size: int) -> tuple[str, ...]:
     rows = [_fixed_width_row(line, row_width) for line in lines[:page_size]]
     while len(rows) < page_size:
@@ -75,19 +85,27 @@ def _about_rows(state: AppState, row_width: int, page_size: int) -> tuple[str, .
 def _legacy_overview_frame(state: AppState, checks: tuple[CheckRuntime, ...]) -> Frame:
     rows = _blank_rows(state.row_width, state.page_size)
     selected_index = None
+    failure_spans: list[TextSpan] = []
     selected_id = normalize_selection(state.checks, state.selected_id, overview_checks(state))
     for row_index, check in enumerate(checks):
         rows[row_index] = overview_row(check.name, check.status.value, state.row_width)
+        if check.status == Status.FAIL:
+            failure_spans.append(_status_span(row_index, state.row_width, check.status.value))
         if check.identifier == selected_id:
             selected_index = row_index
-    return Frame(rows=tuple(rows), inverted_row=selected_index, shift_offset=state.shift_offset)
+    return Frame(
+        rows=tuple(rows),
+        inverted_row=selected_index,
+        shift_offset=state.shift_offset,
+        failure_spans=tuple(failure_spans),
+    )
 
 
 def _compact_overview_frame(state: AppState, checks: tuple[CheckRuntime, ...]) -> Frame:
     rows = _blank_rows(state.row_width, state.page_size)
     separator = state.column_separator
     widths = column_widths(state.row_width, state.overview_columns, separator_width=len(separator))
-    spans: list[InvertedSpan] = []
+    failure_spans: list[TextSpan] = []
 
     for row_index in range(state.page_size):
         start = row_index * state.overview_columns
@@ -104,8 +122,8 @@ def _compact_overview_frame(state: AppState, checks: tuple[CheckRuntime, ...]) -
                 display_text = compact_overview_cell(check.name, check.status.value, width)
                 cell = display_text.ljust(width)
                 if display_text and check.status == Status.FAIL:
-                    spans.append(
-                        InvertedSpan(
+                    failure_spans.append(
+                        TextSpan(
                             row_index=row_index,
                             start_column=cursor,
                             end_column=cursor + len(display_text),
@@ -120,7 +138,7 @@ def _compact_overview_frame(state: AppState, checks: tuple[CheckRuntime, ...]) -
 
         rows[row_index] = "".join(parts)
 
-    return Frame(rows=tuple(rows), shift_offset=state.shift_offset, inverted_spans=tuple(spans))
+    return Frame(rows=tuple(rows), shift_offset=state.shift_offset, failure_spans=tuple(failure_spans))
 
 
 def _overview_frame(state: AppState) -> Frame:
@@ -139,9 +157,16 @@ def _overview_frame(state: AppState) -> Frame:
 
 def render_frame(state: AppState, now_s: float | None = None) -> Frame:
     if state.mode == AppMode.DETAIL:
+        selected = selected_check(state)
+        failure_spans = ()
+        if selected is not None and selected.status == Status.FAIL:
+            failure_spans = (
+                TextSpan(row_index=1, start_column=len("STATUS: "), end_column=len(f"STATUS: {selected.status.value}")),
+            )
         return Frame(
-            rows=_detail_rows(selected_check(state), now_s, state.row_width, state.page_size),
+            rows=_detail_rows(selected, now_s, state.row_width, state.page_size),
             shift_offset=state.shift_offset,
+            failure_spans=failure_spans,
         )
     if state.mode == AppMode.DIAGNOSTICS:
         return Frame(

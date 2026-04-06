@@ -83,6 +83,7 @@ def test_standard_single_column_overview_keeps_legacy_output_exactly():
     assert frame.rows[0] == "Router      FAIL"
     assert frame.inverted_row == 0
     assert frame.inverted_spans == ()
+    assert frame.failure_spans == (InvertedSpan(row_index=0, start_column=12, end_column=16),)
 
 
 def test_compact_mode_shows_all_healthy_checks_without_suffixes_when_no_failures_exist():
@@ -102,9 +103,10 @@ def test_compact_mode_shows_all_healthy_checks_without_suffixes_when_no_failures
 
     assert frame.rows == ("Alpha   |Bravo  ",)
     assert frame.inverted_spans == ()
+    assert frame.failure_spans == ()
 
 
-def test_compact_mode_filters_to_non_healthy_checks_and_inverts_only_failed_text_span():
+def test_compact_mode_filters_to_non_healthy_checks_and_marks_only_failed_text_span():
     state = AppState(
         checks=(
             make_check("alpha", "Alpha", status=Status.OK),
@@ -121,7 +123,7 @@ def test_compact_mode_filters_to_non_healthy_checks_and_inverts_only_failed_text
     frame = render_frame(state)
 
     assert frame.rows == ("BravoX  |Charli!",)
-    assert frame.inverted_spans == (
+    assert frame.failure_spans == (
         InvertedSpan(row_index=0, start_column=0, end_column=6),
     )
 
@@ -182,6 +184,7 @@ def test_detail_view_truncates_details_before_overflowing():
     assert frame.rows[3] == "AGE: 5s         "
     assert frame.rows[4].endswith("…")
     assert len(frame.rows[4]) == 16
+    assert frame.failure_spans == (InvertedSpan(row_index=1, start_column=8, end_column=12),)
 
 
 def test_diagnostics_view_truncates_without_wrapping():

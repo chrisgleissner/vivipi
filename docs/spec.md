@@ -1,42 +1,72 @@
 # ViviPi Specification
 
-Version: 1.2
+Version: 1.4
 Status: Active
 
-A minimal, calm, glanceable monitoring system for a 128×64 monochrome display.
+A minimal, calm, glanceable monitoring system for supported Pico display modules while preserving deterministic fixed-width text rendering.
 
 ---
 
 # 1. Display & Constraints
 
-The system runs on a 128×64 pixel monochrome display (1-bit).
+The system runs on a supported Pico SPI display selected by `device.display.type`.
+
+Built-in display types:
+
+- `waveshare-pico-oled-1.3` = 128×64 monochrome OLED (`SH1107`)
+- `waveshare-pico-oled-2.23` = 128×32 monochrome OLED (`SSD1305` compatible)
+- `waveshare-pico-lcd-0.96` = 160×80 color LCD (`ST7735S`)
+- `waveshare-pico-lcd-1.14` = 240×135 color LCD (`ST7789`)
+- `waveshare-pico-lcd-1.14-v2` = 240×135 color LCD (`ST7789`)
+- `waveshare-pico-lcd-1.3` = 240×240 color LCD (`ST7789`)
+- `waveshare-pico-lcd-1.44` = 128×128 color LCD (`ST7735S`)
+- `waveshare-pico-lcd-1.8` = 160×128 color LCD (`ST7735S`)
+- `waveshare-pico-lcd-2.0` = 320×240 color LCD (`ST7789`)
+- `waveshare-pico-epaper-2.13-v3` = 250×122 black/white e-paper
+- `waveshare-pico-epaper-2.13-v4` = 250×122 black/white e-paper
+- `waveshare-pico-epaper-2.13-v2` = 250×122 black/white e-paper
+- `waveshare-pico-epaper-2.13-b-v4` = 250×122 black/white/red e-paper
+- `waveshare-pico-epaper-2.7` = 264×176 black/white e-paper
+- `waveshare-pico-epaper-2.7-v2` = 264×176 black/white e-paper
+- `waveshare-pico-epaper-2.9` = 296×128 black/white e-paper
+- `waveshare-pico-epaper-3.7` = 480×280 black/white e-paper
+- `waveshare-pico-epaper-4.2` = 400×300 black/white e-paper
+- `waveshare-pico-epaper-4.2-v2` = 400×300 black/white e-paper
+- `waveshare-pico-epaper-7.5-b-v2` = 800×480 black/white/red e-paper
 
 The display is a fixed-width character grid.
 
-Default grid at the default font size:
+Default font behavior:
 
-- 8 rows
-- 16 characters per row
-- Font: fixed 8×8 bitmap scaled into the configured cell size
+- `device.display.font` accepts `extrasmall`, `small`, `medium`, `large`, or `extralarge`
+- `medium` is the default when no font size is configured
+- The preset resolves to a character cell size derived from the display diagonal and pixel geometry so the physical glyph size stays approximately consistent across supported displays
+- Visible columns = `floor(display_width_px / cell_width)`
+- Visible rows = `floor(display_height_px / cell_height)`
+- The default 1.3 inch OLED still resolves to the legacy `16 × 8` grid at the `medium` preset
 
 Display configuration:
 
-- Character cell width and height are configurable from 6 to 32 pixels
-- Visible columns = `floor(128 / cell_width)`
-- Visible rows = `floor(64 / cell_height)`
+- `device.display.type` selects the display backend and MUST infer controller, interface, SPI mode, pixel geometry, and default pins
+- `device.display.font` SHOULD use symbolic size presets at build time
+- Exact character cell width and height MAY still be overridden for backward-compatible advanced tuning and remain constrained to 6 to 32 pixels
+- Visible columns = `floor(display_width_px / cell_width)`
+- Visible rows = `floor(display_height_px / cell_height)`
 
 Rules:
 
 - No anti-aliasing
-- Monochrome bitmap scaling only
+- Bitmap scaling only
 - Rendering remains deterministic and pixel-aligned
 
 [VIVIPI-DISPLAY-001]
 
-Display brightness MUST be configurable at build time.
+Display brightness MUST be configurable at build time for display types that support brightness control.
 
 - SH1107 contrast range: 0 to 255
+- LCD backlight PWM range: 0 to 255
 - Default brightness: medium
+- E-paper display types do not expose brightness control
 
 [VIVIPI-DISPLAY-002]
 
@@ -47,6 +77,23 @@ Overview rendering MUST support configurable modes and multi-column packing.
 - `device.display.column_separator` MUST be exactly one character
 
 [VIVIPI-DISPLAY-003]
+
+Failed checks MUST use a dedicated display accent color.
+
+- `device.display.failure_color` configures the accent color name
+- Default accent color: `red`
+- Color-capable displays render failed check text in the configured accent color
+- Monochrome displays fall back to the existing high-priority monochrome emphasis
+
+[VIVIPI-DISPLAY-004]
+
+Display support MUST remain modular and type-driven.
+
+- Firmware backends are selected from `device.display.type`
+- Core rendering emits backend-agnostic layout and emphasis intent
+- Adding a new display type SHOULD require registry-style extension instead of display-specific conditionals throughout the codebase
+
+[VIVIPI-DISPLAY-005]
 
 ---
 
@@ -79,10 +126,10 @@ Example:
 
 Compact overview mode packs multiple checks into each rendered row.
 
-Given `16` total character cells and `C` columns:
+Given `W` total visible character cells on the current display page and `C` columns:
 
 - separators = `C - 1`
-- available characters = `16 - separators`
+- available characters = `W - separators`
 - base width = `floor(available / C)`
 - remainder = `available % C`
 - the first `remainder` columns use `base width + 1`
@@ -105,7 +152,8 @@ Per rendered column:
 # 3. Typography
 
 - The system MUST use a fixed-width bitmap font derived from the 8×8 base glyph set.
-- Each character cell uses the configured width and height.
+- Each character cell uses the resolved width and height for the selected display and font preset.
+- The `medium` preset SHOULD remain approximately the same physical size across supported displays.
 
 Character rendering rules:
 

@@ -10,14 +10,15 @@ except ImportError:  # pragma: no cover - imported on-device
     time = None
 
 from vivipi.core.input import InputController
+from vivipi.core.display import normalize_display_config
 from vivipi.core.models import DiagnosticEvent, DisplayMode
 from vivipi.runtime import RuntimeApp, build_executor, build_runtime_definitions
 
 try:
-    from display import SH1107Display
+    from display import create_display
     from input import ButtonReader
 except ImportError:  # pragma: no cover - used by CPython tests
-    from firmware.display import SH1107Display
+    from firmware.display import create_display
     from firmware.input import ButtonReader
 
 
@@ -67,7 +68,7 @@ def connect_wifi(config, timeout_s=10):
 def build_runtime_app(
     config,
     input_controller_factory=InputController,
-    display_factory=SH1107Display,
+    display_factory=create_display,
     button_reader_factory=ButtonReader,
     runtime_app_factory=RuntimeApp,
     definitions_builder=build_runtime_definitions,
@@ -78,7 +79,7 @@ def build_runtime_app(
     boot_logo_min_s=5,
 ):
     input_controller = input_controller_factory()
-    display_config = config["device"]["display"]
+    display_config = normalize_display_config(config["device"].get("display"))
     font = display_config.get("font", {}) if isinstance(display_config, dict) else {}
     font_width = int(font.get("width_px", 8)) if isinstance(font, dict) else 8
     font_height = int(font.get("height_px", 8)) if isinstance(font, dict) else 8

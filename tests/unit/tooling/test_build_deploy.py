@@ -63,16 +63,10 @@ checks:
                 "    a: GP14",
                 "    b: GP15",
                 "  display:",
-                "    width_px: 128",
-                "    height_px: 64",
-                "    brightness: medium",
-                "    page_interval: 15s",
+                "    type: waveshare-pico-oled-1.3",
                 "    mode: standard",
                 "    columns: 1",
                 "    column_separator: ' '",
-                "    font:",
-                "      width_px: 8",
-                "      height_px: 8",
                 "wifi:",
                 "  ssid: ${VIVIPI_WIFI_SSID}",
                 "  password: ${VIVIPI_WIFI_PASSWORD}",
@@ -97,12 +91,17 @@ def test_load_build_deploy_settings_substitutes_environment_placeholders(tmp_pat
     assert settings["wifi"]["ssid"] == "TestWifi"
     assert settings["wifi"]["password"] == "TestPassword"
     assert settings["service"]["base_url"] == FIXTURE_ENV["VIVIPI_SERVICE_BASE_URL"]
+    assert settings["device"]["display"]["type"] == "waveshare-pico-oled-1.3"
+    assert settings["device"]["display"]["width_px"] == 128
+    assert settings["device"]["display"]["height_px"] == 64
     assert settings["device"]["display"]["font"] == {"width_px": 8, "height_px": 8}
     assert settings["device"]["display"]["page_interval_s"] == 15
     assert settings["device"]["display"]["brightness"] == 128
     assert settings["device"]["display"]["mode"] == "standard"
     assert settings["device"]["display"]["columns"] == 1
     assert settings["device"]["display"]["column_separator"] == " "
+    assert settings["device"]["display"]["failure_color"] == "red"
+    assert settings["device"]["display"]["pins"]["dc"] == "GP8"
 
 
 def test_write_runtime_config_embeds_wifi_and_checks(tmp_path: Path):
@@ -167,8 +166,7 @@ def test_load_build_deploy_settings_validates_display_limits(tmp_path: Path):
             [
                 "device:",
                 "  display:",
-                "    width_px: 128",
-                "    height_px: 64",
+                "    type: waveshare-pico-oled-1.3",
                 "    page_interval: nope",
                 "    font:",
                 "      width_px: 4",
@@ -178,7 +176,7 @@ def test_load_build_deploy_settings_validates_display_limits(tmp_path: Path):
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="device.display.font.width_px"):
+    with pytest.raises(ValueError, match="device.display.page_interval|device.display.font.width_px"):
         load_build_deploy_settings(config_path, env={})
 
 
@@ -189,8 +187,7 @@ def test_load_build_deploy_settings_supports_numeric_brightness_and_disabled_pag
             [
                 "device:",
                 "  display:",
-                "    width_px: 128",
-                "    height_px: 64",
+                "    type: waveshare-pico-oled-1.3",
                 "    brightness: 32",
                 "    page_interval: 0s",
                 "    font:",
@@ -215,8 +212,7 @@ def test_load_build_deploy_settings_validates_display_mode_columns_and_separator
             [
                 "device:",
                 "  display:",
-                "    width_px: 128",
-                "    height_px: 64",
+                "    type: waveshare-pico-oled-1.3",
                 "    mode: dense",
             ]
         ),
@@ -234,8 +230,7 @@ def test_load_build_deploy_settings_rejects_invalid_column_count(tmp_path: Path)
             [
                 "device:",
                 "  display:",
-                "    width_px: 128",
-                "    height_px: 64",
+                "    type: waveshare-pico-oled-1.3",
                 "    mode: compact",
                 "    columns: 5",
             ]
@@ -254,8 +249,7 @@ def test_load_build_deploy_settings_rejects_invalid_column_separator(tmp_path: P
             [
                 "device:",
                 "  display:",
-                "    width_px: 128",
-                "    height_px: 64",
+                "    type: waveshare-pico-oled-1.3",
                 "    mode: compact",
                 "    columns: 2",
                 "    column_separator: '::'",
@@ -275,8 +269,7 @@ def test_load_build_deploy_settings_defaults_overview_fields_when_omitted(tmp_pa
             [
                 "device:",
                 "  display:",
-                "    width_px: 128",
-                "    height_px: 64",
+                "    type: waveshare-pico-oled-1.3",
             ]
         ),
         encoding="utf-8",
@@ -284,9 +277,91 @@ def test_load_build_deploy_settings_defaults_overview_fields_when_omitted(tmp_pa
 
     settings = load_build_deploy_settings(config_path, env={})
 
+    assert settings["device"]["display"]["type"] == "waveshare-pico-oled-1.3"
     assert settings["device"]["display"]["mode"] == "standard"
     assert settings["device"]["display"]["columns"] == 1
     assert settings["device"]["display"]["column_separator"] == " "
+
+
+def test_load_build_deploy_settings_infers_epaper_metadata_from_type(tmp_path: Path):
+    config_path = tmp_path / "build-deploy.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "device:",
+                "  display:",
+                "    type: waveshare-pico-epaper-2.13-b-v4",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    settings = load_build_deploy_settings(config_path, env={})
+
+    assert settings["device"]["display"]["family"] == "eink"
+    assert settings["device"]["display"]["width_px"] == 250
+    assert settings["device"]["display"]["height_px"] == 122
+    assert settings["device"]["display"]["font_size"] == "medium"
+    assert settings["device"]["display"]["font"] == {"width_px": 10, "height_px": 10}
+    assert settings["device"]["display"]["page_interval_s"] == 180
+    assert settings["device"]["display"]["pins"]["busy"] == "GP13"
+
+
+def test_load_build_deploy_settings_accepts_symbolic_font_size(tmp_path: Path):
+    config_path = tmp_path / "build-deploy.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "device:",
+                "  display:",
+                "    type: waveshare-pico-lcd-1.3",
+                "    font: extralarge",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    settings = load_build_deploy_settings(config_path, env={})
+
+    assert settings["device"]["display"]["font_size"] == "extralarge"
+    assert settings["device"]["display"]["font"]["width_px"] >= 12
+    assert settings["device"]["display"]["font"]["height_px"] >= 12
+
+
+def test_load_build_deploy_settings_rejects_oled_geometry_override(tmp_path: Path):
+    config_path = tmp_path / "build-deploy.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "device:",
+                "  display:",
+                "    type: waveshare-pico-oled-1.3",
+                "    width_px: 64",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="device.display.width_px"):
+        load_build_deploy_settings(config_path, env={})
+
+
+def test_load_build_deploy_settings_rejects_brightness_for_epaper(tmp_path: Path):
+    config_path = tmp_path / "build-deploy.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "device:",
+                "  display:",
+                "    type: waveshare-pico-epaper-2.13-b-v4",
+                "    brightness: medium",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="brightness is not supported"):
+        load_build_deploy_settings(config_path, env={})
 
 
 def test_build_deploy_helper_parsers_cover_string_float_and_error_paths():
