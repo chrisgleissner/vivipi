@@ -15,11 +15,11 @@ import yaml
 from vivipi.core.config import parse_checks_config
 from vivipi.core.display import (
     _parse_brightness as _core_parse_brightness,
-    _parse_column_separator,
-    _parse_columns,
-    _parse_display_mode,
-    _parse_duration_s,
-    _parse_font_size_px,
+    _parse_column_separator as _core_parse_column_separator,
+    _parse_columns as _core_parse_columns,
+    _parse_display_mode as _core_parse_display_mode,
+    _parse_duration_s as _core_parse_duration_s,
+    _parse_font_size_px as _core_parse_font_size_px,
     normalize_display_config,
 )
 from vivipi.core.models import CheckDefinition, CheckType
@@ -31,6 +31,13 @@ OPTIONAL_PLACEHOLDERS = frozenset({"VIVIPI_SERVICE_BASE_URL"})
 
 def _parse_brightness(value: object) -> int:
     return _core_parse_brightness(value, 128)
+
+
+_parse_column_separator = _core_parse_column_separator
+_parse_columns = _core_parse_columns
+_parse_display_mode = _core_parse_display_mode
+_parse_duration_s = _core_parse_duration_s
+_parse_font_size_px = _core_parse_font_size_px
 
 def _resolve_placeholders(value: object, env: dict[str, str], optional_placeholders: frozenset[str] = frozenset()) -> object:
     if isinstance(value, dict):

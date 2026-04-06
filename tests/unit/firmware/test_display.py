@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from firmware.display import SH1107Display, SSD1305Display, ST77xxDisplay, WaveshareEPaper213BV4Display, WaveshareEPaperMonoDisplay, WaveshareEPaperTriColorDisplay, _pin_number, _sample_source_coordinates, boot_logo_font_sizes, render, render_boot_logo, render_framebuffer
+from firmware.display import SH1107Display, SSD1305Display, ST77xxDisplay, WaveshareEPaperMonoDisplay, WaveshareEPaperTriColorDisplay, _pin_number, _sample_source_coordinates, boot_logo_font_sizes, render, render_boot_logo, render_framebuffer
 from firmware.displays import BACKENDS, create_display
 from firmware.displays.rendering import HorizontalMonochromeSurface, MonochromeSurface, RGB565Surface
 from firmware.displays.waveshare_epaper import WaveshareEPaper213BV4Surface

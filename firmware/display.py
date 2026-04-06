@@ -6,7 +6,7 @@ from vivipi.core.display import infer_default_font, normalize_display_config, su
 from vivipi.core.models import AppState, DisplayMode
 from vivipi.core.render import render_frame
 
-from firmware.displays import SH1107Display, SSD1305Display, ST77xxDisplay, WaveshareEPaper213BV4Display, WaveshareEPaperMonoDisplay, create_display
+from firmware.displays import SH1107Display, SSD1305Display, ST77xxDisplay, WaveshareEPaperMonoDisplay, create_display
 from firmware.displays.rendering import (
     HorizontalMonochromeSurface,
     MonochromeSurface,
@@ -21,8 +21,11 @@ from firmware.displays.rendering import (
     render_framebuffer,
     render_to_surface,
 )
-from firmware.displays.waveshare_epaper import WaveshareEPaper213BV4Surface
+from firmware.displays.waveshare_epaper import WaveshareEPaper213BV4Display as _WaveshareEPaper213BV4Display, WaveshareEPaper213BV4Surface
 from firmware.displays.waveshare_epaper_tricolor import WaveshareEPaperTriColorDisplay
+
+
+WaveshareEPaper213BV4Display = _WaveshareEPaper213BV4Display
 
 
 def _render_display_config(config):

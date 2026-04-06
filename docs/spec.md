@@ -7,7 +7,7 @@ A minimal, calm, glanceable monitoring system for supported Pico display modules
 
 ---
 
-# 1. Display & Constraints
+## 1. Display & Constraints
 
 The system runs on a supported Pico SPI display selected by `device.display.type`.
 
@@ -97,7 +97,7 @@ Display support MUST remain modular and type-driven.
 
 ---
 
-# 2. Layout
+## 2. Layout
 
 Each row represents exactly one check.
 
@@ -149,7 +149,7 @@ Per rendered column:
 
 ---
 
-# 3. Typography
+## 3. Typography
 
 - The system MUST use a fixed-width bitmap font derived from the 8×8 base glyph set.
 - Each character cell uses the resolved width and height for the selected display and font preset.
@@ -170,7 +170,7 @@ Layout constraints:
 
 ---
 
-# 4. Idle Mode (No Visible Checks)
+## 4. Idle Mode (No Visible Checks)
 
 Display:
 
@@ -189,7 +189,7 @@ Checks are not visible until first result is received.
 
 ---
 
-# 5. Check Model
+## 5. Check Model
 
 A check represents a single monitored condition.
 
@@ -245,18 +245,16 @@ Checks are evaluated periodically.
 
 SERVICE endpoints MUST return:
 
-```json
-{
-  "checks": [
     {
-      "name": "string",
-      "status": "OK|DEG|FAIL|?",
-      "details": "string",
-      "latency_ms": number
+      "checks": [
+        {
+          "name": "string",
+          "status": "OK|DEG|FAIL|?",
+          "details": "string",
+          "latency_ms": number
+        }
+      ]
     }
-  ]
-}
-````
 
 [VIVIPI-CHECK-SCHEMA-001]
 
@@ -277,7 +275,7 @@ Selection MUST track check identity, not index.
 
 ---
 
-# 6. Check States
+## 6. Check States
 
 Internal states:
 
@@ -316,7 +314,7 @@ Thresholds MUST be configurable.
 
 ---
 
-# 7. Polling & Timing
+## 7. Polling & Timing
 
 - Default interval: 15 seconds (configurable)
 - Timeout: 10 seconds (configurable)
@@ -331,7 +329,7 @@ Timeout is treated as FAIL.
 
 ---
 
-# 8. Ordering & Pagination
+## 8. Ordering & Pagination
 
 - Checks are sorted alphabetically by display name
 - Maximum visible checks per page equals the number of rows that fit on screen
@@ -348,7 +346,7 @@ If more checks exist than fit on the current page:
 
 ---
 
-# 9. Selection Model
+## 9. Selection Model
 
 - Exactly one check is selected at all times (if checks exist)
 - Selection is identity-based
@@ -370,7 +368,7 @@ In compact overview mode, failed checks invert only the glyph pixels of `NAME + 
 
 ---
 
-# 10. Input Model (2 Buttons)
+## 10. Input Model (2 Buttons)
 
 Button A:
 
@@ -391,19 +389,17 @@ Debounce:
 
 ---
 
-# 11. Detail View
+## 11. Detail View
 
 Each check has exactly one detail page.
 
 Layout (max visible rows):
 
-```
-<CHECK NAME>
-STATUS: <STATE>
-LAT: <ms>
-AGE: <seconds>s
-<DETAILS>
-```
+  [CHECK NAME]
+  STATUS: [STATE]
+  LAT: [ms]
+  AGE: [seconds]s
+  [DETAILS]
 
 Rules:
 
@@ -432,7 +428,7 @@ Returning preserves selection.
 
 ---
 
-# 12. Diagnostics View
+## 12. Diagnostics View
 
 - Structured short messages only
 - No raw logs
@@ -443,7 +439,7 @@ Returning preserves selection.
 
 ---
 
-# 13. Rendering Model
+## 13. Rendering Model
 
 - Event-driven rendering only
 - No continuous render loop
@@ -463,16 +459,14 @@ Rendering must be:
 
 ---
 
-# 14. Burn-In Prevention
+## 14. Burn-In Prevention
 
 Global framebuffer shift every 30–60 seconds:
 
-```
-(0,0)
-(1,0)
-(1,1)
-(0,1)
-```
+  (0,0)
+  (1,0)
+  (1,1)
+  (0,1)
 
 Rules:
 
@@ -484,7 +478,7 @@ Rules:
 
 ---
 
-# 15. Architecture
+## 15. Architecture
 
 System MUST include:
 
@@ -498,7 +492,7 @@ System MUST include:
 
 ---
 
-# 16. Boot Logo
+## 16. Boot Logo
 
 On device startup, the display MUST show a boot logo for at least 5 seconds.
 
@@ -526,17 +520,15 @@ The boot logo is shown before WiFi connection and application initialization.
 
 ---
 
-# 17. About View
+## 17. About View
 
 After cycling past the last check in detail view, the system MUST show an About page.
 
 Layout:
 
-```
-     ViviPi
-VER: <version>
-BLD: <build_time>
-```
+      ViviPi
+    VER: <version>
+    BLD: <build_time>
 
 Rules:
 
@@ -550,7 +542,7 @@ The build time is recorded at firmware build time in UTC.
 
 ---
 
-# 18. Performance
+## 18. Performance
 
 - Idle CPU near baseline
 - No unnecessary redraws
@@ -560,7 +552,7 @@ The build time is recorded at firmware build time in UTC.
 
 ---
 
-# 19. Determinism
+## 19. Determinism
 
 - Same inputs → same outputs
 - No randomness allowed
@@ -569,7 +561,7 @@ The build time is recorded at firmware build time in UTC.
 
 ---
 
-# 20. Testing
+## 20. Testing
 
 - All requirements must be covered by tests
 - ≥ 96% branch coverage
@@ -579,7 +571,7 @@ The build time is recorded at firmware build time in UTC.
 
 ---
 
-# 21. Forbidden
+## 21. Forbidden
 
 - Animations
 - Blinking
@@ -593,4 +585,4 @@ The build time is recorded at firmware build time in UTC.
 
 ---
 
-# END
+## END
