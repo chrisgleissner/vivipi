@@ -99,6 +99,8 @@ Requirements:
 - `adb` only if you want the default service against connected Android devices
 - `mpremote` only if you want `./build deploy` to copy files onto a Pico 2W
 
+For day-to-day editor workflows, copy `config/build-deploy.local.example.yaml` to `config/build-deploy.local.yaml` and put your Wi-Fi credentials there. `./build render-config`, `./build build-firmware`, and `./build deploy` automatically prefer that local file when it exists.
+
 1. Set Wi-Fi credentials. Add `VIVIPI_SERVICE_BASE_URL` only if you want `SERVICE` checks.
 
 ```bash
@@ -127,10 +129,38 @@ Without `VIVIPI_SERVICE_BASE_URL`, ViviPi builds only the direct `PING`, `HTTP`,
 
 ```bash
 ./build build-firmware
-./build deploy --device-port /dev/ttyACM0
+./build deploy
 ```
 
-`./build deploy` uses `mpremote` to copy the prepared filesystem. It does not flash a MicroPython UF2 onto a blank board.
+`./build deploy` uses `mpremote connect auto` to copy the prepared filesystem to the first connected Pico. Use `--device-port` only when you want a specific board. It does not flash a MicroPython UF2 onto a blank board.
+
+## Editor Workflows
+
+### Thonny
+
+1. Create `config/build-deploy.local.yaml` from `config/build-deploy.local.example.yaml` or export the `VIVIPI_WIFI_*` environment variables.
+2. Run `./build build-firmware`.
+3. In Thonny, connect to `MicroPython (Raspberry Pi Pico)`.
+4. Open `artifacts/release/vivipi-device-fs/` as the local source tree and upload its contents to the device root.
+5. Re-run `./build build-firmware` whenever config or source changes, then re-upload the updated files.
+
+The generated `artifacts/release/vivipi-device-fs/` directory is the exact device filesystem layout expected by the Pico.
+
+### VS Code
+
+The official Raspberry Pi Pico extension handles Pico toolchain setup, and its MicroPython workflow relies on the MicroPico extension. This repository includes workspace recommendations for both extensions plus ready-made tasks in `.vscode/tasks.json`.
+
+The `ViviPi: ...` entries are VS Code tasks, not top-level command palette commands. Run them with `Ctrl+Shift+P` then `Tasks: Run Task`, and select the task name from the list. You can also use `Terminal` -> `Run Task...`.
+
+1. Open the repository as a single-folder workspace.
+2. Install the recommended extensions when prompted.
+3. Create `config/build-deploy.local.yaml` from `config/build-deploy.local.example.yaml` for local Wi-Fi and optional service settings.
+4. Open `Ctrl+Shift+P`, run `Tasks: Run Task`, then choose `ViviPi: Build Firmware Bundle` to regenerate `artifacts/release/vivipi-device-fs/`.
+5. Open `Ctrl+Shift+P`, run `Tasks: Run Task`, then choose `ViviPi: Deploy To First Connected Pico` to build and upload to the first connected Pico.
+
+`Ctrl+Shift+B` runs the default build task, which is `ViviPi: Build Firmware Bundle`. The deploy step must still be started from `Tasks: Run Task`.
+
+If you have more than one board attached, use `./build deploy --device-port <port>` from the integrated terminal.
 
 ## Install Paths
 
@@ -163,7 +193,7 @@ Each GitHub release publishes a small, versioned set of assets. Download the fil
 
 1. Download `pico2w-micropython-<version>.txt` and `vivipi-device-filesystem-<version>.zip` from the release page.
 2. Use the URL in `pico2w-micropython-<version>.txt` to install the base MicroPython UF2 on the Pico if the board is blank.
-3. Copy the contents of `vivipi-device-filesystem-<version>.zip` onto the Pico with `mpremote fs cp`, or unzip it locally and use `./build deploy --device-port ...` against the unpacked `vivipi-device-fs/` tree.
+3. Copy the contents of `vivipi-device-filesystem-<version>.zip` onto the Pico with `mpremote fs cp`, or unzip it locally and use `./build deploy` against the unpacked `vivipi-device-fs/` tree.
 4. Point `VIVIPI_SERVICE_BASE_URL` at a reachable host only if you want `SERVICE` checks baked into `config.json`.
 
 #### Service Install From A Release
@@ -191,7 +221,7 @@ Each GitHub release publishes a small, versioned set of assets. Download the fil
 | `./build render-config` | Render `artifacts/device/config.json` from the build config |
 | `./build build-firmware` | Build the firmware bundle into `artifacts/release` |
 | `./build release-assets` | Build the versioned GitHub release assets |
-| `./build deploy --device-port /dev/ttyACM0` | Build the firmware bundle and copy it to the Pico via `mpremote` |
+| `./build deploy` | Build the firmware bundle and copy it to the first connected Pico via `mpremote` |
 | `./build service --host 0.0.0.0 --port 8080` | Run the default ADB-backed Vivi Service |
 
 Typical examples:
@@ -270,7 +300,7 @@ If `VIVIPI_SERVICE_BASE_URL` is omitted, build-time filtering drops `SERVICE` ch
 | --- | --- | --- | --- |
 | `project.name` | string | `vivipi` | Project name stored in the rendered runtime config |
 | `device.board` | string | `pico2w` | Board identifier used for packaging and install metadata |
-| `device.micropython_port` | path-like string | `/dev/ttyACM0` | Default port for `./build deploy` |
+| `device.micropython_port` | `auto` or path-like string | `auto` | Default device selector for `./build deploy`; `auto` picks the first connected Pico |
 | `device.micropython.version` | string | `1.25.0` | Pinned MicroPython version reference |
 | `device.micropython.download_page` | absolute URL | Pico 2W download page | Included in the install manifest |
 | `device.buttons.a` | GPIO pin name | `GP14` | Left button pin |

@@ -1,0 +1,50 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "ViviPi: Install Dependencies",
+      "type": "shell",
+      "command": "./build",
+      "args": [
+        "install"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "ViviPi: Build Firmware Bundle",
+      "type": "shell",
+      "command": "./build",
+      "args": [
+        "build-firmware"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "ViviPi: Deploy To First Connected Pico",
+      "type": "shell",
+      "command": "./build",
+      "args": [
+        "deploy"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "ViviPi: Run Default Service",
+      "type": "shell",
+      "command": "./build",
+      "args": [
+        "service",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8080"
+      ],
+      "isBackground": true,
+      "problemMatcher": []
+    }
+  ]
+}

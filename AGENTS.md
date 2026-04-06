@@ -18,7 +18,7 @@
 ./build render-config
 ./build build-firmware
 ./build release-assets
-./build deploy --device-port /dev/ttyACM0
+./build deploy
 ./build service --host 0.0.0.0 --port 8080
 ```
 
@@ -26,7 +26,8 @@
 
 - `firmware/main.py` delegates to `firmware/runtime.py`, which wires Wi-Fi bootstrap, button polling, SH1107 output, and the runtime loop together.
 - `config/build-deploy.yaml` and `config/checks.yaml` resolve the service endpoint from `VIVIPI_SERVICE_BASE_URL`; the value must be reachable from the Pico over Wi-Fi.
-- `./build deploy` uses `mpremote` to copy the prepared device filesystem to the Pico. It does not flash a UF2 image onto a blank board.
+- `./build deploy` uses `mpremote connect auto` to copy the prepared device filesystem to the first connected Pico. It does not flash a UF2 image onto a blank board.
+- `./build build-firmware`, `./build render-config`, and `./build deploy` automatically prefer `config/build-deploy.local.yaml` when that file exists.
 
 ## Implementation boundaries
 

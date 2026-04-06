@@ -18,11 +18,12 @@ device:
     page_interval: 15s
 
 wifi:
-  ssid: ${VIVIPI_WIFI_SSID}
-  password: ${VIVIPI_WIFI_PASSWORD}
+  ssid: YourWifiName
+  password: YourWifiPassword
 
 service:
-  base_url: ${VIVIPI_SERVICE_BASE_URL}
+  # Leave base_url commented out if you do not want SERVICE checks in config.json.
+  # base_url: http://192.168.1.10:8080/checks
   default_prefix: adb
 
 checks_config: checks.yaml

@@ -19,6 +19,23 @@ WIFI_SSID="${VIVIPI_WIFI_SSID:-}"
 WIFI_PASSWORD="${VIVIPI_WIFI_PASSWORD:-}"
 SERVICE_BASE_URL="${VIVIPI_SERVICE_BASE_URL:-}"
 
+has_local_editor_config() {
+    if [[ "$CONFIG_PATH" == *.local.yaml ]]; then
+        [[ -f "$CONFIG_PATH" ]]
+        return
+    fi
+    if [[ "$CONFIG_PATH" != *.yaml ]]; then
+        return 1
+    fi
+
+    local local_config_path="${CONFIG_PATH%.yaml}.local.yaml"
+    [[ -f "$local_config_path" ]]
+}
+
+should_prefer_local_config() {
+    [[ "$CONFIG_PATH" != *.local.yaml ]] && has_local_editor_config
+}
+
 usage() {
     cat <<'EOF'
 Usage: ./build [command] [options]
@@ -30,6 +47,8 @@ Commands that render or package device config require:
 Optional for SERVICE checks:
     VIVIPI_SERVICE_BASE_URL
 You can provide them as environment variables or with CLI flags.
+For local editor workflows, create config/build-deploy.local.yaml to avoid exporting
+credentials for ./build render-config, ./build build-firmware, and ./build deploy.
 
 Commands:
   ci               Install dependencies, run Ruff, run pytest, and build firmware assets
@@ -39,7 +58,7 @@ Commands:
   coverage         Run pytest with branch coverage output
   render-config    Render artifacts/device/config.json from the build config
   build-firmware   Build the zipped firmware bundle into artifacts/release
-  deploy           Build the firmware bundle and copy it to the Pico via mpremote
+    deploy           Build the firmware bundle and copy it to the first connected Pico via mpremote
     release-assets   Build the versioned GitHub release artifacts
   service          Run the default ADB-backed Vivi Service
   all              Alias for ci
@@ -49,7 +68,7 @@ Options:
   -c, --config PATH          Build/deploy config path
   -o, --output-dir PATH      Release output directory
   --runtime-config PATH      Runtime config JSON output path
-  --device-port PATH         Serial or USB path for mpremote deploy
+    --device-port PATH         Optional serial or USB path for mpremote deploy; defaults to auto
   --host HOST                Host for the Vivi Service
   --port PORT                Port for the Vivi Service
   --python PATH              Python executable to use when not in venv
@@ -121,6 +140,10 @@ run_python_module() {
 require_runtime_env() {
     local missing=()
 
+    if has_local_editor_config; then
+        return
+    fi
+
     if [[ -z "$WIFI_SSID" ]]; then
         missing+=("VIVIPI_WIFI_SSID")
     fi
@@ -134,6 +157,7 @@ require_runtime_env() {
 
     log "Missing required runtime configuration: ${missing[*]}"
     log "Set them in the environment or pass --wifi-ssid and --wifi-password."
+    log "Or create config/build-deploy.local.yaml for local editor-driven workflows."
     log "Example:"
     log "  VIVIPI_WIFI_SSID=wifi VIVIPI_WIFI_PASSWORD=secret ./build $COMMAND"
     log "If you want SERVICE checks, also set VIVIPI_SERVICE_BASE_URL or pass --service-base-url."
@@ -153,14 +177,22 @@ build_firmware_bundle() {
     ensure_dependencies
     require_runtime_env
     with_wifi_env
-    run_python_module vivipi.tooling.build_deploy build-firmware --config "$CONFIG_PATH" --output-dir "$OUTPUT_DIR"
+    local args=(vivipi.tooling.build_deploy build-firmware --config "$CONFIG_PATH" --output-dir "$OUTPUT_DIR")
+    if should_prefer_local_config; then
+        args+=(--prefer-local-config)
+    fi
+    run_python_module "${args[@]}"
 }
 
 render_runtime_config() {
     ensure_dependencies
     require_runtime_env
     with_wifi_env
-    run_python_module vivipi.tooling.build_deploy render-config --config "$CONFIG_PATH" --output "$RUNTIME_CONFIG_OUTPUT"
+    local args=(vivipi.tooling.build_deploy render-config --config "$CONFIG_PATH" --output "$RUNTIME_CONFIG_OUTPUT")
+    if should_prefer_local_config; then
+        args+=(--prefer-local-config)
+    fi
+    run_python_module "${args[@]}"
 }
 
 build_python_wheel() {
@@ -184,6 +216,9 @@ deploy_bundle() {
     require_runtime_env
     with_wifi_env
     local args=(vivipi.tooling.build_deploy deploy-firmware --config "$CONFIG_PATH" --output-dir "$OUTPUT_DIR")
+    if should_prefer_local_config; then
+        args+=(--prefer-local-config)
+    fi
     if [[ -n "$DEVICE_PORT" ]]; then
         args+=(--port "$DEVICE_PORT")
     fi

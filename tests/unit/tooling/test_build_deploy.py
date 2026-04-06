@@ -25,6 +25,7 @@ from vivipi.tooling.build_deploy import (
     load_build_deploy_settings,
     load_runtime_checks,
     render_device_runtime_config,
+    resolve_config_path,
     stage_release_assets,
     validate_runtime_settings,
     write_install_manifest,
@@ -108,6 +109,16 @@ def test_load_build_deploy_settings_substitutes_environment_placeholders(tmp_pat
     assert settings["device"]["display"]["column_separator"] == " "
     assert settings["device"]["display"]["failure_color"] == "red"
     assert settings["device"]["display"]["pins"]["dc"] == "GP8"
+
+
+def test_resolve_config_path_prefers_existing_local_override_when_requested(tmp_path: Path):
+    config_path = tmp_path / "build-deploy.yaml"
+    config_path.write_text("device:\n  board: pico2w\n", encoding="utf-8")
+    local_path = tmp_path / "build-deploy.local.yaml"
+    local_path.write_text("device:\n  board: pico2w\n", encoding="utf-8")
+
+    assert resolve_config_path(config_path) == config_path.resolve()
+    assert resolve_config_path(config_path, prefer_local_config=True) == local_path.resolve()
 
 
 def test_write_runtime_config_embeds_wifi_and_checks(tmp_path: Path):
@@ -778,6 +789,35 @@ def test_build_deploy_main_dispatches_render_config(monkeypatch, tmp_path: Path)
     assert called == {"config": "config.yaml", "output": str(output_path)}
 
 
+def test_build_deploy_main_prefers_local_config_for_render_config(monkeypatch, tmp_path: Path):
+    config_path = tmp_path / "build-deploy.yaml"
+    config_path.write_text("device:\n  board: pico2w\n", encoding="utf-8")
+    local_path = tmp_path / "build-deploy.local.yaml"
+    local_path.write_text("device:\n  board: pico2w\n", encoding="utf-8")
+    output_path = tmp_path / "config.json"
+    called = {}
+
+    def fake_write_runtime_config(config_arg, destination_path):
+        called["config"] = config_arg
+        called["output"] = destination_path
+
+    monkeypatch.setattr(build_deploy, "write_runtime_config", fake_write_runtime_config)
+
+    exit_code = build_deploy.main(
+        [
+            "render-config",
+            "--config",
+            str(config_path),
+            "--output",
+            str(output_path),
+            "--prefer-local-config",
+        ]
+    )
+
+    assert exit_code == 0
+    assert called == {"config": str(local_path.resolve()), "output": str(output_path)}
+
+
 def test_build_deploy_main_dispatches_build_firmware(monkeypatch, tmp_path: Path):
     called = {}
 
@@ -851,50 +891,52 @@ def test_write_install_manifest_records_supported_install_metadata(tmp_path: Pat
     assert "download_page: https://micropython.org/download/RPI_PICO2_W/" in content
 
 
-def test_deploy_firmware_requires_port_and_reports_missing_mpremote(tmp_path: Path, monkeypatch):
-    config_path = write_fixture_files(tmp_path)
+def test_write_install_manifest_defaults_port_to_auto(tmp_path: Path):
+    output_path = tmp_path / "pico2w-micropython.txt"
 
-    def fake_build_firmware_bundle_no_port(*args, **kwargs):
+    write_install_manifest(
+        {
+            "device": {
+                "board": "pico2w",
+                "micropython": {
+                    "version": "1.25.0",
+                    "download_page": "https://micropython.org/download/RPI_PICO2_W/",
+                },
+            }
+        },
+        output_path,
+    )
+
+    content = output_path.read_text(encoding="utf-8")
+
+    assert "port: auto" in content
+
+
+def test_deploy_firmware_defaults_to_auto_port_when_not_configured(tmp_path: Path, monkeypatch):
+    config_path = write_fixture_files(tmp_path)
+    commands = []
+
+    def fake_build_firmware_bundle(*args, **kwargs):
         device_root = tmp_path / "release-no-port" / "vivipi-device-fs"
         device_root.mkdir(parents=True, exist_ok=True)
+        (device_root / "main.py").write_text("print('hi')\n", encoding="utf-8")
         return tmp_path / "release-no-port" / "bundle.zip"
 
-    monkeypatch.setattr(build_deploy, "build_firmware_bundle", fake_build_firmware_bundle_no_port)
+    monkeypatch.setattr(build_deploy, "build_firmware_bundle", fake_build_firmware_bundle)
     monkeypatch.setattr(
         build_deploy,
         "load_build_deploy_settings",
         lambda *args, **kwargs: {"device": {"board": "pico2w"}, "wifi": {"ssid": "wifi", "password": "secret"}, "service": {}},
     )
 
-    with pytest.raises(ValueError, match="micropython_port"):
-        deploy_firmware(
-            config_path,
-            tmp_path / "release-no-port",
-            port="",
-            run_command=lambda *args, **kwargs: None,
-        )
+    deploy_firmware(
+        config_path,
+        tmp_path / "release-no-port",
+        port="",
+        run_command=lambda command, check: commands.append(command),
+    )
 
-    def fake_load_build_deploy_settings(*args, **kwargs):
-        return {
-            "device": {"board": "pico2w", "micropython_port": "/dev/ttyACM0"},
-            "wifi": {"ssid": "wifi", "password": "secret"},
-            "service": {},
-        }
-
-    def fake_build_firmware_bundle(*args, **kwargs):
-        device_root = tmp_path / "release-missing" / "vivipi-device-fs"
-        device_root.mkdir(parents=True, exist_ok=True)
-        (device_root / "main.py").write_text("print('hi')\n", encoding="utf-8")
-        return tmp_path / "release-missing" / "bundle.zip"
-
-    monkeypatch.setattr(build_deploy, "load_build_deploy_settings", fake_load_build_deploy_settings)
-    monkeypatch.setattr(build_deploy, "build_firmware_bundle", fake_build_firmware_bundle)
-
-    def fake_run_command(command, check):
-        raise FileNotFoundError("mpremote")
-
-    with pytest.raises(RuntimeError, match="mpremote is required"):
-        deploy_firmware(config_path, tmp_path / "release-missing", run_command=fake_run_command)
+    assert commands[0][:4] == ["mpremote", "connect", "auto", "fs"]
 
 
 def test_deploy_firmware_copies_files_via_mpremote(tmp_path: Path):

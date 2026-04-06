@@ -28,6 +28,7 @@ from vivipi.core.models import CheckDefinition, CheckType
 
 PLACEHOLDER_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)\}")
 OPTIONAL_PLACEHOLDERS = frozenset({"VIVIPI_SERVICE_BASE_URL"})
+DEFAULT_DEPLOY_PORT = "auto"
 
 
 def _parse_brightness(value: object) -> int:
@@ -39,6 +40,20 @@ _parse_columns = _core_parse_columns
 _parse_display_mode = _core_parse_display_mode
 _parse_duration_s = _core_parse_duration_s
 _parse_font_size_px = _core_parse_font_size_px
+
+
+def resolve_config_path(config_path: str | Path, prefer_local_config: bool = False) -> Path:
+    original_path = Path(config_path)
+    if not prefer_local_config:
+        return original_path
+    resolved_path = original_path.resolve()
+    if resolved_path.suffix.casefold() != ".yaml" or resolved_path.name.endswith(".local.yaml"):
+        return resolved_path
+
+    local_override_path = resolved_path.with_name(f"{resolved_path.stem}.local{resolved_path.suffix}")
+    if local_override_path.exists():
+        return local_override_path
+    return original_path
 
 def _resolve_placeholders(value: object, env: dict[str, str], optional_placeholders: frozenset[str] = frozenset()) -> object:
     if isinstance(value, dict):
@@ -168,11 +183,12 @@ def validate_runtime_settings(settings: dict[str, object], checks: tuple[CheckDe
 def write_install_manifest(settings: dict[str, object], output_path: str | Path) -> Path:
     device = settings["device"]
     micropython = device.get("micropython", {}) if isinstance(device, dict) else {}
+    deploy_port = _resolve_deploy_port(device, None)
     lines = [
         f"board: {device.get('board', 'unknown')}",
         f"micropython_version: {micropython.get('version', 'unspecified')}",
         f"download_page: {micropython.get('download_page', 'https://micropython.org/download/')}",
-        f"port: {device.get('micropython_port', '')}",
+        f"port: {deploy_port}",
     ]
     destination = Path(output_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -518,6 +534,13 @@ def build_firmware_bundle(
     return Path(built_archive)
 
 
+def _resolve_deploy_port(device: object, port: str | None) -> str:
+    for candidate in (port, device.get("micropython_port") if isinstance(device, dict) else None):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return DEFAULT_DEPLOY_PORT
+
+
 def deploy_firmware(
     config_path: str | Path,
     output_dir: str | Path,
@@ -529,9 +552,7 @@ def deploy_firmware(
     settings = load_build_deploy_settings(source_config_path, env=env)
     bundle_path = build_firmware_bundle(source_config_path, output_dir, env=env)
     device_root = Path(output_dir) / "vivipi-device-fs"
-    resolved_port = port or str(settings["device"].get("micropython_port", "")).strip()
-    if not resolved_port:
-        raise ValueError("device.micropython_port must be configured for deploy")
+    resolved_port = _resolve_deploy_port(settings.get("device"), port)
 
     try:
         for item in sorted(device_root.iterdir(), key=lambda value: value.name):
@@ -554,22 +575,44 @@ def main(argv: list[str] | None = None) -> int:
     render_parser = subparsers.add_parser("render-config", help="Render runtime config JSON")
     render_parser.add_argument("--config", required=True)
     render_parser.add_argument("--output", required=True)
+    render_parser.add_argument(
+        "--prefer-local-config",
+        action="store_true",
+        help="Prefer a sibling <config>.local.yaml file when it exists",
+    )
 
     bundle_parser = subparsers.add_parser("build-firmware", help="Build a zipped firmware bundle")
     bundle_parser.add_argument("--config", required=True)
     bundle_parser.add_argument("--output-dir", required=True)
+    bundle_parser.add_argument(
+        "--prefer-local-config",
+        action="store_true",
+        help="Prefer a sibling <config>.local.yaml file when it exists",
+    )
 
     release_parser = subparsers.add_parser("stage-release-assets", help="Package the versioned GitHub release assets")
     release_parser.add_argument("--config", required=True)
     release_parser.add_argument("--output-dir", required=True)
     release_parser.add_argument("--dist-dir", required=True)
+    release_parser.add_argument(
+        "--prefer-local-config",
+        action="store_true",
+        help="Prefer a sibling <config>.local.yaml file when it exists",
+    )
 
     deploy_parser = subparsers.add_parser("deploy-firmware", help="Copy the firmware bundle onto a Pico via mpremote")
     deploy_parser.add_argument("--config", required=True)
     deploy_parser.add_argument("--output-dir", required=True)
     deploy_parser.add_argument("--port")
+    deploy_parser.add_argument(
+        "--prefer-local-config",
+        action="store_true",
+        help="Prefer a sibling <config>.local.yaml file when it exists",
+    )
 
     args = parser.parse_args(argv)
+    if hasattr(args, "config"):
+        args.config = str(resolve_config_path(args.config, prefer_local_config=args.prefer_local_config))
     if args.command == "render-config":
         write_runtime_config(args.config, args.output)
         return 0
