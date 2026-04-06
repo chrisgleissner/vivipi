@@ -16,6 +16,9 @@ The project is intentionally narrow:
 
 Behavioral requirements live in [docs/spec.md](docs/spec.md). Requirement-to-test coverage lives in [docs/spec-traceability.md](docs/spec-traceability.md).
 
+> [!NOTE]
+> This project is under active development. Some documented features may not yet be fully functional. 
+
 ## System Architecture
 
 ViviPi runs on the Pico and evaluates checks through two paths: direct network probes (`PING`, `HTTP`, `FTP`, `TELNET`) and `SERVICE` probes.
