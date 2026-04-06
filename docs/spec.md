@@ -73,7 +73,8 @@ Display brightness MUST be configurable at build time for display types that sup
 Overview rendering MUST support configurable modes and multi-column packing.
 
 - `device.display.mode` supports `standard` and `compact`
-- `device.display.columns` supports `1` to `4`
+- `standard` mode renders exactly one check per row and therefore requires `device.display.columns = 1`
+- `compact` mode supports `device.display.columns` from `1` to `4`
 - `device.display.column_separator` MUST be exactly one character
 
 [VIVIPI-DISPLAY-003]

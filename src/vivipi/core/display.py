@@ -743,4 +743,7 @@ def normalize_display_config(raw_display: object) -> dict[str, object]:
     elif display.get("brightness") is not None:
         raise ValueError("device.display.brightness is not supported by the selected display type")
 
+    if resolved["mode"] == "standard" and resolved["columns"] != 1:
+        raise ValueError("device.display.columns must be 1 when device.display.mode is 'standard'; use 'compact' for multiple columns")
+
     return resolved

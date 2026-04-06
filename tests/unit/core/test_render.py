@@ -128,15 +128,15 @@ def test_compact_mode_filters_to_non_healthy_checks_and_marks_only_failed_text_s
     )
 
 
-def test_standard_multi_column_layout_uses_exact_column_math_and_no_overflow():
+def test_compact_multi_column_layout_uses_exact_column_math_and_no_overflow():
     state = AppState(
         checks=(
             make_check("alpha", "Alpha", status=Status.OK),
-            make_check("bravo", "Bravo", status=Status.UNKNOWN),
-            make_check("charlie", "Charlie", status=Status.DEG),
+            make_check("bravo", "Bravo", status=Status.OK),
+            make_check("charlie", "Charlie", status=Status.OK),
         ),
         selected_id="alpha",
-        display_mode=DisplayMode.STANDARD,
+        display_mode=DisplayMode.COMPACT,
         overview_columns=3,
         column_separator="|",
         page_size=1,
@@ -144,7 +144,7 @@ def test_standard_multi_column_layout_uses_exact_column_math_and_no_overflow():
 
     frame = render_frame(state)
 
-    assert frame.rows == ("Alpha|Brav?|Cha!",)
+    assert frame.rows == ("Alpha|Bravo|Char",)
     assert len(frame.rows[0]) == 16
 
 

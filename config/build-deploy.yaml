@@ -13,7 +13,7 @@ device:
   display:
     type: waveshare-pico-oled-1.3
     mode: standard
-    columns: 2
+    columns: 1
     column_separator: " "
     page_interval: 15s
 

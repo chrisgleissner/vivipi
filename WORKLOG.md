@@ -1,3 +1,5 @@
+# Worklog
+
 ## 2026-04-05
 
 - 2026-04-06T17:28:25+01:00 Started the observability / REPL convergence execution and recorded sequential tasks `T1` through `T12` in `PLANS.md` with explicit dependencies and proof criteria.
@@ -31,3 +33,20 @@
 - 2026-04-05T22:28:00+01:00 Added coverage-heavy protocol and validation tests across runtime checks, build/deploy tooling, config parsing, runtime app behavior, state/model validation, and the ADB service handler to lift the repository-wide gate safely.
 - 2026-04-05T22:28:00+01:00 Updated `README.md`, `docs/spec.md`, `docs/spec-traceability.md`, `AGENTS.md`, `pyproject.toml`, and the traceability gate test to document FTP/Telnet support and enforce `96%` minimum coverage in CI.
 - 2026-04-05T22:28:00+01:00 Full validation now passes via `./build ci` with explicit test env vars: `178` tests green and `96.97%` total coverage.
+
+## 2026-04-06 Productionization Convergence
+
+- 2026-04-06T18:00:00+01:00 Started the full productionization convergence pass.
+- 2026-04-06T18:00:00+01:00 Read the authoritative repository contract in the required order: `README.md`, `docs/spec.md`, `docs/spec-traceability.md`, `.github/copilot-instructions.md`, `AGENTS.md`, existing `PLANS.md`, and existing `WORKLOG.md`.
+- 2026-04-06T18:00:00+01:00 Verified the git worktree was clean before changes.
+- 2026-04-06T18:00:00+01:00 Audited the executable entrypoints and release path baselines in `build`, `pyproject.toml`, `config/build-deploy.yaml`, `config/checks.yaml`, `.github/workflows/ci.yml`, `.github/workflows/release.yml`, `src/vivipi/tooling/build_deploy.py`, `src/vivipi/services/adb_service.py`, `src/vivipi/services/adb.py`, `src/vivipi/services/schema.py`, `src/vivipi/core/config.py`, `src/vivipi/runtime/app.py`, and `firmware/runtime.py`.
+- 2026-04-06T18:00:00+01:00 Replaced the stale task-specific plan with an authoritative productionization convergence plan in `PLANS.md`; next step is completing the deep audit, classifying findings by severity, and executing fixes with tests and validation evidence.
+- 2026-04-06T21:13:07+01:00 Fixed H2 release packaging drift by making `stage_release_assets()` select a single authoritative version per release set: the repository tag form when it semantically matches the built wheel, otherwise the built wheel version. This removed the observed mismatch where `vivipi-service-bundle-0.2.2.zip` embedded `vivipi-0.2.3.dev0+...whl`. Added regression coverage in `tests/unit/tooling/test_build_deploy.py`.
+- 2026-04-06T21:13:07+01:00 Fixed H2 overview-layout contract drift by rejecting `device.display.mode: standard` with `device.display.columns > 1`, enforcing the same rule in `AppState`, restoring the tracked sample configs to `columns: 1`, and aligning `README.md`, `docs/spec.md`, and `docs/spec-traceability.md`. Added regression coverage in `tests/unit/core/test_display_config.py`, `tests/unit/core/test_models.py`, `tests/unit/core/test_state.py`, `tests/unit/core/test_render.py`, and `tests/unit/tooling/test_build_deploy.py`.
+- 2026-04-06T21:13:07+01:00 Fixed H3 build-entrypoint operator friction by making explicit `--config` arguments bypass the automatic sibling local-config preference in `build`, and by tightening `require_runtime_env()` so it only trusts a local override when that override will actually be used. Added a regression test that executes the real `build` script in `tests/unit/tooling/test_build_entrypoint.py`.
+- 2026-04-06T21:13:07+01:00 Fixed H3 service-schema validation drift by rejecting negative `latency_ms` values in `src/vivipi/services/schema.py` and extending `tests/contract/test_service_schema.py`.
+- 2026-04-06T21:13:07+01:00 Focused validation passed: `.venv/bin/python -m pytest --no-cov tests/unit/tooling/test_build_deploy.py tests/unit/tooling/test_build_entrypoint.py tests/unit/core/test_display_config.py tests/unit/core/test_models.py tests/unit/core/test_state.py tests/unit/core/test_render.py tests/contract/test_service_schema.py -q` -> `113 passed`.
+- 2026-04-06T21:13:07+01:00 Packaging validation passed: `VIVIPI_WIFI_SSID=ci-ssid VIVIPI_WIFI_PASSWORD=ci-password VIVIPI_SERVICE_BASE_URL=http://192.0.2.10:8080/checks ./build release-assets --config config/build-deploy.yaml` produced a consistent `0.2.3.dev0+g029105f9a.d20260406` release set, and the rebuilt service bundle contained a wheel with the same version string.
+- 2026-04-06T21:13:07+01:00 Firmware bundle validation passed: `VIVIPI_WIFI_SSID=ci-ssid VIVIPI_WIFI_PASSWORD=ci-password VIVIPI_SERVICE_BASE_URL=http://192.0.2.10:8080/checks ./build build-firmware --config config/build-deploy.yaml` rebuilt `artifacts/release/vivipi-device-fs/config.json` with the tracked single-column standard OLED config.
+- 2026-04-06T21:13:07+01:00 Repository-wide validation passed: `./build coverage` -> `279 passed`, `96.24%` total coverage; `VIVIPI_WIFI_SSID=ci-ssid VIVIPI_WIFI_PASSWORD=ci-password VIVIPI_SERVICE_BASE_URL=http://192.0.2.10:8080/checks ./build ci --config config/build-deploy.yaml` -> lint + `279 passed` + `96.24%` total coverage.
+- 2026-04-06T21:13:07+01:00 External validation limit remains unchanged: real `./build deploy` against hardware was not re-executed in this environment because there is no accessible Pico serial device. The repository deploy path remains covered by unit tests and the documented hardware requirement.

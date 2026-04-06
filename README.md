@@ -99,16 +99,17 @@ Requirements:
 - `adb` only if you want the default service against connected Android devices
 - `mpremote` only if you want `./build deploy` to copy files onto a Pico 2W
 
-For day-to-day editor workflows, copy `config/build-deploy.local.example.yaml` to `config/build-deploy.local.yaml` and put your Wi-Fi credentials there. `./build render-config`, `./build build-firmware`, and `./build deploy` automatically prefer that local file when it exists.
+For day-to-day editor workflows, copy `config/build-deploy.local.example.yaml` to `config/build-deploy.local.yaml` and put your Wi-Fi credentials there. `./build render-config`, `./build build-firmware`, and `./build deploy` automatically prefer that local file when it exists. Pass `--config config/build-deploy.yaml` when you need to bypass a sibling local override.
 
 1. Set Wi-Fi credentials. Add `VIVIPI_SERVICE_BASE_URL` only if you want `SERVICE` checks.
+
 ```bash
 export VIVIPI_WIFI_SSID="your-wifi-name"
 export VIVIPI_WIFI_PASSWORD="your-wifi-password"
 export VIVIPI_SERVICE_BASE_URL="http://192.168.1.10:8080/checks"
 ```
 
-2. Run the default local workflow.
+1. Run the default local workflow.
 
 ```bash
 ./build
@@ -118,13 +119,13 @@ export VIVIPI_SERVICE_BASE_URL="http://192.168.1.10:8080/checks"
 
 Without `VIVIPI_SERVICE_BASE_URL`, ViviPi builds only the direct `PING`, `HTTP`, `FTP`, and `TELNET` checks from [config/checks.yaml](config/checks.yaml).
 
-3. Start the default Vivi Service only if you want the sample `SERVICE` check.
+1. Start the default Vivi Service only if you want the sample `SERVICE` check.
 
 ```bash
 ./build service --host 0.0.0.0 --port 8080
 ```
 
-4. Build and deploy to the Pico when hardware is connected.
+1. Build and deploy to the Pico when hardware is connected.
 
 ```bash
 ./build build-firmware
@@ -302,7 +303,7 @@ If `VIVIPI_SERVICE_BASE_URL` is omitted, build-time filtering drops `SERVICE` ch
 | `device.buttons.b` | GPIO pin name | `GP15` | Right button pin |
 | `device.display.type` | see display matrix below | `waveshare-pico-oled-1.3` | Selects the backend and infers controller, SPI mode, geometry, default pins, and default page interval |
 | `device.display.mode` | `standard`, `compact` | `standard` | Overview layout mode |
-| `device.display.columns` | integer `1` to `4` | `1` | Number of overview columns |
+| `device.display.columns` | integer `1` to `4` | `1` | Number of overview columns; values above `1` require `device.display.mode: compact` |
 | `device.display.column_separator` | exactly one character | space | Inserted only between overview columns |
 | `device.display.font` | `extrasmall`, `small`, `medium`, `large`, `extralarge` | `medium` | Resolves the character cell size from the selected display geometry |
 | `device.display.font.width_px` | integer `6` to `32` | inferred | Optional backward-compatible override |

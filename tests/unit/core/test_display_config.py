@@ -134,6 +134,11 @@ def test_normalize_display_config_validates_failure_color_and_brightness_ranges(
         normalize_display_config({"type": "waveshare-pico-lcd-1.3", "brightness": 999})
 
 
+def test_normalize_display_config_rejects_standard_multi_column_layouts():
+    with pytest.raises(ValueError, match="use 'compact' for multiple columns"):
+        normalize_display_config({"type": "waveshare-pico-oled-1.3", "mode": "standard", "columns": 2})
+
+
 def test_normalize_display_config_validates_inferred_string_and_numeric_fields():
     with pytest.raises(ValueError, match="device.display.controller"):
         normalize_display_config({"type": "waveshare-pico-lcd-1.3", "controller": 3})

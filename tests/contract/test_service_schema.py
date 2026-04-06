@@ -136,6 +136,19 @@ def test_parse_service_payload_rejects_invalid_field_types():
     with pytest.raises(ValueError, match="latency_ms must be numeric"):
         parse_service_payload(bad_latency)
 
+    negative_latency = {
+        "checks": [
+            {
+                "name": "Router",
+                "status": "OK",
+                "details": "Connected",
+                "latency_ms": -1,
+            }
+        ]
+    }
+    with pytest.raises(ValueError, match="latency_ms must be non-negative"):
+        parse_service_payload(negative_latency)
+
     bad_name = {
         "checks": [
             {

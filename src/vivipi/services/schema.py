@@ -36,6 +36,8 @@ def parse_service_payload(
             raise ValueError("service check details must be a string")
         if not isinstance(latency_ms, int | float):
             raise ValueError("service check latency_ms must be numeric")
+        if float(latency_ms) < 0:
+            raise ValueError("service check latency_ms must be non-negative")
 
         status_enum = Status(status)
         identifier = build_service_check_id(service_prefix, name)

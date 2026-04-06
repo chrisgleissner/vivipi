@@ -101,7 +101,14 @@ def test_set_page_index_can_keep_selection_visible():
 
 def test_visible_checks_use_page_capacity_when_multiple_columns_are_enabled():
     checks = tuple(make_check(name) for name in ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot"])
-    state = AppState(checks=checks, selected_id="alpha", overview_columns=2, page_size=2, page_index=1)
+    state = AppState(
+        checks=checks,
+        selected_id="alpha",
+        display_mode=DisplayMode.COMPACT,
+        overview_columns=2,
+        page_size=2,
+        page_index=1,
+    )
 
     visible = visible_checks(state)
 

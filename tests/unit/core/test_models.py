@@ -1,6 +1,6 @@
 import pytest
 
-from vivipi.core.models import AppState, DiagnosticEvent, TransitionThresholds
+from vivipi.core.models import AppState, DiagnosticEvent, DisplayMode, TransitionThresholds
 
 
 def test_transition_thresholds_validate_failure_and_success_bounds():
@@ -18,11 +18,14 @@ def test_app_state_validates_overview_columns_separator_and_width():
     with pytest.raises(ValueError, match="between 1 and 4"):
         AppState(overview_columns=5)
 
+    with pytest.raises(ValueError, match="exactly one column"):
+        AppState(display_mode=DisplayMode.STANDARD, overview_columns=2)
+
     with pytest.raises(ValueError, match="exactly one character"):
         AppState(column_separator="||")
 
     with pytest.raises(ValueError, match="too small"):
-        AppState(row_width=2, overview_columns=2)
+        AppState(display_mode=DisplayMode.COMPACT, row_width=2, overview_columns=2)
 
     with pytest.raises(ValueError, match="row_width must be positive"):
         AppState(row_width=0)

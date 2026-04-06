@@ -29,6 +29,7 @@ from vivipi.core.models import CheckDefinition, CheckType
 PLACEHOLDER_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)\}")
 OPTIONAL_PLACEHOLDERS = frozenset({"VIVIPI_SERVICE_BASE_URL"})
 DEFAULT_DEPLOY_PORT = "auto"
+PRERELEASE_VERSION_PATTERN = re.compile(r"^(\d+\.\d+\.\d+)-?(a|b|rc)(\d+)$")
 
 
 def _parse_brightness(value: object) -> int:
@@ -365,6 +366,31 @@ def _resolve_release_wheel(dist_dir: str | Path) -> Path:
     return matches[0]
 
 
+def _release_version_from_wheel(wheel_path: Path) -> str:
+    filename = wheel_path.name
+    if not filename.startswith("vivipi-") or not filename.endswith(".whl"):
+        raise ValueError("release packaging requires a vivipi wheel filename")
+
+    parts = filename[:-4].split("-")
+    if len(parts) < 5:
+        raise ValueError("release packaging requires a standard wheel filename")
+    return parts[1]
+
+
+def _normalize_release_version(value: str) -> str:
+    normalized = value.strip()
+    match = PRERELEASE_VERSION_PATTERN.fullmatch(normalized)
+    if match is None:
+        return normalized
+    return f"{match.group(1)}{match.group(2)}{match.group(3)}"
+
+
+def _select_release_version(repository_version: str, wheel_version: str) -> str:
+    if _normalize_release_version(repository_version) == _normalize_release_version(wheel_version):
+        return repository_version
+    return wheel_version
+
+
 def _copy_release_tree(source: Path, destination: Path):
     shutil.copytree(
         source,
@@ -434,8 +460,11 @@ def stage_release_assets(
     run_command=subprocess.run,
 ) -> dict[str, Path]:
     repository_root = Path(__file__).resolve().parents[3]
-    version = _resolve_release_version(repository_root, version_resolver=version_resolver)
     _clear_generated_release_assets(output_dir)
+
+    wheel_path = _resolve_release_wheel(dist_dir)
+    repository_version = _resolve_release_version(repository_root, version_resolver=version_resolver)
+    version = _select_release_version(repository_version, _release_version_from_wheel(wheel_path))
 
     firmware_bundle = build_firmware_bundle(
         config_path,

@@ -15,6 +15,7 @@ DEVICE_PORT=""
 COMMAND=""
 VERBOSE=0
 USE_VENV=1
+CONFIG_PATH_EXPLICIT=0
 WIFI_SSID="${VIVIPI_WIFI_SSID:-}"
 WIFI_PASSWORD="${VIVIPI_WIFI_PASSWORD:-}"
 SERVICE_BASE_URL="${VIVIPI_SERVICE_BASE_URL:-}"
@@ -33,7 +34,11 @@ has_local_editor_config() {
 }
 
 should_prefer_local_config() {
-    [[ "$CONFIG_PATH" != *.local.yaml ]] && has_local_editor_config
+    [[ "$CONFIG_PATH_EXPLICIT" -eq 0 ]] && [[ "$CONFIG_PATH" != *.local.yaml ]] && has_local_editor_config
+}
+
+local_config_will_be_used() {
+    [[ "$CONFIG_PATH" == *.local.yaml ]] || should_prefer_local_config
 }
 
 usage() {
@@ -140,7 +145,7 @@ run_python_module() {
 require_runtime_env() {
     local missing=()
 
-    if has_local_editor_config; then
+    if local_config_will_be_used; then
         return
     fi
 
@@ -234,6 +239,7 @@ parse_args() {
                 ;;
             -c|--config)
                 CONFIG_PATH="$2"
+                CONFIG_PATH_EXPLICIT=1
                 shift 2
                 ;;
             -o|--output-dir)

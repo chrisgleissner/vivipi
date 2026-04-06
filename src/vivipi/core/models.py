@@ -119,6 +119,8 @@ class AppState:
             raise ValueError("row_width must be positive")
         if self.overview_columns < 1 or self.overview_columns > 4:
             raise ValueError("overview_columns must be between 1 and 4")
+        if self.display_mode == DisplayMode.STANDARD and self.overview_columns != 1:
+            raise ValueError("standard overview mode supports exactly one column")
         if len(self.column_separator) != 1:
             raise ValueError("column_separator must be exactly one character")
         if self.page_size < 1:

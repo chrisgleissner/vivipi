@@ -296,6 +296,33 @@ def test_stage_release_assets_builds_versioned_release_set(tmp_path: Path):
     assert (tmp_path / "release" / "pico2w-micropython-0.2.1-rc0.txt").exists()
 
 
+def test_stage_release_assets_falls_back_to_the_built_wheel_version_when_repo_version_diverges(tmp_path: Path):
+    config_path = write_fixture_files(tmp_path)
+    dist_dir = tmp_path / "dist"
+    dist_dir.mkdir(parents=True)
+    (dist_dir / "vivipi-0.2.3.dev0+g029105f9a.d20260406-py3-none-any.whl").write_text("wheel", encoding="utf-8")
+
+    def fake_run_command(command, check, cwd):
+        output_arg = next(arg for arg in command if arg.startswith("--output="))
+        Path(output_arg.split("=", 1)[1]).write_text("archive", encoding="utf-8")
+
+    outputs = stage_release_assets(
+        config_path,
+        tmp_path / "release",
+        dist_dir,
+        env=FIXTURE_ENV,
+        version_resolver=lambda: "0.2.2",
+        run_command=fake_run_command,
+    )
+
+    assert outputs["firmware_bundle"] == tmp_path / "release" / "vivipi-device-filesystem-0.2.3.dev0+g029105f9a.d20260406.zip"
+    assert outputs["service_bundle"] == tmp_path / "release" / "vivipi-service-bundle-0.2.3.dev0+g029105f9a.d20260406.zip"
+    assert outputs["source_zip"] == tmp_path / "release" / "vivipi-source-0.2.3.dev0+g029105f9a.d20260406.zip"
+    assert outputs["source_tar"] == tmp_path / "release" / "vivipi-source-0.2.3.dev0+g029105f9a.d20260406.tar.gz"
+    rendered = json.loads((tmp_path / "release" / "vivipi-device-fs" / "config.json").read_text(encoding="utf-8"))
+    assert rendered["project"]["version"] == "0.2.3.dev0+g029105f9a.d20260406"
+
+
 def test_load_build_deploy_settings_requires_all_environment_placeholders(tmp_path: Path):
     config_path = write_fixture_files(tmp_path)
 
@@ -376,6 +403,25 @@ def test_load_build_deploy_settings_validates_display_mode_columns_and_separator
     )
 
     with pytest.raises(ValueError, match="device.display.mode"):
+        load_build_deploy_settings(config_path, env={})
+
+
+def test_load_build_deploy_settings_rejects_standard_multi_column_overview(tmp_path: Path):
+    config_path = tmp_path / "build-deploy.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "device:",
+                "  display:",
+                "    type: waveshare-pico-oled-1.3",
+                "    mode: standard",
+                "    columns: 2",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="use 'compact' for multiple columns"):
         load_build_deploy_settings(config_path, env={})
 
 
