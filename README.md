@@ -17,7 +17,7 @@ The project is intentionally narrow:
 Behavioral requirements live in [docs/spec.md](docs/spec.md). Requirement-to-test coverage lives in [docs/spec-traceability.md](docs/spec-traceability.md).
 
 > [!NOTE]
-> This project is under active development. Some documented features may not yet be fully functional. 
+> This project is under active development. Some documented features may not yet be fully functional.
 
 ## System Architecture
 
@@ -102,14 +102,13 @@ Requirements:
 For day-to-day editor workflows, copy `config/build-deploy.local.example.yaml` to `config/build-deploy.local.yaml` and put your Wi-Fi credentials there. `./build render-config`, `./build build-firmware`, and `./build deploy` automatically prefer that local file when it exists.
 
 1. Set Wi-Fi credentials. Add `VIVIPI_SERVICE_BASE_URL` only if you want `SERVICE` checks.
-
 ```bash
 export VIVIPI_WIFI_SSID="your-wifi-name"
 export VIVIPI_WIFI_PASSWORD="your-wifi-password"
 export VIVIPI_SERVICE_BASE_URL="http://192.168.1.10:8080/checks"
 ```
 
-1. Run the default local workflow.
+2. Run the default local workflow.
 
 ```bash
 ./build
@@ -119,13 +118,13 @@ export VIVIPI_SERVICE_BASE_URL="http://192.168.1.10:8080/checks"
 
 Without `VIVIPI_SERVICE_BASE_URL`, ViviPi builds only the direct `PING`, `HTTP`, `FTP`, and `TELNET` checks from [config/checks.yaml](config/checks.yaml).
 
-1. Start the default Vivi Service only if you want the sample `SERVICE` check.
+3. Start the default Vivi Service only if you want the sample `SERVICE` check.
 
 ```bash
 ./build service --host 0.0.0.0 --port 8080
 ```
 
-1. Build and deploy to the Pico when hardware is connected.
+4. Build and deploy to the Pico when hardware is connected.
 
 ```bash
 ./build build-firmware
@@ -150,15 +149,11 @@ The generated `artifacts/release/vivipi-device-fs/` directory is the exact devic
 
 The official Raspberry Pi Pico extension handles Pico toolchain setup, and its MicroPython workflow relies on the MicroPico extension. This repository includes workspace recommendations for both extensions plus ready-made tasks in `.vscode/tasks.json`.
 
-The `ViviPi: ...` entries are VS Code tasks, not top-level command palette commands. Run them with `Ctrl+Shift+P` then `Tasks: Run Task`, and select the task name from the list. You can also use `Terminal` -> `Run Task...`.
-
 1. Open the repository as a single-folder workspace.
 2. Install the recommended extensions when prompted.
 3. Create `config/build-deploy.local.yaml` from `config/build-deploy.local.example.yaml` for local Wi-Fi and optional service settings.
-4. Open `Ctrl+Shift+P`, run `Tasks: Run Task`, then choose `ViviPi: Build Firmware Bundle` to regenerate `artifacts/release/vivipi-device-fs/`.
-5. Open `Ctrl+Shift+P`, run `Tasks: Run Task`, then choose `ViviPi: Deploy To First Connected Pico` to build and upload to the first connected Pico.
-
-`Ctrl+Shift+B` runs the default build task, which is `ViviPi: Build Firmware Bundle`. The deploy step must still be started from `Tasks: Run Task`.
+4. Run the `ViviPi: Build Firmware Bundle` task to regenerate `artifacts/release/vivipi-device-fs/`.
+5. Run the `ViviPi: Deploy To First Connected Pico` task to build and upload to the first connected Pico.
 
 If you have more than one board attached, use `./build deploy --device-port <port>` from the integrated terminal.
 
