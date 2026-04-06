@@ -300,29 +300,3 @@ src/vivipi/tooling/      Build and deploy logic
 tests/                   All test suites
 ```
 
-## Display Detection
-
-ViviPi does not currently claim true hardware autodetection for SPI display modules, and that is intentional.
-
-Why:
-
-- The vendor Pico SPI examples are model-specific scripts such as `Pico-OLED-1.3(spi).py` and `Pico_ePaper-2.13-B_V4.py`, which indicates manual driver selection rather than a common probe path.
-- The OLED SPI example configures the bus as write-only with `miso=None`, so there is no controller readback channel available for reliable identification.
-- The e-paper examples expose a `BUSY` line, but that is a status signal for the selected driver flow, not a standardized product identity mechanism.
-- The vendor C examples also rely on manually uncommenting the matching display routine in `main.c`.
-- This matches the normal Raspberry Pi SPI model more broadly: explicit driver selection is standard, while generic SPI display autodetection is not.
-
-Evidence in the bundled vendor tree:
-
-- [pi/displays/waveshare/Pico-OLED1.3/Pico_code/Python/Pico-OLED-1.3/Pico-OLED-1.3(spi).py](/home/chris/dev/vivipi/pi/displays/waveshare/Pico-OLED1.3/Pico_code/Python/Pico-OLED-1.3/Pico-OLED-1.3(spi).py)
-- [pi/displays/waveshare/Pico-OLED1.3/Pico_code/Python/Pico-OLED-1.3/ReadmeEN.txt](/home/chris/dev/vivipi/pi/displays/waveshare/Pico-OLED1.3/Pico_code/Python/Pico-OLED-1.3/ReadmeEN.txt)
-- [pi/displays/waveshare/Pico-ePaper-2.13/Spec.md](/home/chris/dev/vivipi/pi/displays/waveshare/Pico-ePaper-2.13/Spec.md)
-- [pi/displays/waveshare/Pico-ePaper-2.13/Pico_ePaper_Code/pythonNanoGui/drivers/ePaper2in13bV4.py](/home/chris/dev/vivipi/pi/displays/waveshare/Pico-ePaper-2.13/Pico_ePaper_Code/pythonNanoGui/drivers/ePaper2in13bV4.py)
-- [pi/displays/waveshare/Pico-ePaper-2.13/Pico_ePaper_Code/pythonNanoGui/drivers/ePaper2in9.py](/home/chris/dev/vivipi/pi/displays/waveshare/Pico-ePaper-2.13/Pico_ePaper_Code/pythonNanoGui/drivers/ePaper2in9.py)
-
-Because of that, `device.display.type` remains the explicit selector when you are not using the default display.
-
-The current implementation directly covers every bundled Pico OLED/LCD MicroPython sample in the vendor tree and the bundled Pico e-paper MicroPython drivers for `2.13`, `2.13-B`, `2.7`, `2.7-V2`, `2.9`, `3.7`, `4.2`, `4.2-V2`, and `7.5-B`.
-
-For normative product behavior and requirement wording, use [docs/spec.md](docs/spec.md) as the source of truth.
-
