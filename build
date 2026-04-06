@@ -7,6 +7,7 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 VENV_DIR="${VENV_DIR:-$ROOT_DIR/.venv}"
 CONFIG_PATH="$ROOT_DIR/config/build-deploy.yaml"
 OUTPUT_DIR="$ROOT_DIR/artifacts/release"
+DIST_DIR="$ROOT_DIR/dist"
 RUNTIME_CONFIG_OUTPUT="$ROOT_DIR/artifacts/device/config.json"
 HOST="0.0.0.0"
 PORT="8080"
@@ -39,7 +40,7 @@ Commands:
   render-config    Render artifacts/device/config.json from the build config
   build-firmware   Build the zipped firmware bundle into artifacts/release
   deploy           Build the firmware bundle and copy it to the Pico via mpremote
-  release-assets   Build Python distributions and the firmware release bundle
+    release-assets   Build the versioned GitHub release artifacts
   service          Run the default ADB-backed Vivi Service
   all              Alias for ci
   help             Show this help text
@@ -162,11 +163,20 @@ render_runtime_config() {
     run_python_module vivipi.tooling.build_deploy render-config --config "$CONFIG_PATH" --output "$RUNTIME_CONFIG_OUTPUT"
 }
 
-build_python_distributions() {
+build_python_wheel() {
     ensure_dependencies
     local python_path
     python_path="$(python_cmd)"
-    run_cmd "$python_path" -m build
+    mkdir -p "$DIST_DIR"
+    find "$DIST_DIR" -maxdepth 1 -type f \( -name 'vivipi-*.whl' -o -name 'vivipi-*.tar.gz' \) -delete
+    run_cmd "$python_path" -m build --wheel --outdir "$DIST_DIR"
+}
+
+stage_release_assets() {
+    ensure_dependencies
+    require_runtime_env
+    with_wifi_env
+    run_python_module vivipi.tooling.build_deploy stage-release-assets --config "$CONFIG_PATH" --output-dir "$OUTPUT_DIR" --dist-dir "$DIST_DIR"
 }
 
 deploy_bundle() {
@@ -286,8 +296,8 @@ main() {
             build_firmware_bundle
             ;;
         release-assets)
-            build_python_distributions
-            build_firmware_bundle
+            build_python_wheel
+            stage_release_assets
             ;;
         deploy)
             deploy_bundle

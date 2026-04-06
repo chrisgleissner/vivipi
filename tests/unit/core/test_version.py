@@ -39,6 +39,16 @@ def test_resolve_version_returns_bare_tag_when_on_tag(monkeypatch, tmp_path):
     assert resolve_version(tmp_path) == "0.2.0"
 
 
+def test_resolve_version_returns_prerelease_tag_when_on_tag(monkeypatch, tmp_path):
+    def fake_run(args, **kwargs):
+        if "describe" in args and "[0-9]*" in args:
+            return subprocess.CompletedProcess(args, 0, stdout="0.2.1-rc0-0-gabcdef12\n")
+        return subprocess.CompletedProcess(args, 128, stdout="", stderr="fatal")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert resolve_version(tmp_path) == "0.2.1-rc0"
+
+
 def test_resolve_version_appends_hash_when_ahead_of_tag(monkeypatch, tmp_path):
     def fake_run(args, **kwargs):
         if "describe" in args:

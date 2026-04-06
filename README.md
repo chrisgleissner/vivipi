@@ -78,6 +78,35 @@ Step 4: Build and deploy to the Pico when hardware is connected.
 
 `./build deploy` uses `mpremote` to copy the prepared filesystem. The MicroPython UF2 is installed separately from the pinned Pico 2W download reference.
 
+## Install From GitHub Releases
+
+Each GitHub release publishes a small, versioned set of assets. Download the files that match the tag you want to install.
+
+| Asset | Purpose | Contains only what is needed for | How to use it |
+| --- | --- | --- | --- |
+| `vivipi-device-filesystem-<version>.zip` | Device update bundle | Copying ViviPi onto a Pico after the base MicroPython UF2 is already installed | Unzip or copy the contents onto the Pico with `mpremote fs cp` |
+| `pico2w-micropython-<version>.txt` | Pinned board bootstrap reference | Finding the exact MicroPython download page and default board port used for the release | Read it first when preparing a blank Pico |
+| `vivipi-service-bundle-<version>.zip` | Local service starter kit | Running the default ADB-backed service or a minimal custom `SERVICE` endpoint | Unzip it, install the bundled wheel, then run either `vivipi-adb-service` or `custom-service-example.py` |
+| `vivipi-source-<version>.zip` | Tagged source snapshot | Inspecting or rebuilding the exact source used for the release | Download if you want a ZIP source archive with the release tag in the filename |
+| `vivipi-source-<version>.tar.gz` | Tagged source snapshot | Inspecting or rebuilding the exact source used for the release | Download if you want a tarball source archive with the release tag in the filename |
+
+GitHub also adds built-in `Source code (zip)` and `Source code (tar.gz)` links to every release page. Those filenames are controlled by GitHub. Use the versioned `vivipi-source-<version>.*` assets above when you need filenames that explicitly include the release tag.
+
+### Device Install From A Release
+
+1. Download `pico2w-micropython-<version>.txt` and `vivipi-device-filesystem-<version>.zip` from the release page.
+2. Use the URL in `pico2w-micropython-<version>.txt` to install the base MicroPython UF2 on the Pico if the board is blank.
+3. Copy the contents of `vivipi-device-filesystem-<version>.zip` onto the Pico with `mpremote fs cp`, or unzip it locally and use `./build deploy --device-port ...` against the unpacked `vivipi-device-fs/` tree.
+4. Point `VIVIPI_SERVICE_BASE_URL` at a reachable host only if you want `SERVICE` checks baked into `config.json`.
+
+### Service Install From A Release
+
+1. Download and unzip `vivipi-service-bundle-<version>.zip`.
+2. Install the bundled wheel with `python -m pip install vivipi-*.whl`.
+3. Start the default service with `vivipi-adb-service --host 0.0.0.0 --port 8080` if you want ADB-backed checks.
+4. Or start `custom-service-example.py --host 0.0.0.0 --port 8080` and adapt its `/checks` payload to expose your own checks.
+5. Set `VIVIPI_SERVICE_BASE_URL` in your build configuration to `http://<host>:8080/checks` before building the device filesystem.
+
 ## Build Tooling
 
 The `./build` script is the canonical entrypoint.
@@ -123,7 +152,8 @@ Generated artifacts are written under `artifacts/`.
 Key outputs:
 
 - `./build render-config` writes `artifacts/device/config.json`
-- `./build build-firmware` writes `vivipi-device-filesystem.zip`, `pico2w-micropython.txt`, and the unpacked `vivipi-device-fs/` tree under `artifacts/release`
+- `./build build-firmware` writes `vivipi-device-filesystem-<version>.zip`, `pico2w-micropython-<version>.txt`, and the unpacked `vivipi-device-fs/` tree under `artifacts/release`
+- `./build release-assets` writes the versioned release assets under `artifacts/release`
 - `./build deploy` copies the unpacked `vivipi-device-fs/` tree onto the Pico with `mpremote`
 - `./build` and `./build ci` validate the core, runtime, tooling, and firmware adapters together on CPython
 
@@ -281,12 +311,12 @@ The display backend boundary lives under `firmware/displays/`, while rendering i
 
 Tagging with a x.y.z version triggers a release containing:
 
-- Python wheel for starting the local Vivi service
-- Zipped device filesystem bundle ready for `mpremote fs cp`
-- `pico2w-micropython.txt` with the supported Pico 2W MicroPython download reference
-- GitHub's built-in source archives for the tagged source tree
+- `vivipi-device-filesystem-<version>.zip` for copying ViviPi onto a Pico
+- `pico2w-micropython-<version>.txt` with the supported Pico 2W MicroPython download reference
+- `vivipi-service-bundle-<version>.zip` containing the installable wheel plus minimal files for starting the default or a custom service
+- `vivipi-source-<version>.zip` and `vivipi-source-<version>.tar.gz` for tagged source downloads
 
-The release workflow publishes only the wheel, the device filesystem bundle, and the pinned MicroPython download reference. Sample configuration files stay in the repository and the tagged source archives are provided by GitHub.
+The release workflow publishes only the versioned firmware bundle, the versioned MicroPython reference, the versioned service starter bundle, and versioned source archives. GitHub's built-in source archive links still appear automatically, but the explicit release assets above are the supported downloads.
 
 ## Repository Layout
 

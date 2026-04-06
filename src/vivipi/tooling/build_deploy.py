@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
+from textwrap import dedent
 from urllib.parse import urlparse
 
 import yaml
@@ -179,6 +180,265 @@ def write_install_manifest(settings: dict[str, object], output_path: str | Path)
     return destination
 
 
+def _versioned_release_path(output_dir: str | Path, stem: str, version: str, suffix: str) -> Path:
+    return Path(output_dir) / f"{stem}-{version}{suffix}"
+
+
+def _clear_generated_release_assets(output_dir: str | Path):
+    release_dir = Path(output_dir)
+    if not release_dir.exists():
+        return
+
+    generated_patterns = (
+        "pico2w-micropython-*.txt",
+        "vivipi-device-filesystem-*.zip",
+        "vivipi-service-bundle-*.zip",
+        "vivipi-source-*.zip",
+        "vivipi-source-*.tar.gz",
+    )
+    legacy_paths = (
+        release_dir / "pico2w-micropython.txt",
+        release_dir / "vivipi-device-filesystem.zip",
+        release_dir / "vivipi-firmware-bundle.zip",
+    )
+
+    for pattern in generated_patterns:
+        for path in release_dir.glob(pattern):
+            if path.is_file():
+                path.unlink()
+
+    for path in legacy_paths:
+        if path.exists():
+            path.unlink()
+
+
+def _resolve_release_version(repository_root: Path, version_resolver=None) -> str:
+    if version_resolver is not None:
+        return version_resolver()
+
+    from vivipi.core.version import resolve_version
+
+    return resolve_version(repository_root)
+
+
+def _write_service_bundle_readme(output_path: Path, version: str, wheel_name: str) -> Path:
+    content = dedent(
+        f"""\
+        ViviPi service bundle {version}
+
+        Contents:
+        - {wheel_name}: installable Python package that provides the default ADB-backed service.
+        - custom-service-example.py: minimal HTTP service that exposes custom checks on /checks.
+        - service-response-example.json: example payload matching ViviPi's SERVICE schema.
+
+        Default ADB service:
+        1. python -m pip install {wheel_name}
+        2. vivipi-adb-service --host 0.0.0.0 --port 8080
+
+        Custom service example:
+        1. python custom-service-example.py --host 0.0.0.0 --port 8080
+        2. Point VIVIPI_SERVICE_BASE_URL at http://<host>:8080/checks in your device config.
+        """
+    )
+    output_path.write_text(content, encoding="utf-8")
+    return output_path
+
+
+def _write_custom_service_example(output_path: Path) -> Path:
+    output_path.write_text(
+        dedent(
+            """\
+            from __future__ import annotations
+
+            import argparse
+            import json
+            from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+            from urllib.parse import urlparse
+
+
+            PAYLOAD = {
+                "checks": [
+                    {
+                        "name": "Router",
+                        "status": "OK",
+                        "details": "Reachable",
+                        "latency_ms": 3.5,
+                    },
+                    {
+                        "name": "NAS API",
+                        "status": "DEG",
+                        "details": "Slow response",
+                        "latency_ms": 182.0,
+                    },
+                ]
+            }
+
+
+            class Handler(BaseHTTPRequestHandler):
+                def do_GET(self):
+                    route = urlparse(self.path).path
+                    if route == "/health":
+                        payload = {"status": "OK"}
+                        self._respond(200, payload)
+                        return
+                    if route == "/checks":
+                        self._respond(200, PAYLOAD)
+                        return
+                    self._respond(404, {"error": "not_found"})
+
+                def log_message(self, format_string, *args):
+                    return None
+
+                def _respond(self, status_code: int, payload: dict[str, object]):
+                    body = json.dumps(payload).encode("utf-8")
+                    self.send_response(status_code)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+
+
+            def main(argv: list[str] | None = None) -> int:
+                parser = argparse.ArgumentParser(description="Run a minimal ViviPi-compatible custom service")
+                parser.add_argument("--host", default="0.0.0.0")
+                parser.add_argument("--port", type=int, default=8080)
+                args = parser.parse_args(argv)
+                server = ThreadingHTTPServer((args.host, args.port), Handler)
+                try:
+                    server.serve_forever()
+                finally:
+                    server.server_close()
+                return 0
+
+
+            if __name__ == "__main__":
+                raise SystemExit(main())
+            """
+        ),
+        encoding="utf-8",
+    )
+    return output_path
+
+
+def _write_service_response_example(output_path: Path) -> Path:
+    output_path.write_text(
+        json.dumps(
+            {
+                "checks": [
+                    {
+                        "name": "Router",
+                        "status": "OK",
+                        "details": "Reachable",
+                        "latency_ms": 3.5,
+                    }
+                ]
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return output_path
+
+
+def _resolve_release_wheel(dist_dir: str | Path) -> Path:
+    matches = sorted(Path(dist_dir).glob("vivipi-*.whl"))
+    if len(matches) != 1:
+        raise ValueError("release packaging requires exactly one built wheel in dist")
+    return matches[0]
+
+
+def _copy_release_tree(source: Path, destination: Path):
+    shutil.copytree(
+        source,
+        destination,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+    )
+
+
+def build_service_bundle(output_dir: str | Path, dist_dir: str | Path, version: str) -> Path:
+    release_dir = Path(output_dir)
+    release_dir.mkdir(parents=True, exist_ok=True)
+
+    wheel_path = _resolve_release_wheel(dist_dir)
+    staging_dir = release_dir / "vivipi-service-bundle"
+    if staging_dir.exists():
+        shutil.rmtree(staging_dir)
+    staging_dir.mkdir(parents=True)
+
+    shutil.copy2(wheel_path, staging_dir / wheel_path.name)
+    _write_service_bundle_readme(staging_dir / "README-service.txt", version, wheel_path.name)
+    _write_custom_service_example(staging_dir / "custom-service-example.py")
+    _write_service_response_example(staging_dir / "service-response-example.json")
+
+    archive_path = _versioned_release_path(release_dir, "vivipi-service-bundle", version, "")
+    built_archive = shutil.make_archive(str(archive_path), "zip", root_dir=staging_dir)
+    shutil.rmtree(staging_dir)
+    return Path(built_archive)
+
+
+def build_source_archives(
+    output_dir: str | Path,
+    version: str,
+    run_command=subprocess.run,
+) -> tuple[Path, Path]:
+    repository_root = Path(__file__).resolve().parents[3]
+    release_dir = Path(output_dir)
+    release_dir.mkdir(parents=True, exist_ok=True)
+
+    archive_prefix = f"vivipi-{version}/"
+    zip_path = _versioned_release_path(release_dir, "vivipi-source", version, ".zip")
+    tar_path = _versioned_release_path(release_dir, "vivipi-source", version, ".tar.gz")
+
+    for archive_path, archive_format in ((zip_path, "zip"), (tar_path, "tar.gz")):
+        run_command(
+            [
+                "git",
+                "archive",
+                f"--format={archive_format}",
+                f"--prefix={archive_prefix}",
+                f"--output={archive_path}",
+                "HEAD",
+            ],
+            check=True,
+            cwd=repository_root,
+        )
+
+    return zip_path, tar_path
+
+
+def stage_release_assets(
+    config_path: str | Path,
+    output_dir: str | Path,
+    dist_dir: str | Path,
+    env: dict[str, str] | None = None,
+    version_resolver=None,
+    build_time_resolver=None,
+    run_command=subprocess.run,
+) -> dict[str, Path]:
+    repository_root = Path(__file__).resolve().parents[3]
+    version = _resolve_release_version(repository_root, version_resolver=version_resolver)
+    _clear_generated_release_assets(output_dir)
+
+    firmware_bundle = build_firmware_bundle(
+        config_path,
+        output_dir,
+        env=env,
+        version_resolver=lambda: version,
+        build_time_resolver=build_time_resolver,
+    )
+    service_bundle = build_service_bundle(output_dir, dist_dir, version)
+    source_zip, source_tar = build_source_archives(output_dir, version, run_command=run_command)
+
+    return {
+        "firmware_bundle": firmware_bundle,
+        "service_bundle": service_bundle,
+        "source_zip": source_zip,
+        "source_tar": source_tar,
+    }
+
+
 def _resolve_checks_path(config_path: Path, settings: dict[str, object]) -> Path:
     checks_config = settings.get("checks_config")
     if not isinstance(checks_config, str) or not checks_config.strip():
@@ -226,11 +486,7 @@ def build_firmware_bundle(
     source_config_path = Path(config_path).resolve()
     settings = load_build_deploy_settings(source_config_path, env=env)
 
-    if version_resolver is not None:
-        version = version_resolver()
-    else:
-        from vivipi.core.version import resolve_version
-        version = resolve_version(repository_root)
+    version = _resolve_release_version(repository_root, version_resolver=version_resolver)
 
     if build_time_resolver is not None:
         build_time = build_time_resolver()
@@ -247,19 +503,17 @@ def build_firmware_bundle(
     package_dir = repository_root / "src" / "vivipi"
 
     for item in firmware_dir.iterdir():
+        if item.name == "__pycache__" or item.suffix in {".pyc", ".pyo"}:
+            continue
         if item.is_dir():
-            shutil.copytree(item, staging_dir / item.name)
+            _copy_release_tree(item, staging_dir / item.name)
         else:
             shutil.copy2(item, staging_dir / item.name)
-    shutil.copytree(package_dir, staging_dir / "vivipi")
+    _copy_release_tree(package_dir, staging_dir / "vivipi")
     write_runtime_config(source_config_path, staging_dir / "config.json", env=env, version=version, build_time=build_time)
-    write_install_manifest(settings, release_dir / "pico2w-micropython.txt")
+    write_install_manifest(settings, _versioned_release_path(release_dir, "pico2w-micropython", version, ".txt"))
 
-    legacy_archive_path = release_dir / "vivipi-firmware-bundle.zip"
-    if legacy_archive_path.exists():
-        legacy_archive_path.unlink()
-
-    archive_path = release_dir / "vivipi-device-filesystem"
+    archive_path = _versioned_release_path(release_dir, "vivipi-device-filesystem", version, "")
     built_archive = shutil.make_archive(str(archive_path), "zip", root_dir=staging_dir)
     return Path(built_archive)
 
@@ -305,6 +559,11 @@ def main(argv: list[str] | None = None) -> int:
     bundle_parser.add_argument("--config", required=True)
     bundle_parser.add_argument("--output-dir", required=True)
 
+    release_parser = subparsers.add_parser("stage-release-assets", help="Package the versioned GitHub release assets")
+    release_parser.add_argument("--config", required=True)
+    release_parser.add_argument("--output-dir", required=True)
+    release_parser.add_argument("--dist-dir", required=True)
+
     deploy_parser = subparsers.add_parser("deploy-firmware", help="Copy the firmware bundle onto a Pico via mpremote")
     deploy_parser.add_argument("--config", required=True)
     deploy_parser.add_argument("--output-dir", required=True)
@@ -316,6 +575,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "build-firmware":
         build_firmware_bundle(args.config, args.output_dir)
+        return 0
+    if args.command == "stage-release-assets":
+        stage_release_assets(args.config, args.output_dir, args.dist_dir)
         return 0
     if args.command == "deploy-firmware":
         deploy_firmware(args.config, args.output_dir, port=args.port)

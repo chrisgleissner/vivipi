@@ -26,7 +26,6 @@ jobs:
       - name: Build release assets
         env:
           PYTHON_BIN: python
-          SETUPTOOLS_SCM_PRETEND_VERSION: ${{ github.ref_name }}
           VIVIPI_WIFI_SSID: release-ssid
           VIVIPI_WIFI_PASSWORD: release-password
           VIVIPI_SERVICE_BASE_URL: http://192.0.2.10:8080/checks
@@ -35,7 +34,11 @@ jobs:
       - name: Publish GitHub release assets
         uses: softprops/action-gh-release@v2
         with:
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'legacy' }}
           files: |
-            dist/*.whl
-            artifacts/release/vivipi-device-filesystem.zip
-            artifacts/release/pico2w-micropython.txt
+            artifacts/release/pico2w-micropython-${{ github.ref_name }}.txt
+            artifacts/release/vivipi-device-filesystem-${{ github.ref_name }}.zip
+            artifacts/release/vivipi-service-bundle-${{ github.ref_name }}.zip
+            artifacts/release/vivipi-source-${{ github.ref_name }}.zip
+            artifacts/release/vivipi-source-${{ github.ref_name }}.tar.gz

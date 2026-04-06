@@ -7,6 +7,8 @@ import pytest
 from vivipi.core.models import CheckDefinition, CheckType
 from vivipi.tooling import build_deploy
 from vivipi.tooling.build_deploy import (
+    _clear_generated_release_assets,
+    _copy_release_tree,
     _is_loopback_host,
     _parse_brightness,
     _parse_column_separator,
@@ -15,11 +17,15 @@ from vivipi.tooling.build_deploy import (
     _parse_duration_s,
     _parse_font_size_px,
     _resolve_checks_path,
+    _resolve_release_wheel,
     build_firmware_bundle,
+    build_service_bundle,
+    build_source_archives,
     deploy_firmware,
     load_build_deploy_settings,
     load_runtime_checks,
     render_device_runtime_config,
+    stage_release_assets,
     validate_runtime_settings,
     write_install_manifest,
     write_runtime_config,
@@ -125,6 +131,7 @@ def test_build_firmware_bundle_creates_a_releaseable_zip_archive(tmp_path: Path)
         config_path,
         tmp_path / "release",
         env=FIXTURE_ENV,
+        version_resolver=lambda: "0.2.1-rc0",
     )
 
     assert archive_path.exists()
@@ -136,24 +143,143 @@ def test_build_firmware_bundle_creates_a_releaseable_zip_archive(tmp_path: Path)
     assert "input.py" in names
     assert "main.py" in names
     assert "vivipi/__init__.py" in names
-    assert archive_path == tmp_path / "release" / "vivipi-device-filesystem.zip"
-    assert (tmp_path / "release" / "pico2w-micropython.txt").exists()
+    assert not any("__pycache__/" in name for name in names)
+    assert not any(name.endswith(".pyc") for name in names)
+    assert archive_path == tmp_path / "release" / "vivipi-device-filesystem-0.2.1-rc0.zip"
+    assert (tmp_path / "release" / "pico2w-micropython-0.2.1-rc0.txt").exists()
     assert not (tmp_path / "release" / "vivipi-firmware-bundle.zip").exists()
+    assert not (tmp_path / "release" / "vivipi-device-filesystem.zip").exists()
 
 
-def test_build_firmware_bundle_removes_stale_legacy_archive(tmp_path: Path):
+def test_build_service_bundle_packages_wheel_and_service_examples(tmp_path: Path):
+    dist_dir = tmp_path / "dist"
+    dist_dir.mkdir(parents=True)
+    wheel_path = dist_dir / "vivipi-0.2.1rc0-py3-none-any.whl"
+    wheel_path.write_text("wheel", encoding="utf-8")
+
+    archive_path = build_service_bundle(tmp_path / "release", dist_dir, "0.2.1-rc0")
+
+    assert archive_path == tmp_path / "release" / "vivipi-service-bundle-0.2.1-rc0.zip"
+    with zipfile.ZipFile(archive_path) as archive:
+        names = set(archive.namelist())
+
+    assert "vivipi-0.2.1rc0-py3-none-any.whl" in names
+    assert "README-service.txt" in names
+    assert "custom-service-example.py" in names
+    assert "service-response-example.json" in names
+
+
+def test_build_service_bundle_replaces_existing_staging_dir(tmp_path: Path):
+    dist_dir = tmp_path / "dist"
+    dist_dir.mkdir(parents=True)
+    (dist_dir / "vivipi-0.2.1rc0-py3-none-any.whl").write_text("wheel", encoding="utf-8")
+    stale_dir = tmp_path / "release" / "vivipi-service-bundle"
+    stale_dir.mkdir(parents=True, exist_ok=True)
+    (stale_dir / "stale.txt").write_text("stale", encoding="utf-8")
+
+    archive_path = build_service_bundle(tmp_path / "release", dist_dir, "0.2.1-rc0")
+
+    assert archive_path.exists()
+    assert not stale_dir.exists()
+
+
+def test_resolve_release_wheel_requires_exactly_one_match(tmp_path: Path):
+    dist_dir = tmp_path / "dist"
+    dist_dir.mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="exactly one built wheel"):
+        _resolve_release_wheel(dist_dir)
+
+    (dist_dir / "vivipi-0.2.1rc0-py3-none-any.whl").write_text("wheel-a", encoding="utf-8")
+    (dist_dir / "vivipi-0.2.1rc1-py3-none-any.whl").write_text("wheel-b", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="exactly one built wheel"):
+        _resolve_release_wheel(dist_dir)
+
+
+def test_copy_release_tree_skips_python_cache_files(tmp_path: Path):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir(parents=True)
+    (source_dir / "main.py").write_text("print('ok')\n", encoding="utf-8")
+    pycache_dir = source_dir / "__pycache__"
+    pycache_dir.mkdir()
+    (pycache_dir / "main.cpython-312.pyc").write_text("cache", encoding="utf-8")
+
+    destination_dir = tmp_path / "destination"
+    _copy_release_tree(source_dir, destination_dir)
+
+    assert (destination_dir / "main.py").exists()
+    assert not (destination_dir / "__pycache__").exists()
+
+
+def test_clear_generated_release_assets_removes_only_release_outputs(tmp_path: Path):
+    release_dir = tmp_path / "release"
+    release_dir.mkdir(parents=True)
+    generated_files = [
+        release_dir / "pico2w-micropython-0.2.1-rc0.txt",
+        release_dir / "vivipi-device-filesystem-0.2.1-rc0.zip",
+        release_dir / "vivipi-service-bundle-0.2.1-rc0.zip",
+        release_dir / "vivipi-source-0.2.1-rc0.zip",
+        release_dir / "vivipi-source-0.2.1-rc0.tar.gz",
+        release_dir / "pico2w-micropython.txt",
+        release_dir / "vivipi-device-filesystem.zip",
+        release_dir / "vivipi-firmware-bundle.zip",
+    ]
+    for path in generated_files:
+        path.write_text("generated", encoding="utf-8")
+    keep_path = release_dir / "keep-me.txt"
+    keep_path.write_text("keep", encoding="utf-8")
+
+    _clear_generated_release_assets(release_dir)
+
+    assert keep_path.exists()
+    assert all(not path.exists() for path in generated_files)
+
+
+def test_build_source_archives_emits_versioned_zip_and_tar(tmp_path: Path):
+    commands = []
+
+    def fake_run_command(command, check, cwd):
+        commands.append((command, cwd))
+        output_arg = next(arg for arg in command if arg.startswith("--output="))
+        output_path = Path(output_arg.split("=", 1)[1])
+        output_path.write_text("archive", encoding="utf-8")
+
+    zip_path, tar_path = build_source_archives(tmp_path / "release", "0.2.1-rc0", run_command=fake_run_command)
+
+    assert zip_path == tmp_path / "release" / "vivipi-source-0.2.1-rc0.zip"
+    assert tar_path == tmp_path / "release" / "vivipi-source-0.2.1-rc0.tar.gz"
+    assert zip_path.exists()
+    assert tar_path.exists()
+    assert len(commands) == 2
+    assert any("--format=zip" in item for item in commands[0][0])
+    assert any("--format=tar.gz" in item for item in commands[1][0])
+
+
+def test_stage_release_assets_builds_versioned_release_set(tmp_path: Path):
     config_path = write_fixture_files(tmp_path)
-    legacy_archive_path = tmp_path / "release" / "vivipi-firmware-bundle.zip"
-    legacy_archive_path.parent.mkdir(parents=True, exist_ok=True)
-    legacy_archive_path.write_text("stale", encoding="utf-8")
+    dist_dir = tmp_path / "dist"
+    dist_dir.mkdir(parents=True)
+    (dist_dir / "vivipi-0.2.1rc0-py3-none-any.whl").write_text("wheel", encoding="utf-8")
 
-    build_firmware_bundle(
+    def fake_run_command(command, check, cwd):
+        output_arg = next(arg for arg in command if arg.startswith("--output="))
+        Path(output_arg.split("=", 1)[1]).write_text("archive", encoding="utf-8")
+
+    outputs = stage_release_assets(
         config_path,
         tmp_path / "release",
+        dist_dir,
         env=FIXTURE_ENV,
+        version_resolver=lambda: "0.2.1-rc0",
+        run_command=fake_run_command,
     )
 
-    assert not legacy_archive_path.exists()
+    assert outputs["firmware_bundle"] == tmp_path / "release" / "vivipi-device-filesystem-0.2.1-rc0.zip"
+    assert outputs["service_bundle"] == tmp_path / "release" / "vivipi-service-bundle-0.2.1-rc0.zip"
+    assert outputs["source_zip"] == tmp_path / "release" / "vivipi-source-0.2.1-rc0.zip"
+    assert outputs["source_tar"] == tmp_path / "release" / "vivipi-source-0.2.1-rc0.tar.gz"
+    assert (tmp_path / "release" / "pico2w-micropython-0.2.1-rc0.txt").exists()
 
 
 def test_load_build_deploy_settings_requires_all_environment_placeholders(tmp_path: Path):
@@ -666,6 +792,23 @@ def test_build_deploy_main_dispatches_build_firmware(monkeypatch, tmp_path: Path
 
     assert exit_code == 0
     assert called == {"config": "config.yaml", "output_dir": "release-dir"}
+
+
+def test_build_deploy_main_dispatches_stage_release_assets(monkeypatch):
+    called = {}
+
+    def fake_stage_release_assets(config_path, output_dir, dist_dir):
+        called["config"] = config_path
+        called["output_dir"] = output_dir
+        called["dist_dir"] = dist_dir
+        return {}
+
+    monkeypatch.setattr(build_deploy, "stage_release_assets", fake_stage_release_assets)
+
+    exit_code = build_deploy.main(["stage-release-assets", "--config", "config.yaml", "--output-dir", "release-dir", "--dist-dir", "dist-dir"])
+
+    assert exit_code == 0
+    assert called == {"config": "config.yaml", "output_dir": "release-dir", "dist_dir": "dist-dir"}
 
 
 def test_build_deploy_main_dispatches_deploy_firmware(monkeypatch):
