@@ -223,28 +223,30 @@ device:
 
 ### Supported Display Types
 
-| Family | Module | Diagonal | Resolution | `device.display.type` |
+Published specs below are based on current The Pi Hut Waveshare product listings. The Waveshare column links directly to the corresponding developer wiki/manual page used for specs and code samples. Some retailer listings use portrait or raw-panel orientation, and some group multiple Waveshare hardware revisions under one product listing.
+
+| `device.display.type` | The Pi Hut | Waveshare | Published display spec | Notes |
 | --- | --- | --- | --- | --- |
-| `oled` | Waveshare Pico OLED 1.3 | `1.3"` | `128 × 64` | `waveshare-pico-oled-1.3` |
-| `oled` | Waveshare Pico OLED 2.23 | `2.23"` | `128 × 32` | `waveshare-pico-oled-2.23` |
-| `lcd` | Waveshare Pico LCD 0.96 | `0.96"` | `160 × 80` | `waveshare-pico-lcd-0.96` |
-| `lcd` | Waveshare Pico LCD 1.14 | `1.14"` | `240 × 135` | `waveshare-pico-lcd-1.14` |
-| `lcd` | Waveshare Pico LCD 1.14 V2 | `1.14"` | `240 × 135` | `waveshare-pico-lcd-1.14-v2` |
-| `lcd` | Waveshare Pico LCD 1.3 | `1.3"` | `240 × 240` | `waveshare-pico-lcd-1.3` |
-| `lcd` | Waveshare Pico LCD 1.44 | `1.44"` | `128 × 128` | `waveshare-pico-lcd-1.44` |
-| `lcd` | Waveshare Pico LCD 1.8 | `1.8"` | `160 × 128` | `waveshare-pico-lcd-1.8` |
-| `lcd` | Waveshare Pico LCD 2.0 | `2.0"` | `320 × 240` | `waveshare-pico-lcd-2.0` |
-| `eink` | Waveshare Pico e-Paper 2.13 V3 | `2.13"` | `250 × 122` | `waveshare-pico-epaper-2.13-v3` |
-| `eink` | Waveshare Pico e-Paper 2.13 V4 | `2.13"` | `250 × 122` | `waveshare-pico-epaper-2.13-v4` |
-| `eink` | Waveshare Pico e-Paper 2.13 V2 | `2.13"` | `250 × 122` | `waveshare-pico-epaper-2.13-v2` |
-| `eink` | Waveshare Pico e-Paper 2.13 B V4 | `2.13"` | `250 × 122` | `waveshare-pico-epaper-2.13-b-v4` |
-| `eink` | Waveshare Pico e-Paper 2.7 | `2.7"` | `264 × 176` | `waveshare-pico-epaper-2.7` |
-| `eink` | Waveshare Pico e-Paper 2.7 V2 | `2.7"` | `264 × 176` | `waveshare-pico-epaper-2.7-v2` |
-| `eink` | Waveshare Pico e-Paper 2.9 | `2.9"` | `296 × 128` | `waveshare-pico-epaper-2.9` |
-| `eink` | Waveshare Pico e-Paper 3.7 | `3.7"` | `480 × 280` | `waveshare-pico-epaper-3.7` |
-| `eink` | Waveshare Pico e-Paper 4.2 | `4.2"` | `400 × 300` | `waveshare-pico-epaper-4.2` |
-| `eink` | Waveshare Pico e-Paper 4.2 V2 | `4.2"` | `400 × 300` | `waveshare-pico-epaper-4.2-v2` |
-| `eink` | Waveshare Pico e-Paper 7.5 B V2 | `7.5"` | `800 × 480` | `waveshare-pico-epaper-7.5-b-v2` |
+| `waveshare-pico-oled-1.3` | [Listing](https://thepihut.com/products/1-3-oled-display-module-for-raspberry-pi-pico-64x128) | [Developer page](https://www.waveshare.com/wiki/Pico-OLED-1.3) | `1.3"`, `64×128`, OLED, `SH1107`, SPI/I2C | The Pi Hut publishes this module as `64×128`; ViviPi renders it as `128×64` landscape |
+| `waveshare-pico-oled-2.23` | [Listing](https://thepihut.com/products/2-23-oled-display-module-for-raspberry-pi-pico) | [Developer page](https://www.waveshare.com/wiki/Pico-OLED-2.23) | `2.23"`, `128×32`, OLED, `SSD1305`, SPI/I2C | Matches the current Pi Hut listing |
+| `waveshare-pico-lcd-0.96` | [Listing](https://thepihut.com/products/0-96-lcd-display-module-for-raspberry-pi-pico-160x80) | [Developer page](https://www.waveshare.com/wiki/Pico-LCD-0.96) | `0.96"`, `160×80`, LCD | Matches the current Pi Hut listing |
+| `waveshare-pico-lcd-1.14` | [Listing](https://thepihut.com/products/1-14-ips-lcd-display-module-240x135) | [Developer page](https://www.waveshare.com/wiki/Pico-LCD-1.14) | `1.14"`, `240×135`, IPS LCD | Pi Hut does not split separate Pico `1.14` and `1.14-v2` retail listings; Waveshare uses a shared `Pico-LCD-1.14` page |
+| `waveshare-pico-lcd-1.14-v2` | [Listing](https://thepihut.com/products/1-14-ips-lcd-display-module-240x135) | [Developer page](https://www.waveshare.com/wiki/Pico-LCD-1.14) | `1.14"`, `240×135`, IPS LCD | Pi Hut does not split separate Pico `1.14` and `1.14-v2` retail listings; Waveshare uses a shared `Pico-LCD-1.14` page |
+| `waveshare-pico-lcd-1.3` | [Listing](https://thepihut.com/products/1-3-ips-lcd-display-module-for-raspberry-pi-pico-240x240) | [Developer page](https://www.waveshare.com/wiki/Pico-LCD-1.3) | `1.3"`, `240×240`, IPS LCD | Matches the current Pi Hut listing |
+| `waveshare-pico-lcd-1.44` | [Listing](https://thepihut.com/products/1-44-lcd-display-module-for-raspberry-pi-pico-65k-colors-128x128) | [Developer page](https://www.waveshare.com/wiki/Pico-LCD-1.44) | `1.44"`, `128×128`, LCD | Matches the current Pi Hut listing |
+| `waveshare-pico-lcd-1.8` | [Listing](https://thepihut.com/products/1-8-lcd-display-for-raspberry-pi-pico) | [Developer page](https://www.waveshare.com/wiki/Pico-LCD-1.8) | `1.8"`, `160×128`, LCD, `ST7735S`, SPI | The Pi Hut's Features section says `160×128`; its Specifications block says `160x129`, which appears to be a store typo |
+| `waveshare-pico-lcd-2.0` | [Listing](https://thepihut.com/products/2-ips-lcd-display-for-raspberry-pi-pico) | [Developer page](https://www.waveshare.com/wiki/Pico-LCD-2) | `2.0"`, `320×240`, IPS LCD | Matches the current Pi Hut listing |
+| `waveshare-pico-epaper-2.13-v2` | [Listing](https://thepihut.com/products/2-13-black-white-e-ink-e-paper-display-module-for-raspberry-pi-pico-250x122) | [Developer page](https://www.waveshare.com/wiki/Pico-ePaper-2.13) | `2.13"`, black/white, `250×122` | Pi Hut groups the black/white 2.13-inch Pico module without separating `V2`/`V3`/`V4`; Waveshare publishes one shared `Pico-ePaper-2.13` page |
+| `waveshare-pico-epaper-2.13-v3` | [Listing](https://thepihut.com/products/2-13-black-white-e-ink-e-paper-display-module-for-raspberry-pi-pico-250x122) | [Developer page](https://www.waveshare.com/wiki/Pico-ePaper-2.13) | `2.13"`, black/white, `250×122` | Pi Hut groups the black/white 2.13-inch Pico module without separating `V2`/`V3`/`V4`; Waveshare publishes one shared `Pico-ePaper-2.13` page |
+| `waveshare-pico-epaper-2.13-v4` | [Listing](https://thepihut.com/products/2-13-black-white-e-ink-e-paper-display-module-for-raspberry-pi-pico-250x122) | [Developer page](https://www.waveshare.com/wiki/Pico-ePaper-2.13) | `2.13"`, black/white, `250×122` | Pi Hut groups the black/white 2.13-inch Pico module without separating `V2`/`V3`/`V4`; Waveshare publishes one shared `Pico-ePaper-2.13` page |
+| `waveshare-pico-epaper-2.13-b-v4` | [Listing](https://thepihut.com/products/2-13-red-black-white-e-ink-e-paper-display-module-for-raspberry-pi-pico-212x104) | [Developer page](https://www.waveshare.com/wiki/Pico-ePaper-2.13-B) | `2.13"`, red/black/white, `212×104` | The current Pi Hut Pico tri-color 2.13-inch listing is `212×104`, not `250×122` |
+| `waveshare-pico-epaper-2.7` | [Listing](https://thepihut.com/products/2-7-e-paper-display-module-for-raspberry-pi-pico-264x176) | [Developer page](https://www.waveshare.com/wiki/Pico-ePaper-2.7) | `2.7"`, black/white, `264×176` | Pi Hut does not separate `2.7` and `2.7-v2` retail listings; Waveshare uses a shared `Pico-ePaper-2.7` page |
+| `waveshare-pico-epaper-2.7-v2` | [Listing](https://thepihut.com/products/2-7-e-paper-display-module-for-raspberry-pi-pico-264x176) | [Developer page](https://www.waveshare.com/wiki/Pico-ePaper-2.7) | `2.7"`, black/white, `264×176` | Pi Hut does not separate `2.7` and `2.7-v2` retail listings; Waveshare uses a shared `Pico-ePaper-2.7` page |
+| `waveshare-pico-epaper-2.9` | [Listing](https://thepihut.com/products/2-9-black-white-e-ink-e-paper-display-module-for-raspberry-pi-pico-296x128) | [Developer page](https://www.waveshare.com/wiki/Pico-ePaper-2.9) | `2.9"`, black/white, `296×128` | Matches the current Pi Hut listing |
+| `waveshare-pico-epaper-3.7` | [Listing](https://thepihut.com/products/3-7-e-paper-e-ink-display-for-raspberry-pi-pico-480x280) | [Developer page](https://www.waveshare.com/wiki/Pico-ePaper-3.7) | `3.7"`, black/white, `480×280` | Matches the current Pi Hut listing |
+| `waveshare-pico-epaper-4.2` | [Listing](https://thepihut.com/products/4-2-e-paper-display-module-for-raspberry-pi-pico-black-white-400x300) | [Developer page](https://www.waveshare.com/wiki/Pico-ePaper-4.2) | `4.2"`, black/white, `400×300` | Pi Hut does not separate `4.2` and `4.2-v2` black/white retail listings; Waveshare uses a shared `Pico-ePaper-4.2` page |
+| `waveshare-pico-epaper-4.2-v2` | [Listing](https://thepihut.com/products/4-2-e-paper-display-module-for-raspberry-pi-pico-black-white-400x300) | [Developer page](https://www.waveshare.com/wiki/Pico-ePaper-4.2) | `4.2"`, black/white, `400×300` | Pi Hut does not separate `4.2` and `4.2-v2` black/white retail listings; Waveshare uses a shared `Pico-ePaper-4.2` page |
+| `waveshare-pico-epaper-7.5-b-v2` | [Listing](https://thepihut.com/products/7-5-e-paper-display-module-for-raspberry-pi-pico-800x480-red-black-white) | [Developer page](https://www.waveshare.com/wiki/Pico-ePaper-7.5-B) | `7.5"`, red/black/white, `800×480` | Pi Hut does not label the retail listing as `V2`; Waveshare documents this family on `Pico-ePaper-7.5-B` |
 
 ### Checks
 
