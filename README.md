@@ -58,6 +58,12 @@ flowchart TB
 
 Direct probes run from the Pico itself. `SERVICE` is the extension point for any kind of check driven not by the Pico, but by another device.
 
+## Operational Safety
+
+- Missing or malformed device runtime config no longer aborts startup; the firmware boots with a bounded fallback config and surfaces diagnostics when a display path is available.
+- If a configured display backend fails to initialize, firmware falls back to the default SH1107 OLED path when possible. If no backend can be started, the runtime stays headless and remains inspectable from the REPL surfaces.
+- Direct transport probes classify transient failures as `timeout`, `dns`, `refused`, `network`, `reset`, or `io`, and use bounded retry with deterministic backoff before reporting failure.
+
 ### Probe Reference
 
 | Probe | Performs | Success condition | Failure condition or note |

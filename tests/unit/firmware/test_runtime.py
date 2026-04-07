@@ -80,6 +80,27 @@ def test_connect_wifi_joins_network_when_available(monkeypatch):
     assert wlan.connect_calls == [("Office", "secret")]
 
 
+def test_connect_wifi_retries_with_backoff_before_reporting_failure(monkeypatch):
+    class FailingWlan(FakeWlan):
+        def connect(self, ssid, password):
+            self.connect_calls.append((ssid, password))
+
+    fake_time = FakeTime()
+    wlan = FailingWlan(connected=False)
+    fake_network = SimpleNamespace(STA_IF="sta", WLAN=lambda interface: wlan)
+
+    monkeypatch.setattr(firmware_runtime, "time", fake_time)
+    monkeypatch.setattr(firmware_runtime, "network", fake_network)
+
+    diagnostics = firmware_runtime.connect_wifi({"wifi": {"ssid": "Office", "password": "secret"}}, timeout_s=3)
+
+    assert diagnostics == (DiagnosticEvent(code="WIFI", message="connect fail"),)
+    assert wlan.connect_calls == [("Office", "secret"), ("Office", "secret"), ("Office", "secret")]
+    assert wlan.disconnect_calls == 3
+    assert 200 in fake_time.sleep_calls
+    assert 400 in fake_time.sleep_calls
+
+
 def test_read_wifi_state_and_reconnect_wifi_capture_current_link_details(monkeypatch):
     fake_time = FakeTime()
     wlan = FakeWlan(connected=True)
@@ -146,7 +167,7 @@ def test_build_runtime_app_uses_injected_factories_and_records_wifi_diagnostics(
     button_reader = object()
     executor = object()
     definitions = (object(),)
-    now_counter = iter([0.0, 6.0])
+    now_counter = iter([0.0, 6.0, 6.0])
 
     app = firmware_runtime.build_runtime_app(
         {
@@ -190,6 +211,111 @@ def test_build_runtime_app_uses_injected_factories_and_records_wifi_diagnostics(
     assert called["version"] == "1.2.3"
     assert called["build_time"] == "2025-04-05T12:00Z"
     assert called["diagnostics"] == (((DiagnosticEvent(code="WIFI", message="connected"),)), True)
+
+
+def test_build_runtime_app_falls_back_to_default_display_when_primary_display_init_fails():
+    called = {}
+
+    class FakeApp:
+        def __init__(self, **kwargs):
+            called.update(kwargs)
+            called["diagnostics"] = None
+
+        def inject_diagnostics(self, diagnostics, activate=True):
+            called["diagnostics"] = (diagnostics, activate)
+
+    def fake_display_factory(config):
+        if config["type"] != "waveshare-pico-oled-1.3":
+            raise RuntimeError("display init boom")
+        return SimpleNamespace(show_boot_logo=lambda version: None)
+
+    firmware_runtime.build_runtime_app(
+        {
+            "project": {},
+            "device": {
+                "display": {"type": "waveshare-pico-epaper-2.13-v4"},
+                "buttons": {"a": "GP14", "b": "GP15"},
+            },
+        },
+        input_controller_factory=lambda: object(),
+        display_factory=fake_display_factory,
+        button_reader_factory=lambda config, input_controller: object(),
+        runtime_app_factory=FakeApp,
+        definitions_builder=lambda config: (),
+        executor_factory=lambda: object(),
+        wifi_connector=lambda config: (),
+        now_provider=lambda: 0.0,
+        sleep_ms=lambda ms: None,
+    )
+
+    assert called["row_width"] == 16
+    assert called["page_size"] == 8
+    diagnostics, activate = called["diagnostics"]
+    assert activate is True
+    assert any(event.code == "DISP" and event.message == "init failed" for event in diagnostics)
+    assert any(event.code == "DISP" and event.message == "fallback" for event in diagnostics)
+
+
+def test_build_runtime_app_recovers_from_invalid_definitions_and_records_boot_error():
+    display = SimpleNamespace(show_boot_logo=lambda version: None, draw_frame=lambda frame: None)
+
+    app = firmware_runtime.build_runtime_app(
+        {
+            "project": {},
+            "device": {
+                "display": {
+                    "width_px": 128,
+                    "height_px": 64,
+                    "font": {"width_px": 8, "height_px": 8},
+                },
+                "buttons": {"a": "GP14", "b": "GP15"},
+            },
+        },
+        input_controller_factory=lambda: object(),
+        display_factory=lambda config: display,
+        button_reader_factory=lambda config, input_controller: object(),
+        definitions_builder=lambda config: (_ for _ in ()).throw(ValueError("bad checks")),
+        executor_factory=lambda: object(),
+        wifi_connector=lambda config: (),
+        now_provider=lambda: 0.0,
+        sleep_ms=lambda ms: None,
+    )
+
+    assert app.definitions == ()
+    assert app.state.mode.value == "diagnostics"
+    assert any(line.startswith("CONF checks bad") for line in app.state.diagnostics)
+    assert any(error["scope"] == "config" for error in app.get_errors())
+
+
+def test_build_runtime_app_from_path_uses_fallback_config_when_config_file_is_missing(monkeypatch):
+    called = {}
+
+    class FakeApp:
+        def __init__(self, **kwargs):
+            called.update(kwargs)
+            called["diagnostics"] = None
+
+        def inject_diagnostics(self, diagnostics, activate=True):
+            called["diagnostics"] = (diagnostics, activate)
+
+    monkeypatch.setattr(firmware_runtime, "load_config", lambda path: (_ for _ in ()).throw(OSError("missing")))
+
+    firmware_runtime.build_runtime_app_from_path(
+        "missing.json",
+        input_controller_factory=lambda: object(),
+        display_factory=lambda config: SimpleNamespace(show_boot_logo=lambda version: None),
+        button_reader_factory=lambda config, input_controller: object(),
+        runtime_app_factory=FakeApp,
+        definitions_builder=lambda config: (),
+        executor_factory=lambda: object(),
+        wifi_connector=lambda config: (),
+        now_provider=lambda: 0.0,
+        sleep_ms=lambda ms: None,
+    )
+
+    diagnostics, activate = called["diagnostics"]
+    assert activate is True
+    assert any(event.code == "CONF" and event.message == "missing" for event in diagnostics)
 
 
 def test_build_runtime_app_infers_geometry_and_page_interval_from_display_type():
@@ -248,7 +374,7 @@ def test_boot_logo_shown_for_minimum_duration_by_waiting_after_fast_wifi():
         def inject_diagnostics(self, diagnostics, activate=True):
             called["diagnostics"] = diagnostics
 
-    now_times = iter([0.0, 1.0])
+    now_times = iter([0.0, 1.0, 1.0])
     display = SimpleNamespace(show_boot_logo=lambda version: None)
 
     firmware_runtime.build_runtime_app(
@@ -288,7 +414,7 @@ def test_boot_logo_no_wait_when_wifi_takes_longer_than_minimum():
         def inject_diagnostics(self, diagnostics, activate=True):
             pass
 
-    now_times = iter([0.0, 6.0])
+    now_times = iter([0.0, 6.0, 6.0])
     display = SimpleNamespace(show_boot_logo=lambda version: None)
 
     firmware_runtime.build_runtime_app(
@@ -340,8 +466,7 @@ def test_run_forever_builds_app_then_runs_loop(monkeypatch):
     fake_app = object()
     called = {}
 
-    monkeypatch.setattr(firmware_runtime, "load_config", lambda path: {"device": {}, "wifi": {}, "checks": []})
-    monkeypatch.setattr(firmware_runtime, "build_runtime_app", lambda config: fake_app)
+    monkeypatch.setattr(firmware_runtime, "build_runtime_app_from_path", lambda path: fake_app)
     monkeypatch.setattr(
         firmware_runtime,
         "run_loop",

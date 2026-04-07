@@ -4,7 +4,7 @@ from dataclasses import dataclass, replace
 
 from vivipi.core import InputController, PixelShiftController, due_checks, integrate_observations, page_count, record_diagnostic_events, render_frame, render_reason, set_page_index
 from vivipi.core.logging import LogLevel, StructuredLogger, log_field
-from vivipi.core.models import AppMode, AppState, CheckDefinition, DisplayMode
+from vivipi.core.models import AppMode, AppState, CheckDefinition, DiagnosticEvent, DisplayMode
 from vivipi.core.ring_buffer import RingBuffer
 from vivipi.core.state import overview_checks
 from vivipi.runtime.metrics import MetricsStore, elapsed_ms, start_timer
@@ -92,6 +92,8 @@ class RuntimeApp:
         self._last_result_signatures: dict[str, tuple[str, str]] = {}
         self._check_log_counts = {definition.identifier: 0 for definition in self.definitions}
         self.summary_log_interval = 10
+        self.display_failure_count = 0
+        self.display_retry_at_s: float | None = None
 
     def configure_observability(
         self,
@@ -357,6 +359,32 @@ class RuntimeApp:
         assert self.state.row_width >= 1
         assert 1 <= self.state.overview_columns <= 4
 
+    def _display_retry_delay_s(self) -> float:
+        if self.display_failure_count < 1:
+            return 0.0
+        return min(30.0, float(2 ** (self.display_failure_count - 1)))
+
+    def _record_display_failure(self, error: BaseException, now_s: float):
+        self.display_failure_count += 1
+        retry_delay_s = self._display_retry_delay_s()
+        self.display_retry_at_s = now_s + retry_delay_s
+        self._record_exception("display", error, observed_at_s=now_s)
+        self.inject_diagnostics((DiagnosticEvent(code="DISP", message=f"retry {int(retry_delay_s)}s"),), activate=True)
+        self.logger.error(
+            "DISP",
+            "draw-failed",
+            (
+                log_field("retry_s", f"{retry_delay_s:.0f}"),
+                log_field("count", self.display_failure_count),
+            ),
+        )
+
+    def _reset_display_failure_state(self):
+        if self.display_failure_count:
+            self.logger.warn("DISP", "recovered", (log_field("count", self.display_failure_count),))
+        self.display_failure_count = 0
+        self.display_retry_at_s = None
+
     def inject_diagnostics(self, events: tuple[object, ...], activate: bool = True):
         if events:
             for event in events:
@@ -435,6 +463,8 @@ class RuntimeApp:
         self.error_records.clear()
         self._last_result_signatures.clear()
         self._check_log_counts = {definition.identifier: 0 for definition in self.definitions}
+        self.display_failure_count = 0
+        self.display_retry_at_s = None
         for definition in self.definitions:
             self.last_error_by_check[definition.identifier] = None
             self.registered_results[definition.identifier] = {
@@ -507,8 +537,14 @@ class RuntimeApp:
 
         reason = render_reason(self.last_rendered_state, self.state)
         if reason != "none":
-            self.display.draw_frame(render_frame(self.state, now_s=now_s))
-            self.last_rendered_state = self.state
+            if self.display_retry_at_s is None or now_s >= self.display_retry_at_s:
+                try:
+                    self.display.draw_frame(render_frame(self.state, now_s=now_s))
+                except Exception as error:
+                    self._record_display_failure(error, now_s)
+                else:
+                    self._reset_display_failure_state()
+                    self.last_rendered_state = self.state
 
         self.metrics.record_cycle(elapsed_ms(cycle_started, cycle_timer_kind))
         self._maybe_capture_memory_snapshot(now_s)

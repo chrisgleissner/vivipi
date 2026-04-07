@@ -6,15 +6,28 @@ import pytest
 
 from vivipi.core.execution import PingProbeResult
 from vivipi.core.models import CheckType, Status
+import vivipi.runtime.checks as runtime_checks
 from vivipi.runtime.checks import (
     _close_socket,
+    _classify_network_error,
     _ftp_read_response,
     _ftp_parse_pasv,
+    _format_network_error,
+    _is_retryable_network_error,
     _looks_like_ftp_listing,
     _looks_like_telnet_output,
+    _normalize_error_text,
     _open_socket,
     _parse_socket_target,
     _read_until_markers,
+    _recv_all,
+    _retry_attempts,
+    _retry_backoff_ms,
+    _retry_network_operation,
+    _retry_probe_result,
+    _runtime_optional_auth,
+    _should_retry_probe_result,
+    _sleep_ms,
     _telnet_strip_negotiation,
     build_executor,
     build_runtime_definitions,
@@ -235,6 +248,31 @@ def test_portable_http_runner_prefers_urequests_when_available(monkeypatch):
     assert result.body == {"checks": []}
 
 
+def test_portable_http_runner_retries_transient_transport_errors(monkeypatch):
+    sleep_calls = []
+    attempts = {"count": 0}
+
+    def fake_request(method, target, timeout):
+        attempts["count"] += 1
+        if attempts["count"] < 3:
+            raise OSError("timed out")
+        return SimpleNamespace(
+            status_code=200,
+            json=lambda: {"checks": []},
+            text="{\"checks\": []}",
+            close=lambda: None,
+        )
+
+    monkeypatch.setitem(sys.modules, "urequests", SimpleNamespace(request=fake_request))
+    monkeypatch.setattr("vivipi.runtime.checks._sleep_ms", lambda value_ms: sleep_calls.append(value_ms))
+
+    result = portable_http_runner("GET", "http://192.0.2.10:8080/checks", 10)
+
+    assert result.status_code == 200
+    assert attempts["count"] == 3
+    assert sleep_calls == [100, 200]
+
+
 def test_portable_http_runner_falls_back_to_response_text_when_json_parsing_fails(monkeypatch):
     def raise_value_error():
         raise ValueError("bad json")
@@ -302,6 +340,16 @@ def test_portable_http_runner_uses_urllib_fallback_for_success_and_http_error(mo
     assert failure.body == "plain error"
 
 
+def test_portable_http_runner_returns_classified_transport_error_after_retries(monkeypatch):
+    monkeypatch.setitem(sys.modules, "urequests", SimpleNamespace(request=lambda method, target, timeout: (_ for _ in ()).throw(OSError("network is unreachable"))))
+    monkeypatch.setattr("vivipi.runtime.checks._sleep_ms", lambda value_ms: None)
+
+    result = portable_http_runner("GET", "http://192.0.2.10:8080/checks", 10)
+
+    assert result.status_code is None
+    assert result.details.startswith("network:")
+
+
 def test_portable_ping_runner_uses_uping_when_available(monkeypatch):
     monkeypatch.setitem(sys.modules, "uping", SimpleNamespace(ping=lambda *args, **kwargs: (1, 1, 12.0, 12.0)))
 
@@ -328,6 +376,58 @@ def test_portable_ping_runner_uses_subprocess_fallback(monkeypatch):
     assert result.details == "network unreachable"
 
 
+def test_portable_ping_runner_retries_transient_failures(monkeypatch):
+    monkeypatch.delitem(sys.modules, "uping", raising=False)
+
+    import subprocess
+
+    sleep_calls = []
+    responses = iter(
+        [
+            SimpleNamespace(returncode=1, stdout="", stderr="timeout"),
+            SimpleNamespace(returncode=1, stdout="", stderr="timeout"),
+            SimpleNamespace(returncode=0, stdout="64 bytes from host time=3.2", stderr=""),
+        ]
+    )
+
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: next(responses))
+    monkeypatch.setattr("vivipi.runtime.checks._sleep_ms", lambda value_ms: sleep_calls.append(value_ms))
+
+    result = portable_ping_runner("192.168.1.1", 10)
+
+    assert result.ok is True
+    assert sleep_calls == [100, 200]
+
+
+def test_network_retry_helpers_cover_edge_cases(monkeypatch):
+    fake_time = SimpleNamespace(sleep_calls=[], sleep_ms=lambda value_ms: fake_time.sleep_calls.append(value_ms))
+    monkeypatch.setattr(runtime_checks, "time", fake_time)
+
+    _sleep_ms(0)
+    _sleep_ms(5)
+
+    assert fake_time.sleep_calls == [5]
+    assert _retry_attempts(0) == 1
+    assert _retry_backoff_ms(6) == 800
+    assert _normalize_error_text(RuntimeError()) == "RuntimeError"
+    assert _classify_network_error(TimeoutError("timed out")) == "timeout"
+    assert _classify_network_error(OSError(-2, "name resolution failed")) == "dns"
+    assert _classify_network_error(OSError(111, "connection refused")) == "refused"
+    assert _classify_network_error(OSError(101, "network unreachable")) == "network"
+    assert _classify_network_error(OSError("broken pipe")) == "reset"
+    assert _format_network_error(OSError("broken pipe")).startswith("reset:")
+    assert _is_retryable_network_error(RuntimeError("boom")) is False
+    assert _runtime_optional_auth(None) is None
+    assert _runtime_optional_auth("  admin  ") == "admin"
+    assert _should_retry_probe_result("invalid output") is False
+    assert _retry_probe_result(lambda: PingProbeResult(ok=False, details="invalid output"), 10).details == "invalid output"
+    assert _retry_network_operation(lambda: "ok", 10) == "ok"
+    with pytest.raises(RuntimeError, match="boom"):
+        _retry_network_operation(lambda: (_ for _ in ()).throw(RuntimeError("boom")), 10)
+    assert _parse_socket_target("nas.example.local", 21) == ("nas.example.local", 21)
+    assert _recv_all(FakeSocket([b"a", b"b", b""])) == b"ab"
+
+
 def test_socket_target_and_protocol_helpers_cover_success_and_error_paths():
     assert _parse_socket_target("ftp://nas.example.local", 21, expected_scheme="ftp") == ("nas.example.local", 21)
     assert _parse_socket_target("telnet://switch.example.local:2323", 23, expected_scheme="telnet") == (
@@ -346,6 +446,18 @@ def test_socket_target_and_protocol_helpers_cover_success_and_error_paths():
 
     with pytest.raises(ValueError, match="must include a host"):
         _parse_socket_target("", 23)
+
+
+def test_portable_telnet_runner_retries_and_classifies_transient_socket_failures(monkeypatch):
+    sleep_calls = []
+    monkeypatch.setattr("vivipi.runtime.checks._sleep_ms", lambda value_ms: sleep_calls.append(value_ms))
+    monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: (_ for _ in ()).throw(OSError(111, "connection refused")))
+
+    result = portable_telnet_runner("telnet://switch.example.local", 10)
+
+    assert result.ok is False
+    assert result.details.startswith("refused:")
+    assert sleep_calls == [100, 200]
 
 
 def test_telnet_strip_negotiation_replies_to_iac_negotiation():

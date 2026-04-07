@@ -7,6 +7,7 @@ import time
 from urllib.parse import urlparse
 
 from vivipi.core.execution import HttpResponseResult, PingProbeResult, execute_check
+from vivipi.core.logging import bound_text
 from vivipi.core.models import CheckDefinition, CheckType
 
 
@@ -23,6 +24,8 @@ TELNET_WONT = 252
 TELNET_WILL = 251
 TELNET_SB = 250
 TELNET_SE = 240
+MAX_NETWORK_ATTEMPTS = 3
+NETWORK_BACKOFF_BASE_MS = 100
 
 
 def _start_timer() -> tuple[float, bool]:
@@ -35,6 +38,82 @@ def _elapsed_ms(started_at: float, uses_ticks_ms: bool) -> float:
     if uses_ticks_ms:
         return float(time.ticks_diff(time.ticks_ms(), int(started_at)))
     return (time.perf_counter() - started_at) * 1000.0
+
+
+def _sleep_ms(value_ms: int):
+    if value_ms <= 0:
+        return
+    if hasattr(time, "sleep_ms"):
+        time.sleep_ms(value_ms)
+        return
+    time.sleep(value_ms / 1000.0)
+
+
+def _retry_attempts(timeout_s: int) -> int:
+    return max(1, min(MAX_NETWORK_ATTEMPTS, int(timeout_s)))
+
+
+def _retry_backoff_ms(attempt_index: int) -> int:
+    return min(800, NETWORK_BACKOFF_BASE_MS * (2**attempt_index))
+
+
+def _normalize_error_text(error: BaseException) -> str:
+    return " ".join(str(error).split()).strip() or type(error).__name__
+
+
+def _classify_network_error(error: BaseException) -> str:
+    message = _normalize_error_text(error).casefold()
+    errno = getattr(error, "errno", None)
+    if isinstance(error, TimeoutError) or "timeout" in message or "timed out" in message:
+        return "timeout"
+    if errno in {-2, -3} or "name or service not known" in message or "name resolution" in message:
+        return "dns"
+    if errno in {111, 61} or "refused" in message:
+        return "refused"
+    if errno in {101, 113} or "unreachable" in message:
+        return "network"
+    if "reset" in message or "broken pipe" in message:
+        return "reset"
+    return "io"
+
+
+def _format_network_error(error: BaseException) -> str:
+    category = _classify_network_error(error)
+    detail = bound_text(_normalize_error_text(error), 40)
+    if detail.casefold() == category:
+        return category
+    return f"{category}: {detail}"
+
+
+def _is_retryable_network_error(error: BaseException) -> bool:
+    return isinstance(error, (OSError, TimeoutError)) or error.__class__.__name__ == "URLError"
+
+
+def _retry_network_operation(operation, timeout_s: int):
+    attempts = _retry_attempts(timeout_s)
+    for attempt in range(attempts):
+        try:
+            return operation()
+        except Exception as error:
+            if not _is_retryable_network_error(error) or attempt == attempts - 1:
+                raise
+            _sleep_ms(_retry_backoff_ms(attempt))
+
+
+def _should_retry_probe_result(details: str) -> bool:
+    normalized = str(details).casefold()
+    return any(marker in normalized for marker in ("timeout", "dns", "refused", "unreachable", "network", "reset", "io:"))
+
+
+def _retry_probe_result(operation, timeout_s: int):
+    attempts = _retry_attempts(timeout_s)
+    result = None
+    for attempt in range(attempts):
+        result = operation()
+        if result.ok or attempt == attempts - 1 or not _should_retry_probe_result(result.details):
+            return result
+        _sleep_ms(_retry_backoff_ms(attempt))
+    return result
 
 
 def _runtime_check_type(value: object) -> CheckType:
@@ -82,37 +161,41 @@ def build_runtime_definitions(config: dict[str, object]) -> tuple[CheckDefinitio
 
 
 def portable_ping_runner(target: str, timeout_s: int) -> PingProbeResult:
-    try:
-        import uping  # type: ignore
-    except ImportError:
-        import subprocess
+    def _single_ping() -> PingProbeResult:
+        try:
+            import uping  # type: ignore
+        except ImportError:
+            import subprocess
+
+            started_at, uses_ticks_ms = _start_timer()
+            completed = subprocess.run(
+                ["ping", "-c", "1", "-W", str(timeout_s), target],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout_s + 1,
+            )
+            latency_match = PING_LATENCY_PATTERN.search(completed.stdout)
+            latency_ms = float(latency_match.group(1)) if latency_match else None
+            ok = completed.returncode == 0
+            details = completed.stderr.strip() or "timeout"
+            return PingProbeResult(
+                ok=ok,
+                latency_ms=latency_ms if latency_ms is not None else (_elapsed_ms(started_at, uses_ticks_ms) if ok else None),
+                details="reachable" if ok else details,
+            )
 
         started_at, uses_ticks_ms = _start_timer()
-        completed = subprocess.run(
-            ["ping", "-c", "1", "-W", str(timeout_s), target],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout_s + 1,
-        )
-        latency_match = PING_LATENCY_PATTERN.search(completed.stdout)
-        latency_ms = float(latency_match.group(1)) if latency_match else None
-        ok = completed.returncode == 0
+        response = uping.ping(target, count=1, timeout=timeout_s * 1000, quiet=True)
+        packets_received = int(response[1]) if len(response) > 1 else 0
+        latency_ms = float(response[-1]) if response else None
         return PingProbeResult(
-            ok=ok,
-            latency_ms=latency_ms if latency_ms is not None else (_elapsed_ms(started_at, uses_ticks_ms) if ok else None),
-            details="reachable" if ok else (completed.stderr.strip() or "timeout"),
+            ok=packets_received > 0,
+            latency_ms=latency_ms if latency_ms is not None else _elapsed_ms(started_at, uses_ticks_ms),
+            details="reachable" if packets_received > 0 else "timeout",
         )
 
-    started_at, uses_ticks_ms = _start_timer()
-    response = uping.ping(target, count=1, timeout=timeout_s * 1000, quiet=True)
-    packets_received = int(response[1]) if len(response) > 1 else 0
-    latency_ms = float(response[-1]) if response else None
-    return PingProbeResult(
-        ok=packets_received > 0,
-        latency_ms=latency_ms if latency_ms is not None else _elapsed_ms(started_at, uses_ticks_ms),
-        details="reachable" if packets_received > 0 else "timeout",
-    )
+    return _retry_probe_result(_single_ping, timeout_s)
 
 
 def portable_http_runner(method: str, target: str, timeout_s: int) -> HttpResponseResult:
@@ -125,7 +208,7 @@ def portable_http_runner(method: str, target: str, timeout_s: int) -> HttpRespon
         request = urllib.request.Request(url=target, method=method)
         started_at, uses_ticks_ms = _start_timer()
         try:
-            with urllib.request.urlopen(request, timeout=timeout_s) as response:
+            with _retry_network_operation(lambda: urllib.request.urlopen(request, timeout=timeout_s), timeout_s) as response:
                 raw_body = response.read().decode("utf-8")
                 try:
                     body = json.loads(raw_body)
@@ -149,9 +232,24 @@ def portable_http_runner(method: str, target: str, timeout_s: int) -> HttpRespon
                 latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
                 details=f"HTTP {error.code}",
             )
+        except Exception as error:
+            return HttpResponseResult(
+                status_code=None,
+                body=None,
+                latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
+                details=_format_network_error(error),
+            )
 
     started_at, uses_ticks_ms = _start_timer()
-    response = urequests.request(method, target, timeout=timeout_s)
+    try:
+        response = _retry_network_operation(lambda: urequests.request(method, target, timeout=timeout_s), timeout_s)
+    except Exception as error:
+        return HttpResponseResult(
+            status_code=None,
+            body=None,
+            latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
+            details=_format_network_error(error),
+        )
     try:
         try:
             body = response.json()
@@ -186,19 +284,22 @@ def _parse_socket_target(target: str, default_port: int, expected_scheme: str | 
 
 
 def _open_socket(host: str, port: int, timeout_s: int):
-    addresses = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
-    last_error: OSError | None = None
-    for family, socktype, proto, _, address in addresses:
-        handle = socket.socket(family, socktype, proto)
-        try:
-            if hasattr(handle, "settimeout"):
-                handle.settimeout(timeout_s)
-            handle.connect(address)
-            return handle
-        except OSError as error:
-            last_error = error
-            handle.close()
-    raise last_error or OSError("unable to open socket")
+    def _single_attempt():
+        addresses = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
+        last_error: OSError | None = None
+        for family, socktype, proto, _, address in addresses:
+            handle = socket.socket(family, socktype, proto)
+            try:
+                if hasattr(handle, "settimeout"):
+                    handle.settimeout(timeout_s)
+                handle.connect(address)
+                return handle
+            except OSError as error:
+                last_error = error
+                handle.close()
+        raise last_error or OSError("unable to open socket")
+
+    return _retry_network_operation(_single_attempt, timeout_s)
 
 
 def _close_socket(handle):
@@ -256,56 +357,60 @@ def portable_ftp_runner(target: str, timeout_s: int, username: str | None = None
     login_user = username or "anonymous"
     login_password = password or "vivipi@example.invalid"
     started_at, uses_ticks_ms = _start_timer()
-    control_socket = None
-    data_socket = None
+
+    def _session() -> PingProbeResult:
+        control_socket = None
+        data_socket = None
+        try:
+            control_socket = _open_socket(host, port, timeout_s)
+            code, response = _ftp_read_response(control_socket)
+            if code != 220:
+                return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details=response or "ftp unavailable")
+
+            _ftp_command(control_socket, f"USER {login_user}")
+            code, response = _ftp_read_response(control_socket)
+            if code == 331:
+                _ftp_command(control_socket, f"PASS {login_password}")
+                code, response = _ftp_read_response(control_socket)
+            if code != 230:
+                return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details=response or "ftp login failed")
+
+            _ftp_command(control_socket, "PASV")
+            code, response = _ftp_read_response(control_socket)
+            if code != 227:
+                return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details=response or "ftp passive mode failed")
+
+            data_host, data_port = _ftp_parse_pasv(response)
+            data_socket = _open_socket(data_host, data_port, timeout_s)
+            _ftp_command(control_socket, "LIST")
+            code, response = _ftp_read_response(control_socket)
+            if code not in {125, 150}:
+                return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details=response or "ftp list failed")
+
+            listing = _recv_all(data_socket).decode("utf-8", "replace")
+            _close_socket(data_socket)
+            data_socket = None
+
+            code, response = _ftp_read_response(control_socket)
+            if code not in {226, 250}:
+                return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details=response or "ftp transfer incomplete")
+            if not _looks_like_ftp_listing(listing):
+                return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details="invalid directory listing")
+
+            _ftp_command(control_socket, "QUIT")
+            return PingProbeResult(
+                ok=True,
+                latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
+                details=f"listed {len([line for line in listing.splitlines() if line.strip()])} entries",
+            )
+        finally:
+            _close_socket(data_socket)
+            _close_socket(control_socket)
 
     try:
-        control_socket = _open_socket(host, port, timeout_s)
-        code, response = _ftp_read_response(control_socket)
-        if code != 220:
-            return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details=response or "ftp unavailable")
-
-        _ftp_command(control_socket, f"USER {login_user}")
-        code, response = _ftp_read_response(control_socket)
-        if code == 331:
-            _ftp_command(control_socket, f"PASS {login_password}")
-            code, response = _ftp_read_response(control_socket)
-        if code != 230:
-            return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details=response or "ftp login failed")
-
-        _ftp_command(control_socket, "PASV")
-        code, response = _ftp_read_response(control_socket)
-        if code != 227:
-            return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details=response or "ftp passive mode failed")
-
-        data_host, data_port = _ftp_parse_pasv(response)
-        data_socket = _open_socket(data_host, data_port, timeout_s)
-        _ftp_command(control_socket, "LIST")
-        code, response = _ftp_read_response(control_socket)
-        if code not in {125, 150}:
-            return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details=response or "ftp list failed")
-
-        listing = _recv_all(data_socket).decode("utf-8", "replace")
-        _close_socket(data_socket)
-        data_socket = None
-
-        code, response = _ftp_read_response(control_socket)
-        if code not in {226, 250}:
-            return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details=response or "ftp transfer incomplete")
-        if not _looks_like_ftp_listing(listing):
-            return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details="invalid directory listing")
-
-        _ftp_command(control_socket, "QUIT")
-        return PingProbeResult(
-            ok=True,
-            latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
-            details=f"listed {len([line for line in listing.splitlines() if line.strip()])} entries",
-        )
+        return _retry_network_operation(_session, timeout_s)
     except (OSError, ValueError) as error:
-        return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details=str(error) or "ftp failed")
-    finally:
-        _close_socket(data_socket)
-        _close_socket(control_socket)
+        return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details=_format_network_error(error))
 
 
 def _telnet_strip_negotiation(handle, chunk: bytes) -> bytes:
@@ -375,38 +480,42 @@ def portable_telnet_runner(target: str, timeout_s: int, username: str | None = N
     login_user = username or ""
     login_password = password or ""
     started_at, uses_ticks_ms = _start_timer()
-    handle = None
+
+    def _session() -> PingProbeResult:
+        handle = None
+        try:
+            handle = _open_socket(host, port, timeout_s)
+            transcript = _read_until_markers(handle, TELNET_LOGIN_MARKERS + TELNET_PASSWORD_MARKERS + TELNET_PROMPT_MARKERS + TELNET_FAILURE_MARKERS)
+            if _contains_any(transcript, TELNET_FAILURE_MARKERS):
+                return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details="login failed")
+
+            if _contains_any(transcript, TELNET_LOGIN_MARKERS):
+                handle.sendall((login_user + "\r\n").encode("utf-8"))
+                transcript += _read_until_markers(handle, TELNET_PASSWORD_MARKERS + TELNET_PROMPT_MARKERS + TELNET_FAILURE_MARKERS)
+            if _contains_any(transcript, TELNET_FAILURE_MARKERS):
+                return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details="login failed")
+
+            if _contains_any(transcript, TELNET_PASSWORD_MARKERS):
+                handle.sendall((login_password + "\r\n").encode("utf-8"))
+                transcript += _read_until_markers(handle, TELNET_PROMPT_MARKERS + TELNET_FAILURE_MARKERS)
+            if _contains_any(transcript, TELNET_FAILURE_MARKERS):
+                return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details="login failed")
+
+            if not _contains_any(transcript, TELNET_PROMPT_MARKERS):
+                handle.sendall(b"\r\n")
+                transcript += _read_until_markers(handle, TELNET_PROMPT_MARKERS + TELNET_FAILURE_MARKERS)
+            cleaned = transcript.decode("utf-8", "replace")
+            if not _looks_like_telnet_output(cleaned):
+                return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details="invalid session output")
+
+            return PingProbeResult(ok=True, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details="session ready")
+        finally:
+            _close_socket(handle)
 
     try:
-        handle = _open_socket(host, port, timeout_s)
-        transcript = _read_until_markers(handle, TELNET_LOGIN_MARKERS + TELNET_PASSWORD_MARKERS + TELNET_PROMPT_MARKERS + TELNET_FAILURE_MARKERS)
-        if _contains_any(transcript, TELNET_FAILURE_MARKERS):
-            return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details="login failed")
-
-        if _contains_any(transcript, TELNET_LOGIN_MARKERS):
-            handle.sendall((login_user + "\r\n").encode("utf-8"))
-            transcript += _read_until_markers(handle, TELNET_PASSWORD_MARKERS + TELNET_PROMPT_MARKERS + TELNET_FAILURE_MARKERS)
-        if _contains_any(transcript, TELNET_FAILURE_MARKERS):
-            return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details="login failed")
-
-        if _contains_any(transcript, TELNET_PASSWORD_MARKERS):
-            handle.sendall((login_password + "\r\n").encode("utf-8"))
-            transcript += _read_until_markers(handle, TELNET_PROMPT_MARKERS + TELNET_FAILURE_MARKERS)
-        if _contains_any(transcript, TELNET_FAILURE_MARKERS):
-            return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details="login failed")
-
-        if not _contains_any(transcript, TELNET_PROMPT_MARKERS):
-            handle.sendall(b"\r\n")
-            transcript += _read_until_markers(handle, TELNET_PROMPT_MARKERS + TELNET_FAILURE_MARKERS)
-        cleaned = transcript.decode("utf-8", "replace")
-        if not _looks_like_telnet_output(cleaned):
-            return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details="invalid session output")
-
-        return PingProbeResult(ok=True, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details="session ready")
+        return _retry_network_operation(_session, timeout_s)
     except (OSError, ValueError) as error:
-        return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details=str(error) or "telnet failed")
-    finally:
-        _close_socket(handle)
+        return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details=_format_network_error(error))
 
 
 def build_executor(ping_runner=None, http_runner=None, ftp_runner=None, telnet_runner=None):
