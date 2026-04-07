@@ -1,5 +1,24 @@
 # Worklog
 
+## 2026-04-07 Strict Convergence
+
+- 2026-04-07T00:00:00+01:00 Started the strict convergence pass requested for full firmware productionization.
+- 2026-04-07T00:00:00+01:00 Re-read the authoritative inputs in required order: `README.md`, runtime and firmware source paths, `docs/spec.md`, `docs/spec-traceability.md`, build and deployment configs, and the hardware-facing display/runtime code paths.
+- 2026-04-07T00:00:00+01:00 Verified the git worktree was clean before changes.
+- 2026-04-07T00:00:00+01:00 Replaced the stale plan with a strict convergence plan in `PLANS.md` using explicit task IDs, statuses, and acceptance criteria. Next step is closing the boot/config, display fail-safe, and network-resilience gaps with regression proof.
+- 2026-04-07T00:12:00+01:00 Hardened `firmware/runtime.py` with guarded config loading, fallback runtime config shaping, safe display bootstrap, bounded Wi-Fi retry with backoff, safe button and definition initialization, and `build_runtime_app_from_path()` for boot recovery from missing or malformed `config.json`.
+- 2026-04-07T00:12:00+01:00 Hardened `src/vivipi/runtime/app.py` with retained display-failure errors, diagnostics activation, and deterministic display retry backoff so render failures no longer unwind the runtime loop.
+- 2026-04-07T00:18:00+01:00 Hardened `src/vivipi/runtime/checks.py` with bounded retry helpers, deterministic backoff, stable transport failure classification, and transient retry coverage for HTTP, socket-based probes, and ping failure results.
+- 2026-04-07T00:18:00+01:00 Hardened `src/vivipi/services/schema.py` by capping SERVICE fan-out at `64` checks to bound device-side expansion.
+- 2026-04-07T00:24:00+01:00 Added regression coverage in `tests/unit/firmware/test_runtime.py`, `tests/unit/runtime/test_app.py`, `tests/unit/runtime/test_checks.py`, and `tests/contract/test_service_schema.py` for boot recovery, display fail-safe behavior, Wi-Fi retry, network classification, and service payload bounds.
+- 2026-04-07T00:24:00+01:00 Focused functional validation passed: `pytest --no-cov -q tests/unit/firmware/test_runtime.py tests/unit/runtime/test_app.py tests/unit/runtime/test_checks.py tests/contract/test_service_schema.py` -> `56 passed`.
+- 2026-04-07T00:28:00+01:00 Updated `README.md`, `docs/spec.md`, and `docs/spec-traceability.md` to reflect operational fail-safe behavior, bounded network retry, and the SERVICE payload limit. Published the requested audit at `docs/research/vivipi/production-audit.md`.
+- 2026-04-07T00:30:00+01:00 Traceability validation passed: `pytest --no-cov -q tests/spec/test_traceability.py` -> `3 passed`.
+- 2026-04-07T00:33:00+01:00 Repository-wide validation passed: `./build coverage` -> `291 passed`, `96.31%` total coverage.
+- 2026-04-07T00:34:00+01:00 CI-style validation passed: `VIVIPI_WIFI_SSID=ci-ssid VIVIPI_WIFI_PASSWORD=ci-password VIVIPI_SERVICE_BASE_URL=http://192.0.2.10:8080/checks ./build ci --config config/build-deploy.yaml` -> lint + tests + coverage gate passed locally.
+- 2026-04-07T00:35:00+01:00 Final firmware bundle validation completed: `VIVIPI_WIFI_SSID=ci-ssid VIVIPI_WIFI_PASSWORD=ci-password VIVIPI_SERVICE_BASE_URL=http://192.0.2.10:8080/checks ./build build-firmware --config config/build-deploy.yaml` completed without error output and `artifacts/release/vivipi-device-fs/` remains present as the deployable filesystem tree.
+- 2026-04-07T00:35:00+01:00 Hardware-bound external limit remains unchanged: live deploy to a connected Pico was not executed because this environment does not expose an accessible serial device.
+
 ## 2026-04-05
 
 - 2026-04-06T17:28:25+01:00 Started the observability / REPL convergence execution and recorded sequential tasks `T1` through `T12` in `PLANS.md` with explicit dependencies and proof criteria.

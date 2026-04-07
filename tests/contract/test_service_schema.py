@@ -161,3 +161,15 @@ def test_parse_service_payload_rejects_invalid_field_types():
     }
     with pytest.raises(ValueError, match="name must be a non-empty string"):
         parse_service_payload(bad_name)
+
+
+def test_parse_service_payload_rejects_payloads_that_exceed_the_safe_check_limit():
+    payload = {
+        "checks": [
+            {"name": f"Check {index}", "status": "OK", "details": "ready", "latency_ms": 1.0}
+            for index in range(65)
+        ]
+    }
+
+    with pytest.raises(ValueError, match="maximum service checks"):
+        parse_service_payload(payload)

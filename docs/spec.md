@@ -257,6 +257,8 @@ SERVICE endpoints MUST return:
       ]
     }
 
+  - Payloads MUST contain at most 64 checks.
+
 [VIVIPI-CHECK-SCHEMA-001]
 
 ---
@@ -327,6 +329,14 @@ Constraint:
 Timeout is treated as FAIL.
 
 [VIVIPI-CHECK-TIME-001]
+
+Probe transport failures MUST use bounded retries with deterministic backoff and stable failure classification.
+
+- Applies to direct HTTP, FTP, and TELNET transport failures and to Wi-Fi connection attempts.
+- Failure details MUST distinguish at least `timeout`, `dns`, `refused`, `network`, `reset`, and generic `io` failures when those classes can be determined.
+- Retries MUST remain bounded and MUST preserve deterministic scheduling order.
+
+[VIVIPI-NET-001]
 
 ---
 
@@ -629,6 +639,19 @@ Runtime instrumentation MUST retain enough information to reproduce failures det
 - Deterministic state snapshots and bounded log retrieval
 
 [VIVIPI-OBS-004]
+
+---
+
+## 23. Fail-Safe Operation
+
+Boot and rendering failures MUST degrade safely instead of aborting the runtime.
+
+- Missing or malformed `config.json` MUST boot with a bounded fallback config that preserves REPL inspection.
+- Invalid runtime definition loading MUST degrade to a diagnosable empty-check state instead of crashing startup.
+- Display initialization SHOULD fall back to the default OLED backend when possible; if that also fails, the runtime MUST continue in headless mode with retained diagnostics.
+- Frame draw failures MUST be retained as errors, activate diagnostics when a display is available, and retry with bounded backoff.
+
+[VIVIPI-FAILSAFE-001]
 
 ---
 

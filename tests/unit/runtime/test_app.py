@@ -210,3 +210,50 @@ def test_runtime_app_injects_diagnostics_without_forcing_mode_and_skips_rotation
     assert app.state.mode.value == "overview"
     assert app.state.diagnostics == ("WIFI down",)
     assert reason == "bootstrap"
+
+
+def test_runtime_app_backs_off_after_display_failure_and_recovers_on_retry():
+    class FlakyDisplay:
+        def __init__(self):
+            self.calls = 0
+            self.frames = []
+
+        def draw_frame(self, frame):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("spi write failed")
+            self.frames.append(frame)
+
+    display = FlakyDisplay()
+    app = RuntimeApp(definitions=(), executor=lambda definition, now_s: None, display=display, page_interval_s=0)
+
+    first_reason = app.tick(0.0)
+    second_reason = app.tick(0.5)
+    third_reason = app.tick(1.0)
+
+    assert first_reason == "bootstrap"
+    assert second_reason == "bootstrap"
+    assert third_reason == "bootstrap"
+    assert display.calls == 2
+    assert len(display.frames) == 1
+    assert app.display_failure_count == 0
+    assert app.display_retry_at_s is None
+    assert app.state.mode.value == "diagnostics"
+    assert any(error["scope"] == "display" for error in app.get_errors())
+
+
+def test_runtime_app_service_result_and_display_helpers_cover_remaining_branches():
+    definition = make_definition("svc", check_type=CheckType.SERVICE)
+    app = RuntimeApp(definitions=(definition,), executor=lambda definition, now_s: None, display=FakeDisplay(), page_interval_s=0)
+
+    app.configure_observability(config="bad-config", now_provider=lambda: 2.0, memory_snapshot_interval_s=0.25)
+    app._refresh_network_state(connect_duration_ms=12.3)
+    app._reset_display_failure_state()
+    app._record_result(CheckDefinition(identifier="svc", name="Svc", check_type=CheckType.SERVICE, target="http://service"), CheckExecutionResult(source_identifier="svc", observations=(), replace_source=True), 1.5)
+
+    registered = app.get_registered_checks()[0]
+
+    assert registered["status"] == "OK"
+    assert registered["details"] == "loaded 0 checks"
+    assert app._display_retry_delay_s() == 0.0
+    assert app.get_network_state_snapshot()["last_error"] == ""

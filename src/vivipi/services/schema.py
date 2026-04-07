@@ -4,6 +4,9 @@ from vivipi.core.config import build_service_check_id
 from vivipi.core.models import CheckObservation, Status
 
 
+MAX_SERVICE_CHECKS = 64
+
+
 def parse_service_payload(
     payload: object,
     service_prefix: str | None = None,
@@ -16,6 +19,8 @@ def parse_service_payload(
     checks = payload.get("checks")
     if not isinstance(checks, list):
         raise ValueError("payload must contain a checks list")
+    if len(checks) > MAX_SERVICE_CHECKS:
+        raise ValueError("payload exceeds maximum service checks")
 
     observations: list[CheckObservation] = []
     seen_ids: set[str] = set()
