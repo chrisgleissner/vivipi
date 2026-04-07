@@ -34,6 +34,9 @@ class HeadlessDisplay:
         self.frames = []
 
     def draw_frame(self, frame):
+        if self.frames:
+            self.frames[0] = frame
+            return
         self.frames.append(frame)
 
     def show_boot_logo(self, version):

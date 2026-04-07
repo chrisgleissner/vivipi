@@ -318,6 +318,15 @@ def test_build_runtime_app_from_path_uses_fallback_config_when_config_file_is_mi
     assert any(event.code == "CONF" and event.message == "missing" for event in diagnostics)
 
 
+def test_headless_display_retains_only_the_latest_frame():
+    display = firmware_runtime.HeadlessDisplay()
+
+    display.draw_frame("frame-1")
+    display.draw_frame("frame-2")
+
+    assert display.frames == ["frame-2"]
+
+
 def test_build_runtime_app_infers_geometry_and_page_interval_from_display_type():
     called = {}
 
