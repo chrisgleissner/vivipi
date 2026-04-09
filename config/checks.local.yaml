@@ -1,7 +1,7 @@
 checks:
   - name: u64 version
     type: http
-    target: http://u64/v1/version
+    target: http://192.168.1.13/v1/version
     method: GET
     interval_s: 15
     timeout_s: 10

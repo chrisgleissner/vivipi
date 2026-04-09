@@ -128,6 +128,14 @@ def _safe_build_definitions(definitions_builder, config):
         return (), (_boot_diagnostic("CONF", "checks bad"),), (("config", error),)
 
 
+def _prime_initial_checks(app, definitions, now_s):
+    if not definitions:
+        return
+    if not hasattr(app, "run_all_checks"):
+        return
+    app.run_all_checks(now_s=now_s)
+
+
 def _safe_build_button_reader(button_reader_factory, buttons_config, input_controller):
     try:
         return button_reader_factory(buttons_config, input_controller=input_controller), (), ()
@@ -281,11 +289,6 @@ def build_runtime_app(
     connect_duration_ms = elapsed_ms(connect_started, timer_kind)
     collected_errors.extend(wifi_errors)
 
-    elapsed_s = now_provider() - boot_start_s
-    remaining_ms = max(0, int((boot_logo_min_s - elapsed_s) * 1000))
-    if remaining_ms > 0:
-        sleep_ms(remaining_ms)
-
     definitions, definition_diagnostics, definition_errors = _safe_build_definitions(definitions_builder, config)
     collected_diagnostics.extend(definition_diagnostics)
     collected_errors.extend(definition_errors)
@@ -324,6 +327,15 @@ def build_runtime_app(
     all_diagnostics = tuple(collected_diagnostics) + tuple(diagnostics)
     if all_diagnostics:
         app.inject_diagnostics(all_diagnostics, activate=True)
+
+    prime_now_s = now_provider()
+    _prime_initial_checks(app, definitions, prime_now_s)
+
+    elapsed_s = prime_now_s - boot_start_s
+    remaining_ms = max(0, int((boot_logo_min_s - elapsed_s) * 1000))
+    if remaining_ms > 0:
+        sleep_ms(remaining_ms)
+
     runtime_state.bind_app(app)
     return app
 
