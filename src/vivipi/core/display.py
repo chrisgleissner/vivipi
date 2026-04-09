@@ -1,7 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
 from math import sqrt
+
+try:
+    from collections.abc import Mapping
+except ImportError:  # pragma: no cover - MicroPython fallback
+    Mapping = dict
 
 
 DEFAULT_DISPLAY_TYPE = "waveshare-pico-oled-1.3"
@@ -35,8 +39,14 @@ DEFAULT_SPI_PINS = {
     "dc": "GP8",
     "rst": "GP12",
 }
-LCD_SPI_PINS = {**DEFAULT_SPI_PINS, "bl": "GP13"}
-EPAPER_SPI_PINS = {**DEFAULT_SPI_PINS, "busy": "GP13"}
+LCD_SPI_PINS = dict(DEFAULT_SPI_PINS)
+LCD_SPI_PINS["bl"] = "GP13"
+EPAPER_SPI_PINS = dict(DEFAULT_SPI_PINS)
+EPAPER_SPI_PINS["busy"] = "GP13"
+
+
+def _fold(value: object) -> str:
+    return str(value).strip().lower()
 
 
 DISPLAY_TYPES = {
@@ -53,6 +63,7 @@ DISPLAY_TYPES = {
         "supports_brightness": True,
         "default_brightness": 128,
         "default_page_interval_s": 15,
+        "default_column_offset": 32,
         "pins": DEFAULT_SPI_PINS,
     },
     "waveshare-pico-oled-2.23": {
@@ -419,13 +430,30 @@ def _parse_positive_int(value: object, context: str) -> int:
     return parsed
 
 
+def _parse_non_negative_int(value: object, context: str, default: int) -> int:
+    if value is None:
+        parsed = default
+    elif isinstance(value, int):
+        parsed = value
+    elif isinstance(value, float) and value.is_integer():
+        parsed = int(value)
+    elif isinstance(value, str) and value.strip().isdigit():
+        parsed = int(value.strip())
+    else:
+        raise ValueError(f"{context} must be a non-negative integer")
+
+    if parsed < 0:
+        raise ValueError(f"{context} must be a non-negative integer")
+    return parsed
+
+
 def _parse_duration_s(value: object, context: str) -> int:
     if isinstance(value, int):
         seconds = value
     elif isinstance(value, float) and value.is_integer():
         seconds = int(value)
     elif isinstance(value, str):
-        normalized = value.strip().casefold()
+        normalized = _fold(value)
         if normalized.endswith("s"):
             normalized = normalized[:-1].strip()
         if not normalized.isdigit():
@@ -461,7 +489,7 @@ def _parse_font_size_name(value: object, context: str = "device.display.font") -
         return DEFAULT_FONT_SIZE
     if not isinstance(value, str):
         raise ValueError(f"{context} must be one of: {_font_size_choices()}")
-    normalized = value.strip().casefold()
+    normalized = _fold(value)
     if normalized not in FONT_SIZE_PRESETS_MM:
         raise ValueError(f"{context} must be one of: {_font_size_choices()}")
     return normalized
@@ -471,7 +499,7 @@ def _parse_brightness(value: object, default: int) -> int:
     if value is None:
         return default
     if isinstance(value, str):
-        normalized = value.strip().casefold()
+        normalized = _fold(value)
         if normalized in BRIGHTNESS_PRESETS:
             return BRIGHTNESS_PRESETS[normalized]
         if normalized.isdigit():
@@ -497,7 +525,7 @@ def _parse_display_mode(value: object) -> str:
     if not isinstance(value, str):
         raise ValueError("device.display.mode must be 'standard' or 'compact'")
 
-    normalized = value.strip().casefold()
+    normalized = _fold(value)
     if normalized not in DISPLAY_MODES:
         raise ValueError("device.display.mode must be 'standard' or 'compact'")
     return normalized
@@ -535,21 +563,21 @@ def _parse_failure_color(value: object) -> str:
         return DEFAULT_FAILURE_COLOR
     if not isinstance(value, str):
         raise ValueError("device.display.failure_color must be a color name")
-    normalized = value.strip().casefold()
+    normalized = _fold(value)
     if not normalized:
         raise ValueError("device.display.failure_color must be a color name")
     return normalized
 
 
 def _canonical_display_type(value: str) -> str:
-    normalized = value.strip().casefold()
+    normalized = _fold(value)
     return DISPLAY_TYPE_ALIASES.get(normalized, normalized)
 
 
 def _normalize_controller_name(value: object) -> str:
     if not isinstance(value, str):
         return ""
-    normalized = value.strip().casefold()
+    normalized = _fold(value)
     return CONTROLLER_ALIASES.get(normalized, normalized)
 
 
@@ -623,6 +651,7 @@ def get_display_definition(display_type: str) -> dict[str, object]:
         "supports_brightness": definition["supports_brightness"],
         "default_brightness": definition.get("default_brightness"),
         "default_page_interval_s": definition["default_page_interval_s"],
+        "default_column_offset": definition.get("default_column_offset", 0),
         "pins": dict(definition["pins"]),
     }
 
@@ -656,8 +685,8 @@ def _validate_inferred_value(value: object, expected: object, context: str):
             parsed = _normalize_controller_name(value)
             expected = _normalize_controller_name(expected)
         else:
-            parsed = value.strip().casefold()
-            expected = expected.casefold()
+            parsed = _fold(value)
+            expected = _fold(expected)
     else:
         parsed = value
 
@@ -730,6 +759,11 @@ def normalize_display_config(raw_display: object) -> dict[str, object]:
         "column_separator": _parse_column_separator(display.get("column_separator")),
         "failure_color": _parse_failure_color(display.get("failure_color")),
         "page_interval_s": _parse_duration_s(page_interval_value, "device.display.page_interval"),
+        "column_offset": _parse_non_negative_int(
+            display.get("column_offset"),
+            "device.display.column_offset",
+            int(definition.get("default_column_offset", 0)),
+        ),
         "font_size": font_size,
         "font": {
             "width_px": _parse_font_size_px(font.get("width_px"), "device.display.font.width_px", default_font["width_px"]),

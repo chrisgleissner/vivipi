@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
-from vivipi.core import InputController, PixelShiftController, due_checks, integrate_observations, page_count, record_diagnostic_events, render_frame, render_reason, set_page_index
+from vivipi.core.input import InputController
+from vivipi.core.render import render_frame
+from vivipi.core.scheduler import due_checks, render_reason
+from vivipi.core.shift import PixelShiftController
+from vivipi.core.state import integrate_observations, page_count, record_diagnostic_events, set_page_index
 from vivipi.core.logging import LogLevel, StructuredLogger, log_field
 from vivipi.core.models import AppMode, AppState, CheckDefinition, DiagnosticEvent, DisplayMode
 from vivipi.core.ring_buffer import RingBuffer
@@ -57,7 +61,7 @@ class RuntimeApp:
         self.last_rendered_state: AppState | None = None
         self.logger = StructuredLogger()
         self.metrics = MetricsStore(tuple(definition.identifier for definition in self.definitions))
-        self.error_records = RingBuffer(16)
+        self.error_records = RingBuffer(capacity=16)
         self.base_log_level = LogLevel.INFO
         self.debug_mode = False
         self.config: dict[str, object] | None = None
@@ -121,7 +125,7 @@ class RuntimeApp:
             "boot",
             (
                 log_field("checks", len(self.definitions)),
-                log_field("mode", self.state.display_mode.value),
+                log_field("mode", str(self.state.display_mode)),
             ),
         )
 
@@ -154,7 +158,7 @@ class RuntimeApp:
             current = dict(self.registered_results[definition.identifier])
             current.update(
                 {
-                    "check_type": definition.check_type.value,
+                    "check_type": str(definition.check_type),
                     "target": definition.target,
                     "interval_s": definition.interval_s,
                     "timeout_s": definition.timeout_s,
@@ -168,7 +172,7 @@ class RuntimeApp:
             {
                 "id": check.identifier,
                 "name": check.name,
-                "status": check.status.value,
+                "status": str(check.status),
                 "details": check.details,
                 "latency_ms": check.latency_ms,
                 "last_update_s": check.last_update_s,
@@ -272,10 +276,10 @@ class RuntimeApp:
             primary = result.observations[0]
 
         if primary is not None:
-            status = primary.status.value
+            status = str(primary.status)
             details = primary.details or details
             latency_ms = primary.latency_ms
-        elif definition.check_type.value == "SERVICE":
+        elif str(definition.check_type) == "SERVICE":
             status = "OK"
             details = f"loaded {len(result.observations)} checks"
 

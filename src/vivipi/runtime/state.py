@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import sys
-import traceback
+
+try:
+    import traceback
+except ImportError:  # pragma: no cover - MicroPython fallback
+    traceback = None
 
 from vivipi.core.logging import bound_text
 
@@ -27,6 +31,9 @@ def format_exception_trace(exception: BaseException, line_limit: int = 96, max_l
     writer = _TraceWriter()
     if hasattr(sys, "print_exception"):
         sys.print_exception(exception, writer)
+        return writer.lines(line_limit, max_lines)
+
+    if traceback is None:
         return writer.lines(line_limit, max_lines)
 
     traceback.print_exception(type(exception), exception, exception.__traceback__, file=writer)

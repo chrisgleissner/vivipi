@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import gc
 
-import vivipi.runtime.state as runtime_state
+from vivipi.runtime import state as runtime_state
 from vivipi.runtime.metrics import elapsed_ms, start_timer
 
 

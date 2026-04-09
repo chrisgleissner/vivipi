@@ -12,6 +12,8 @@ device:
     b: GP15
   display:
     type: waveshare-pico-oled-1.3
+    # Advanced override only. The Waveshare Pico OLED 1.3 infers SH1107 column_offset: 32.
+    # column_offset: 32
     mode: standard
     columns: 1
     column_separator: " "

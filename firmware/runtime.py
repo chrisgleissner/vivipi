@@ -299,7 +299,7 @@ def build_runtime_app(
         page_interval_s=int(display_config.get("page_interval_s", 15)),
         page_size=max(1, int(display_config.get("height_px", 64)) // font_height),
         row_width=max(1, int(display_config.get("width_px", 128)) // font_width),
-        display_mode=DisplayMode(str(display_config.get("mode", DisplayMode.STANDARD.value))),
+        display_mode=DisplayMode(str(display_config.get("mode", str(DisplayMode.STANDARD)))),
         overview_columns=int(display_config.get("columns", 1)),
         column_separator=str(display_config.get("column_separator", " ")),
         version=version,

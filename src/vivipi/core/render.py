@@ -39,7 +39,7 @@ def _detail_rows(check: CheckRuntime | None, now_s: float | None, row_width: int
         return tuple(_blank_rows(row_width, page_size))
 
     rows = [_fixed_width_row(check.name, row_width)]
-    rows.append(_fixed_width_row(f"STATUS: {check.status.value}", row_width))
+    rows.append(_fixed_width_row(f"STATUS: {str(check.status)}", row_width))
 
     if check.latency_ms is not None:
         rows.append(_fixed_width_row(f"LAT: {int(check.latency_ms)}ms", row_width))
@@ -88,9 +88,9 @@ def _legacy_overview_frame(state: AppState, checks: tuple[CheckRuntime, ...]) ->
     failure_spans: list[TextSpan] = []
     selected_id = normalize_selection(state.checks, state.selected_id, overview_checks(state))
     for row_index, check in enumerate(checks):
-        rows[row_index] = overview_row(check.name, check.status.value, state.row_width)
+        rows[row_index] = overview_row(check.name, str(check.status), state.row_width)
         if check.status == Status.FAIL:
-            failure_spans.append(_status_span(row_index, state.row_width, check.status.value))
+            failure_spans.append(_status_span(row_index, state.row_width, str(check.status)))
         if check.identifier == selected_id:
             selected_index = row_index
     return Frame(
@@ -119,7 +119,7 @@ def _compact_overview_frame(state: AppState, checks: tuple[CheckRuntime, ...]) -
                 display_text = ""
                 cell = " " * width
             else:
-                display_text = compact_overview_cell(check.name, check.status.value, width)
+                display_text = compact_overview_cell(check.name, str(check.status), width)
                 cell = display_text.ljust(width)
                 if display_text and check.status == Status.FAIL:
                     failure_spans.append(
@@ -161,7 +161,7 @@ def render_frame(state: AppState, now_s: float | None = None) -> Frame:
         failure_spans = ()
         if selected is not None and selected.status == Status.FAIL:
             failure_spans = (
-                TextSpan(row_index=1, start_column=len("STATUS: "), end_column=len(f"STATUS: {selected.status.value}")),
+                TextSpan(row_index=1, start_column=len("STATUS: "), end_column=len(f"STATUS: {str(selected.status)}")),
             )
         return Frame(
             rows=_detail_rows(selected, now_s, state.row_width, state.page_size),

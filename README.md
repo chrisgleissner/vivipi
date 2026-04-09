@@ -81,6 +81,7 @@ Direct probes run from the Pico itself. `SERVICE` is the extension point for any
 - Display controller: SH1107
 - Character grid: 16 columns x 8 rows using 8x8 bitmap cells
 - Display interface: 4-wire SPI, mode 3
+- Native transport mapping: portrait-native 64x128 SH1107 page stream with inferred column offset 32 for the Waveshare Pico OLED 1.3
 
 ### Pin Mapping
 
@@ -315,6 +316,7 @@ If `VIVIPI_SERVICE_BASE_URL` is omitted, build-time filtering drops `SERVICE` ch
 | `device.display.font.width_px` | integer `6` to `32` | inferred | Optional backward-compatible override |
 | `device.display.font.height_px` | integer `6` to `32` | inferred | Optional backward-compatible override |
 | `device.display.page_interval` | integer seconds or `Ns` | inferred by display | Use `0s` to disable automatic page cycling |
+| `device.display.column_offset` | non-negative integer | inferred by display | Advanced override for controller-native visible window alignment; the Waveshare Pico OLED 1.3 infers `32` |
 | `device.display.failure_color` | color name string | `red` | Used for failed-check accent rendering on color-capable displays |
 | `device.display.brightness` | `low`, `medium`, `high`, `max`, or `0` to `255` | `medium` on OLED/LCD | Unsupported on e-paper display types |
 | `wifi.ssid` | placeholder or string | none | Normally `${VIVIPI_WIFI_SSID}` |
@@ -353,7 +355,7 @@ Published specs below are based on current The Pi Hut Waveshare product listings
 
 | `device.display.type` | The Pi Hut | Waveshare | Published display spec | Notes |
 | --- | --- | --- | --- | --- |
-| `waveshare-pico-oled-1.3` | [Listing](https://thepihut.com/products/1-3-oled-display-module-for-raspberry-pi-pico-64x128) | [Developer page](https://www.waveshare.com/wiki/Pico-OLED-1.3) | `1.3"`, `64×128`, OLED, `SH1107`, SPI/I2C | The Pi Hut publishes this module as `64×128`; ViviPi renders it as `128×64` landscape |
+| `waveshare-pico-oled-1.3` | [Listing](https://thepihut.com/products/1-3-oled-display-module-for-raspberry-pi-pico-64x128) | [Developer page](https://www.waveshare.com/wiki/Pico-OLED-1.3) | `1.3"`, `64×128`, OLED, `SH1107`, SPI/I2C | The Pi Hut publishes this module as `64×128`; ViviPi renders it as `128×64` landscape and uses the validated SH1107 native column offset `32` |
 | `waveshare-pico-oled-2.23` | [Listing](https://thepihut.com/products/2-23-oled-display-module-for-raspberry-pi-pico) | [Developer page](https://www.waveshare.com/wiki/Pico-OLED-2.23) | `2.23"`, `128×32`, OLED, `SSD1305`, SPI/I2C | Matches the current Pi Hut listing |
 | `waveshare-pico-lcd-0.96` | [Listing](https://thepihut.com/products/0-96-lcd-display-module-for-raspberry-pi-pico-160x80) | [Developer page](https://www.waveshare.com/wiki/Pico-LCD-0.96) | `0.96"`, `160×80`, LCD | Matches the current Pi Hut listing |
 | `waveshare-pico-lcd-1.14` | [Listing](https://thepihut.com/products/1-14-ips-lcd-display-module-240x135) | [Developer page](https://www.waveshare.com/wiki/Pico-LCD-1.14) | `1.14"`, `240×135`, IPS LCD | Pi Hut does not split separate Pico `1.14` and `1.14-v2` retail listings; Waveshare uses a shared `Pico-LCD-1.14` page |

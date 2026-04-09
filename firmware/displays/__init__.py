@@ -4,12 +4,20 @@ from __future__ import annotations
 
 from vivipi.core.display import normalize_display_config
 
-from firmware.displays.sh1107 import SH1107Display
-from firmware.displays.ssd1305 import SSD1305Display
-from firmware.displays.st77xx import ST77xxDisplay
-from firmware.displays.waveshare_epaper import WaveshareEPaper213BV4Display
-from firmware.displays.waveshare_epaper_mono import WaveshareEPaperMonoDisplay
-from firmware.displays.waveshare_epaper_tricolor import WaveshareEPaperTriColorDisplay
+try:
+    from displays.sh1107 import SH1107Display
+    from displays.ssd1305 import SSD1305Display
+    from displays.st77xx import ST77xxDisplay
+    from displays.waveshare_epaper import WaveshareEPaper213BV4Display
+    from displays.waveshare_epaper_mono import WaveshareEPaperMonoDisplay
+    from displays.waveshare_epaper_tricolor import WaveshareEPaperTriColorDisplay
+except ImportError:  # pragma: no cover - used by CPython tests
+    from firmware.displays.sh1107 import SH1107Display
+    from firmware.displays.ssd1305 import SSD1305Display
+    from firmware.displays.st77xx import ST77xxDisplay
+    from firmware.displays.waveshare_epaper import WaveshareEPaper213BV4Display
+    from firmware.displays.waveshare_epaper_mono import WaveshareEPaperMonoDisplay
+    from firmware.displays.waveshare_epaper_tricolor import WaveshareEPaperTriColorDisplay
 
 
 BACKENDS = {

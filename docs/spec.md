@@ -48,6 +48,7 @@ Default font behavior:
 Display configuration:
 
 - `device.display.type` selects the display backend and MUST infer controller, interface, SPI mode, pixel geometry, and default pins
+- Controller-native visible-window calibration such as SH1107 column origin MAY be inferred from `device.display.type` and MAY be overridden for advanced hardware tuning
 - `device.display.font` SHOULD use symbolic size presets at build time
 - Exact character cell width and height MAY still be overridden for backward-compatible advanced tuning and remain constrained to 6 to 32 pixels
 - Visible columns = `floor(display_width_px / cell_width)`

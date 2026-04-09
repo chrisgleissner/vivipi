@@ -149,6 +149,9 @@ def test_build_firmware_bundle_creates_a_releaseable_zip_archive(tmp_path: Path)
     with zipfile.ZipFile(archive_path) as archive:
         names = set(archive.namelist())
     assert "boot.py" in names
+    assert "__future__.py" in names
+    assert "dataclasses.py" in names
+    assert "enum.py" in names
     assert "config.json" in names
     assert "display.py" in names
     assert "control.py" in names
@@ -156,6 +159,8 @@ def test_build_firmware_bundle_creates_a_releaseable_zip_archive(tmp_path: Path)
     assert "input.py" in names
     assert "main.py" in names
     assert "state.py" in names
+    assert "urllib/__init__.py" in names
+    assert "urllib/parse.py" in names
     assert "vivipi/__init__.py" in names
     assert not any("__pycache__/" in name for name in names)
     assert not any(name.endswith(".pyc") for name in names)
@@ -656,6 +661,30 @@ def test_render_device_runtime_config_serializes_optional_auth_fields():
     assert rendered["checks"][0]["password"] == "secret"
     assert rendered["checks"][1]["username"] is None
     assert rendered["checks"][1]["password"] is None
+
+
+def test_render_device_runtime_config_serializes_inferred_display_column_offset():
+    settings = {
+        "device": {
+            "board": "pico2w",
+            "buttons": {"a": "GP14", "b": "GP15"},
+            "display": {"type": "waveshare-pico-oled-1.3", "column_offset": 32},
+        },
+        "wifi": {"ssid": "wifi", "password": "secret"},
+        "service": {},
+    }
+    checks = (
+        CheckDefinition(
+            identifier="router",
+            name="Router",
+            check_type=CheckType.PING,
+            target="192.168.1.1",
+        ),
+    )
+
+    rendered = render_device_runtime_config(settings, checks)
+
+    assert rendered["display"]["column_offset"] == 32
 
 
 def test_load_runtime_checks_skips_unconfigured_service_checks(tmp_path: Path):

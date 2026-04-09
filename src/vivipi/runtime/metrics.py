@@ -71,7 +71,7 @@ class MetricsStore:
         self.gc_pause = MetricSeries()
         self.check_duration = {check_id: MetricSeries() for check_id in check_ids}
         self.check_latency = {check_id: MetricSeries() for check_id in check_ids}
-        self.memory_snapshots = RingBuffer(memory_snapshot_capacity)
+        self.memory_snapshots = RingBuffer(capacity=memory_snapshot_capacity)
         self.gc_collections = 0
 
     def record_cycle(self, duration_ms: float):

@@ -6,6 +6,12 @@ import socket
 import time
 from urllib.parse import urlparse
 
+try:
+    TimeoutError
+except NameError:  # pragma: no cover - MicroPython fallback
+    class TimeoutError(OSError):
+        pass
+
 from vivipi.core.execution import HttpResponseResult, PingProbeResult, execute_check
 from vivipi.core.logging import bound_text
 from vivipi.core.models import CheckDefinition, CheckType
@@ -26,6 +32,10 @@ TELNET_SB = 250
 TELNET_SE = 240
 MAX_NETWORK_ATTEMPTS = 3
 NETWORK_BACKOFF_BASE_MS = 100
+
+
+def _fold(value: object) -> str:
+    return str(value).strip().lower()
 
 
 def _start_timer() -> tuple[float, bool]:
@@ -62,7 +72,7 @@ def _normalize_error_text(error: BaseException) -> str:
 
 
 def _classify_network_error(error: BaseException) -> str:
-    message = _normalize_error_text(error).casefold()
+    message = _fold(_normalize_error_text(error))
     errno = getattr(error, "errno", None)
     if isinstance(error, TimeoutError) or "timeout" in message or "timed out" in message:
         return "timeout"
@@ -80,7 +90,7 @@ def _classify_network_error(error: BaseException) -> str:
 def _format_network_error(error: BaseException) -> str:
     category = _classify_network_error(error)
     detail = bound_text(_normalize_error_text(error), 40)
-    if detail.casefold() == category:
+    if _fold(detail) == category:
         return category
     return f"{category}: {detail}"
 
@@ -101,7 +111,7 @@ def _retry_network_operation(operation, timeout_s: int):
 
 
 def _should_retry_probe_result(details: str) -> bool:
-    normalized = str(details).casefold()
+    normalized = _fold(details)
     return any(marker in normalized for marker in ("timeout", "dns", "refused", "unreachable", "network", "reset", "io:"))
 
 
@@ -130,10 +140,38 @@ def _runtime_optional_auth(value: object) -> str | None:
     return normalized or None
 
 
+def _resolve_target_alias(target: object, host_aliases: object) -> str:
+    raw_target = str(target).strip()
+    if not raw_target:
+        return raw_target
+    if not isinstance(host_aliases, dict) or not host_aliases:
+        return raw_target
+
+    if "://" in raw_target:
+        parsed = urlparse(raw_target)
+        hostname = getattr(parsed, "hostname", None)
+        if not hostname or hostname not in host_aliases:
+            return raw_target
+        alias = str(host_aliases[hostname]).strip()
+        if not alias:
+            return raw_target
+        prefix = raw_target.split("://", 1)[0] + "://"
+        suffix = raw_target.split(hostname, 1)[1]
+        return prefix + alias + suffix
+
+    alias = host_aliases.get(raw_target)
+    if alias is None:
+        return raw_target
+    return str(alias).strip() or raw_target
+
+
 def build_runtime_definitions(config: dict[str, object]) -> tuple[CheckDefinition, ...]:
     raw_checks = config.get("checks")
     if not isinstance(raw_checks, list):
         raise ValueError("runtime config must contain a checks list")
+
+    wifi = config.get("wifi") if isinstance(config.get("wifi"), dict) else {}
+    host_aliases = wifi.get("host_aliases") if isinstance(wifi, dict) else None
 
     definitions: list[CheckDefinition] = []
     for item in raw_checks:
@@ -144,7 +182,7 @@ def build_runtime_definitions(config: dict[str, object]) -> tuple[CheckDefinitio
                 identifier=str(item["id"]),
                 name=str(item["name"]),
                 check_type=_runtime_check_type(item["type"]),
-                target=str(item["target"]),
+                target=_resolve_target_alias(item["target"], host_aliases),
                 interval_s=int(item.get("interval_s", 15)),
                 timeout_s=int(item.get("timeout_s", 10)),
                 method=str(item.get("method", "GET")).upper(),
@@ -269,7 +307,7 @@ def _parse_socket_target(target: str, default_port: int, expected_scheme: str | 
     raw_target = str(target).strip()
     if "://" in raw_target:
         parsed = urlparse(raw_target)
-        if expected_scheme is not None and parsed.scheme and parsed.scheme.casefold() != expected_scheme:
+        if expected_scheme is not None and parsed.scheme and _fold(parsed.scheme) != expected_scheme:
             raise ValueError(f"expected {expected_scheme} target")
         if not parsed.hostname:
             raise ValueError("target must include a host")
@@ -469,7 +507,7 @@ def _looks_like_telnet_output(value: str) -> bool:
     stripped = value.strip()
     if not stripped:
         return False
-    lowered = stripped.casefold()
+    lowered = stripped.lower()
     if any(marker.decode("utf-8") in lowered for marker in TELNET_FAILURE_MARKERS):
         return False
     return any(character.isalnum() for character in stripped) or stripped[-1:] in ">#$%"

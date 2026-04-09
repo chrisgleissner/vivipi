@@ -8,7 +8,7 @@ from vivipi.core.models import AppMode, AppState, CheckObservation, CheckRuntime
 
 
 def sort_checks(checks: tuple[CheckRuntime, ...]) -> tuple[CheckRuntime, ...]:
-    return tuple(sorted(checks, key=lambda check: check.name.casefold()))
+    return tuple(sorted(checks, key=lambda check: check.name.lower()))
 
 
 def normalize_selection(

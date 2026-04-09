@@ -8,7 +8,10 @@ except ImportError:  # pragma: no cover - imported on-device
     Pin = None
     SPI = None
 
-from firmware.displays.rendering import MonochromeSurface, _build_glyph_lookup, _pin_number, render_boot_logo_to_surface, render_to_surface
+try:
+    from displays.rendering import MonochromeSurface, _build_glyph_lookup, _pin_number, render_boot_logo_to_surface, render_to_surface
+except ImportError:  # pragma: no cover - used by CPython tests
+    from firmware.displays.rendering import MonochromeSurface, _build_glyph_lookup, _pin_number, render_boot_logo_to_surface, render_to_surface
 
 
 class SSD1305Display:
@@ -34,6 +37,7 @@ class SSD1305Display:
             phase=0,
             sck=Pin(_pin_number(pins["clk"])),
             mosi=Pin(_pin_number(pins["din"])),
+            miso=None,
         )
         self.buffer = bytearray((self.width * self.height) // 8)
         self._glyph_lookup = _build_glyph_lookup(self.font_width, self.font_height)

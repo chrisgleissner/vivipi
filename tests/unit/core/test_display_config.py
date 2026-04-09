@@ -37,9 +37,16 @@ def test_normalize_display_config_defaults_to_inferred_oled_geometry_and_font():
     assert config["type"] == "waveshare-pico-oled-1.3"
     assert config["width_px"] == 128
     assert config["height_px"] == 64
+    assert config["column_offset"] == 32
     assert config["font"] == {"width_px": 8, "height_px": 8}
     assert config["page_interval_s"] == 15
     assert config["pins"]["dc"] == "GP8"
+
+
+def test_normalize_display_config_accepts_column_offset_override_for_subwindowed_oleds():
+    config = normalize_display_config({"type": "waveshare-pico-oled-1.3", "column_offset": 29})
+
+    assert config["column_offset"] == 29
 
 
 def test_infer_default_font_uses_legacy_grid_fallback_without_diagonal():
@@ -158,6 +165,9 @@ def test_normalize_display_config_validates_inferred_string_and_numeric_fields()
     with pytest.raises(ValueError, match="device.display.page_interval"):
         normalize_display_config({"type": "waveshare-pico-lcd-1.3", "page_interval": object()})
 
+    with pytest.raises(ValueError, match="device.display.column_offset"):
+        normalize_display_config({"type": "waveshare-pico-oled-1.3", "column_offset": -1})
+
 
 def test_normalize_display_config_rejects_mismatched_inferred_values():
     with pytest.raises(ValueError, match="device.display.width_px"):
@@ -174,6 +184,7 @@ def test_get_display_definition_returns_json_friendly_metadata():
 
     assert definition["backend"] == "sh1107"
     assert definition["colors"] == ["white", "black"]
+    assert definition["default_column_offset"] == 32
 
 
 def test_get_display_definition_includes_screen_diagonal_for_readme_matrix_generation():
