@@ -684,7 +684,7 @@ def test_render_device_runtime_config_serializes_inferred_display_column_offset(
 
     rendered = render_device_runtime_config(settings, checks)
 
-    assert rendered["display"]["column_offset"] == 32
+    assert rendered["device"]["display"]["column_offset"] == 32
 
 
 def test_load_runtime_checks_skips_unconfigured_service_checks(tmp_path: Path):

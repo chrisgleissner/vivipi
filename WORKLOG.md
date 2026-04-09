@@ -1,5 +1,11 @@
 # Worklog
 
+## 2026-04-09 SH1107 Calibration
+
+- 2026-04-09T23:15:00+01:00 Validated the Waveshare Pico OLED 1.3 on real hardware with iterative photographed offset sweeps and established the correct SH1107 native column origin as `32`.
+- 2026-04-09T23:15:00+01:00 Promoted that calibration into `src/vivipi/core/display.py` as inferred display metadata for `waveshare-pico-oled-1.3`, preserved the advanced override path as `device.display.column_offset`, and documented the transport rule in `README.md`, `AGENTS.md`, `docs/spec.md`, and `config/build-deploy.local.example.yaml`.
+- 2026-04-09T23:15:00+01:00 Added regression coverage in `tests/unit/core/test_display_config.py`, `tests/unit/firmware/test_display.py`, and `tests/unit/tooling/test_build_deploy.py` so the calibrated SH1107 mapping is normalized, serialized, and consumed by the firmware backend.
+
 ## 2026-04-07 Strict Convergence
 
 - 2026-04-07T00:00:00+01:00 Started the strict convergence pass requested for full firmware productionization.
