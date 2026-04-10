@@ -12,7 +12,7 @@ except ImportError:  # pragma: no cover - imported on-device
 from vivipi.core.input import InputController
 from vivipi.core.display import normalize_display_config
 from vivipi.core.logging import bound_text
-from vivipi.core.models import DiagnosticEvent, DisplayMode, TransitionThresholds
+from vivipi.core.models import DiagnosticEvent, DisplayMode, ProbeSchedulingPolicy, TransitionThresholds
 from vivipi.runtime import state as runtime_state
 from vivipi.runtime.metrics import elapsed_ms, start_timer
 from vivipi.runtime import RuntimeApp, build_executor, build_runtime_definitions
@@ -146,6 +146,30 @@ def _transition_thresholds_from_config(config):
     )
 
 
+def _bool_from_config(value: object, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "1", "on"}:
+            return True
+        if normalized in {"false", "no", "0", "off"}:
+            return False
+    raise ValueError("probe_schedule.allow_concurrent_same_host must be a boolean")
+
+
+def _probe_scheduling_from_config(config):
+    raw = config.get("probe_schedule") if isinstance(config, dict) else None
+    if not isinstance(raw, dict):
+        return ProbeSchedulingPolicy()
+    return ProbeSchedulingPolicy(
+        allow_concurrent_same_host=_bool_from_config(raw.get("allow_concurrent_same_host"), False),
+        same_host_backoff_ms=int(raw.get("same_host_backoff_ms", 250)),
+    )
+
+
 def _safe_connect_wifi(wifi_connector, config):
     try:
         return wifi_connector(config), ()
@@ -157,6 +181,12 @@ def _now_s():
     if hasattr(time, "time"):
         return float(time.time())
     return float(time.ticks_ms()) / 1000.0
+
+
+def _steady_now_s():
+    if hasattr(time, "ticks_ms"):
+        return float(time.ticks_ms()) / 1000.0
+    return _now_s()
 
 
 def _sleep_ms(value):
@@ -305,9 +335,13 @@ def build_runtime_app(
         overview_columns=int(display_config.get("columns", 1)),
         column_separator=str(display_config.get("column_separator", " ")),
         transition_thresholds=_transition_thresholds_from_config(config),
+        probe_scheduling=_probe_scheduling_from_config(config),
+        sleep_ms=sleep_ms,
+        probe_time_provider=_steady_now_s,
         version=version,
         build_time=build_time_value,
     )
+    app.boot_logo_until_s = boot_start_s + max(float(boot_logo_min_s), float(display_config.get("boot_logo_duration_s", boot_logo_min_s)))
     if hasattr(app, "configure_observability"):
         app.configure_observability(
             config=config,
@@ -368,7 +402,13 @@ def _render_initial_frame(app, now_s):
 
 
 def _run_startup_tick(app, now_s):
-    _run_startup_network(app, now_s)
+    if hasattr(app, "prime_due_checks"):
+        try:
+            app.prime_due_checks(now_s)
+        except Exception as error:
+            if hasattr(app, "_record_exception"):
+                app._record_exception("loop", error, observed_at_s=now_s)
+        return
     if all(hasattr(app, attribute) for attribute in ("definitions", "_run_check", "render_once")):
         for definition in getattr(app, "definitions", ()):  # pragma: no branch - tiny startup loop
             try:
@@ -392,6 +432,20 @@ def _run_startup_tick(app, now_s):
             app._record_exception("loop", error, observed_at_s=now_s)
 
 
+def _wait_for_boot_logo(app, now_provider=None, sleep_ms=None):
+    now_provider = _now_s if now_provider is None else now_provider
+    sleep_ms = _sleep_ms if sleep_ms is None else sleep_ms
+    ready_at_s = getattr(app, "boot_logo_until_s", None)
+    now_s = now_provider()
+    if ready_at_s is None or now_s >= float(ready_at_s):
+        return now_s
+
+    remaining_ms = max(0, int(((float(ready_at_s) - now_s) * 1000.0) + 0.5))
+    if remaining_ms > 0:
+        sleep_ms(remaining_ms)
+    return now_provider()
+
+
 def run_loop(app, poll_interval_ms=50, iterations=None, now_provider=_now_s, sleep_ms=_sleep_ms):
     iteration = 0
     while iterations is None or iteration < iterations:  # pragma: no branch - tiny loop helper
@@ -410,6 +464,15 @@ def run_loop(app, poll_interval_ms=50, iterations=None, now_provider=_now_s, sle
 def run_forever(config_path="config.json", poll_interval_ms=50):
     app = build_runtime_app_from_path(config_path)
     startup_now_s = _now_s()
-    _render_initial_frame(app, startup_now_s)
+    _run_startup_network(app, startup_now_s)
     _run_startup_tick(app, startup_now_s)
+    startup_ready_s = _wait_for_boot_logo(app)
+    if hasattr(app, "tick"):
+        try:
+            app.tick(startup_ready_s, button_events=())
+        except Exception as error:
+            if hasattr(app, "_record_exception"):
+                app._record_exception("loop", error, observed_at_s=startup_ready_s)
+    else:
+        _render_initial_frame(app, startup_ready_s)
     run_loop(app, poll_interval_ms=poll_interval_ms)

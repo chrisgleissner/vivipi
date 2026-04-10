@@ -74,6 +74,7 @@ checks:
                 "    mode: standard",
                 "    columns: 1",
                 "    column_separator: ' '",
+                "    boot_logo_duration: 6s",
                 "wifi:",
                 "  ssid: ${VIVIPI_WIFI_SSID}",
                 "  password: ${VIVIPI_WIFI_PASSWORD}",
@@ -83,6 +84,9 @@ checks:
                 "  failures_to_degraded: 1",
                 "  failures_to_failed: 1",
                 "  successes_to_recover: 1",
+                "probe_schedule:",
+                "  allow_concurrent_same_host: false",
+                "  same_host_backoff_ms: 250",
                 "checks_config: checks.yaml",
             ]
         ),
@@ -108,12 +112,17 @@ def test_load_build_deploy_settings_substitutes_environment_placeholders(tmp_pat
     assert settings["device"]["display"]["height_px"] == 64
     assert settings["device"]["display"]["font"] == {"width_px": 8, "height_px": 8}
     assert settings["device"]["display"]["page_interval_s"] == 15
+    assert settings["device"]["display"]["boot_logo_duration_s"] == 6
     assert settings["device"]["display"]["brightness"] == 128
     assert settings["device"]["display"]["mode"] == "standard"
     assert settings["device"]["display"]["columns"] == 1
     assert settings["device"]["display"]["column_separator"] == " "
     assert settings["device"]["display"]["failure_color"] == "red"
     assert settings["device"]["display"]["pins"]["dc"] == "GP8"
+    assert settings["probe_schedule"] == {
+        "allow_concurrent_same_host": False,
+        "same_host_backoff_ms": 250,
+    }
 
 
 def test_resolve_config_path_prefers_existing_local_override_when_requested(tmp_path: Path):
@@ -140,6 +149,7 @@ def test_write_runtime_config_embeds_wifi_and_checks(tmp_path: Path):
     assert rendered["wifi"]["ssid"] == "TestWifi"
     assert rendered["checks"][0]["id"] == "router"
     assert rendered["check_state"]["failures_to_failed"] == 1
+    assert rendered["probe_schedule"]["same_host_backoff_ms"] == 250
 
 
 def test_build_firmware_bundle_creates_a_releaseable_zip_archive(tmp_path: Path):
@@ -716,6 +726,33 @@ def test_render_device_runtime_config_serializes_optional_check_state():
     rendered = render_device_runtime_config(settings, checks)
 
     assert rendered["check_state"]["failures_to_failed"] == 1
+
+
+def test_render_device_runtime_config_serializes_probe_schedule():
+    settings = {
+        "device": {"board": "pico2w", "buttons": {"a": "GP14", "b": "GP15"}},
+        "wifi": {"ssid": "wifi", "password": "secret"},
+        "service": {},
+        "probe_schedule": {
+            "allow_concurrent_same_host": False,
+            "same_host_backoff_ms": 250,
+        },
+    }
+    checks = (
+        CheckDefinition(
+            identifier="router",
+            name="Router",
+            check_type=CheckType.PING,
+            target="192.168.1.1",
+        ),
+    )
+
+    rendered = render_device_runtime_config(settings, checks)
+
+    assert rendered["probe_schedule"] == {
+        "allow_concurrent_same_host": False,
+        "same_host_backoff_ms": 250,
+    }
 
 
 def test_load_runtime_checks_skips_unconfigured_service_checks(tmp_path: Path):

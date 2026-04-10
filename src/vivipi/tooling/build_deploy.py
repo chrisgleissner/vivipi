@@ -101,6 +101,7 @@ def load_build_deploy_settings(path: str | Path, env: dict[str, str] | None = No
             service.pop("base_url", None)
 
     _normalize_device_display_settings(resolved)
+    _normalize_probe_schedule_settings(resolved)
 
     return resolved
 
@@ -111,6 +112,45 @@ def _normalize_device_display_settings(settings: dict[str, object]):
         return
 
     device["display"] = normalize_display_config(device.get("display"))
+
+
+def _parse_bool(value: object, context: str, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "1", "on"}:
+            return True
+        if normalized in {"false", "no", "0", "off"}:
+            return False
+    raise ValueError(f"{context} must be a boolean")
+
+
+def _normalize_probe_schedule_settings(settings: dict[str, object]):
+    raw = settings.get("probe_schedule")
+    if raw is None:
+        settings["probe_schedule"] = {
+            "allow_concurrent_same_host": False,
+            "same_host_backoff_ms": 250,
+        }
+        return
+    if not isinstance(raw, dict):
+        raise ValueError("probe_schedule must be a mapping")
+
+    same_host_backoff_ms = int(raw.get("same_host_backoff_ms", 250))
+    if same_host_backoff_ms < 0:
+        raise ValueError("probe_schedule.same_host_backoff_ms must not be negative")
+
+    settings["probe_schedule"] = {
+        "allow_concurrent_same_host": _parse_bool(
+            raw.get("allow_concurrent_same_host"),
+            "probe_schedule.allow_concurrent_same_host",
+            False,
+        ),
+        "same_host_backoff_ms": same_host_backoff_ms,
+    }
 
 
 def _check_to_dict(check: CheckDefinition) -> dict[str, object]:
@@ -140,6 +180,9 @@ def render_device_runtime_config(settings: dict[str, object], checks: tuple[Chec
     check_state = settings.get("check_state")
     if isinstance(check_state, dict):
         runtime_config["check_state"] = dict(check_state)
+    probe_schedule = settings.get("probe_schedule")
+    if isinstance(probe_schedule, dict):
+        runtime_config["probe_schedule"] = dict(probe_schedule)
     return runtime_config
 
 

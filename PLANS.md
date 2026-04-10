@@ -31,6 +31,7 @@
   - with `U64` offline, `C64U` and `PIXEL4 ADB` recover to `OK`
   - `U64` no longer remains stuck at `OK`
   - the corrected non-`OK` state remains visible across multiple later captures
+  - the current deployment now also enforces a 6-second boot logo hold and same-host probe pacing defaults (`allow_concurrent_same_host: false`, `same_host_backoff_ms: 250`)
 - Deploy firmware with `./build deploy`.
 - Soft-reset once with `sg dialout -c "mpremote connect /dev/ttyACM0 soft-reset"`.
 - Wait for Wi-Fi bootstrap and at least one full check cycle without using `mpremote exec`.

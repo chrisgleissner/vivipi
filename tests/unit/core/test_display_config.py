@@ -40,6 +40,7 @@ def test_normalize_display_config_defaults_to_inferred_oled_geometry_and_font():
     assert config["column_offset"] == 32
     assert config["font"] == {"width_px": 8, "height_px": 8}
     assert config["page_interval_s"] == 15
+    assert config["boot_logo_duration_s"] == 6
     assert config["pins"]["dc"] == "GP8"
 
 
@@ -47,6 +48,12 @@ def test_normalize_display_config_accepts_column_offset_override_for_subwindowed
     config = normalize_display_config({"type": "waveshare-pico-oled-1.3", "column_offset": 29})
 
     assert config["column_offset"] == 29
+
+
+def test_normalize_display_config_accepts_boot_logo_duration_override():
+    config = normalize_display_config({"type": "waveshare-pico-oled-1.3", "boot_logo_duration": "7s"})
+
+    assert config["boot_logo_duration_s"] == 7
 
 
 def test_infer_default_font_uses_legacy_grid_fallback_without_diagonal():

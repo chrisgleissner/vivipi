@@ -2,7 +2,7 @@ import pytest
 
 from vivipi.core.execution import CheckExecutionResult
 from vivipi.core.input import Button
-from vivipi.core.models import CheckDefinition, CheckObservation, CheckType, DiagnosticEvent, DisplayMode, Status, TransitionThresholds
+from vivipi.core.models import CheckDefinition, CheckObservation, CheckType, DiagnosticEvent, DisplayMode, ProbeSchedulingPolicy, Status, TransitionThresholds
 from vivipi.runtime import ButtonEvent, RuntimeApp
 
 
@@ -87,6 +87,7 @@ def test_runtime_app_executor_exception_replaces_previous_ok_state_on_display():
         raise OSError("network down")
 
     app = RuntimeApp(definitions=(definition,), executor=executor, display=display, page_interval_s=0)
+    app.background_workers_enabled = False
 
     app.tick(0.0)
     app.last_started_at.clear()
@@ -218,6 +219,7 @@ def test_runtime_app_rotates_over_filtered_compact_pages_only():
         overview_columns=1,
         page_size=2,
     )
+    app.background_workers_enabled = False
 
     app.tick(0.0)
     app.tick(15.0)
@@ -333,3 +335,92 @@ def test_runtime_app_service_result_and_display_helpers_cover_remaining_branches
     assert registered["details"] == "loaded 0 checks"
     assert app._display_retry_delay_s() == 0.0
     assert app.get_network_state_snapshot()["last_error"] == ""
+
+
+def test_runtime_app_waits_between_due_checks_for_the_same_host_by_default():
+    display = FakeDisplay()
+    definitions = (
+        CheckDefinition(identifier="http", name="Http", check_type=CheckType.HTTP, target="http://router.local/health"),
+        CheckDefinition(identifier="ftp", name="Ftp", check_type=CheckType.FTP, target="router.local"),
+        CheckDefinition(identifier="other", name="Other", check_type=CheckType.HTTP, target="http://nas.local/health"),
+    )
+    calls = []
+    sleep_calls = []
+    probe_clock = {"now": 0.0}
+
+    def executor(definition, now_s):
+        calls.append(definition.identifier)
+        return CheckExecutionResult(
+            source_identifier=definition.identifier,
+            observations=(
+                CheckObservation(
+                    identifier=definition.identifier,
+                    name=definition.name,
+                    status=Status.OK,
+                    observed_at_s=now_s,
+                ),
+            ),
+        )
+
+    def sleep_ms(value):
+        sleep_calls.append(value)
+        probe_clock["now"] += value / 1000.0
+
+    app = RuntimeApp(
+        definitions=definitions,
+        executor=executor,
+        display=display,
+        page_interval_s=0,
+        sleep_ms=sleep_ms,
+        probe_time_provider=lambda: probe_clock["now"],
+    )
+
+    app.tick(0.0)
+    for _ in range(20):
+        if len(calls) == 3:
+            break
+        app.tick(0.05)
+
+    assert set(calls) == {"ftp", "http", "other"}
+    assert calls.index("ftp") < calls.index("http")
+    assert sleep_calls == [250]
+
+
+def test_runtime_app_can_disable_same_host_probe_backoff():
+    display = FakeDisplay()
+    definitions = (
+        CheckDefinition(identifier="http", name="Http", check_type=CheckType.HTTP, target="http://router.local/health"),
+        CheckDefinition(identifier="ftp", name="Ftp", check_type=CheckType.FTP, target="router.local"),
+    )
+    sleep_calls = []
+
+    def executor(definition, now_s):
+        return CheckExecutionResult(
+            source_identifier=definition.identifier,
+            observations=(
+                CheckObservation(
+                    identifier=definition.identifier,
+                    name=definition.name,
+                    status=Status.OK,
+                    observed_at_s=now_s,
+                ),
+            ),
+        )
+
+    app = RuntimeApp(
+        definitions=definitions,
+        executor=executor,
+        display=display,
+        page_interval_s=0,
+        probe_scheduling=ProbeSchedulingPolicy(allow_concurrent_same_host=True, same_host_backoff_ms=250),
+        sleep_ms=lambda value: sleep_calls.append(value),
+        probe_time_provider=lambda: 0.0,
+    )
+
+    app.tick(0.0)
+    for _ in range(20):
+        if app.state.checks[0].status == Status.OK and app.state.checks[1].status == Status.OK:
+            break
+        app.tick(0.05)
+
+    assert sleep_calls == []

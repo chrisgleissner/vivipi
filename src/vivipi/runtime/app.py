@@ -1,11 +1,22 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, replace
+
+try:
+    import threading
+except ImportError:  # pragma: no cover - MicroPython fallback
+    threading = None
+
+try:
+    import _thread
+except ImportError:  # pragma: no cover - CPython fallback
+    _thread = None
 
 from vivipi.core.input import InputController
 from vivipi.core.models import CheckRuntime
 from vivipi.core.render import render_frame
-from vivipi.core.scheduler import due_checks, render_reason
+from vivipi.core.scheduler import due_checks, probe_backoff_remaining_s, probe_host_key, render_reason
 from vivipi.core.shift import PixelShiftController
 from vivipi.core.state import integrate_observations, page_count, record_diagnostic_events, set_page_index
 from vivipi.core.logging import LogLevel, StructuredLogger, log_field
@@ -16,6 +27,7 @@ from vivipi.core.models import (
     CheckObservation,
     DiagnosticEvent,
     DisplayMode,
+    ProbeSchedulingPolicy,
     Status,
     TransitionThresholds,
 )
@@ -29,10 +41,68 @@ def _enum_text(value) -> str:
     return str(getattr(value, "value", value))
 
 
+def _sleep_ms(value_ms: int):
+    if value_ms <= 0:
+        return
+    if hasattr(time, "sleep_ms"):
+        time.sleep_ms(value_ms)
+        return
+    time.sleep(value_ms / 1000.0)
+
+
+def _monotonic_now_s() -> float:
+    if hasattr(time, "ticks_ms"):
+        return float(time.ticks_ms()) / 1000.0
+    return float(time.perf_counter())
+
+
+def _allocate_lock():
+    if threading is not None:
+        return threading.Lock()
+    if _thread is not None:
+        return _thread.allocate_lock()
+    return None
+
+
+def _start_background_thread(target, args) -> bool:
+    if threading is not None:
+        worker = threading.Thread(target=target, args=args, daemon=True)
+        worker.start()
+        return True
+    if _thread is not None:
+        _thread.start_new_thread(target, args)
+        return True
+    return False
+
+
+def _lock_context(lock):
+    if lock is None:
+        return False
+    lock.acquire()
+    return True
+
+
 @dataclass(frozen=True)
 class ButtonEvent:
     button: object
     held_ms: int
+
+
+@dataclass(frozen=True)
+class PendingCheckRun:
+    definition: CheckDefinition
+    requested_at_s: float
+    manual: bool = False
+
+
+@dataclass(frozen=True)
+class CompletedCheckRun:
+    definition: CheckDefinition
+    observed_at_s: float
+    duration_ms: float
+    manual: bool = False
+    result: object | None = None
+    error: BaseException | None = None
 
 
 class RuntimeApp:
@@ -51,6 +121,9 @@ class RuntimeApp:
         overview_columns: int = 1,
         column_separator: str = " ",
         transition_thresholds: TransitionThresholds | None = None,
+        probe_scheduling: ProbeSchedulingPolicy | None = None,
+        sleep_ms=_sleep_ms,
+        probe_time_provider=_monotonic_now_s,
         version: str = "",
         build_time: str = "",
     ):
@@ -64,7 +137,19 @@ class RuntimeApp:
         self.shift_controller = shift_controller or PixelShiftController()
         self.page_interval_s = page_interval_s
         self.transition_thresholds = transition_thresholds or TransitionThresholds()
+        self.probe_scheduling = probe_scheduling or ProbeSchedulingPolicy()
+        self.sleep_ms = sleep_ms
+        self.probe_time_provider = probe_time_provider
         self.last_started_at: dict[str, float] = {}
+        self.last_completed_at_by_host: dict[str, float] = {}
+        self.background_lock = _allocate_lock()
+        self.background_workers_enabled = self.background_lock is not None and (
+            threading is not None or _thread is not None
+        )
+        self.pending_checks_by_worker: dict[str, list[PendingCheckRun]] = {}
+        self.active_workers: set[str] = set()
+        self.inflight_check_ids: set[str] = set()
+        self.completed_checks: list[CompletedCheckRun] = []
         self.state = AppState(
             checks=tuple(
                 CheckRuntime(
@@ -469,22 +554,121 @@ class RuntimeApp:
             state = self.input_controller.apply(state, event.button, held_ms=event.held_ms)
         self.state = state
 
-    def _run_check(self, definition: CheckDefinition, now_s: float, manual: bool = False):
-        started_at, timer_kind = start_timer()
-        self.last_started_at[definition.identifier] = now_s
+    def _worker_key(self, definition: CheckDefinition) -> str:
+        host_key = probe_host_key(definition) or definition.identifier
+        if self.probe_scheduling.allow_concurrent_same_host:
+            return f"{host_key}:{definition.identifier}"
+        return host_key
+
+    def _background_enabled(self) -> bool:
+        return self.background_workers_enabled
+
+    def _copy_last_started_at(self) -> dict[str, float]:
+        if not self._background_enabled():
+            return dict(self.last_started_at)
+        lock_acquired = _lock_context(self.background_lock)
         try:
-            result = self.executor(definition, now_s)
+            return dict(self.last_started_at)
+        finally:
+            if lock_acquired:
+                self.background_lock.release()
+
+    def _pop_completed_checks(self) -> tuple[CompletedCheckRun, ...]:
+        if not self._background_enabled():
+            return ()
+        lock_acquired = _lock_context(self.background_lock)
+        try:
+            if not self.completed_checks:
+                return ()
+            items = tuple(self.completed_checks)
+            self.completed_checks.clear()
+            return items
+        finally:
+            if lock_acquired:
+                self.background_lock.release()
+
+    def _probe_now_s(self) -> float:
+        return float(self.probe_time_provider())
+
+    def _wait_for_probe_slot(self, definition: CheckDefinition):
+        if self._background_enabled():
+            lock_acquired = _lock_context(self.background_lock)
+            try:
+                completed_at = dict(self.last_completed_at_by_host)
+            finally:
+                if lock_acquired:
+                    self.background_lock.release()
+        else:
+            completed_at = self.last_completed_at_by_host
+
+        remaining_s = probe_backoff_remaining_s(definition, completed_at, self._probe_now_s(), self.probe_scheduling)
+        if remaining_s <= 0:
+            return
+        remaining_ms = max(1, int((remaining_s * 1000.0) + 0.999))
+        self.sleep_ms(remaining_ms)
+
+    def _mark_probe_complete(self, definition: CheckDefinition):
+        host_key = probe_host_key(definition)
+        if host_key is None:
+            return
+        if self._background_enabled():
+            lock_acquired = _lock_context(self.background_lock)
+            try:
+                self.last_completed_at_by_host[host_key] = self._probe_now_s()
+            finally:
+                if lock_acquired:
+                    self.background_lock.release()
+            return
+        self.last_completed_at_by_host[host_key] = self._probe_now_s()
+
+    def _execute_check_once(self, definition: CheckDefinition, now_s: float, manual: bool = False) -> CompletedCheckRun:
+        self._wait_for_probe_slot(definition)
+        started_now_s = self.current_time_s() or now_s
+        started_at, timer_kind = start_timer()
+        if self._background_enabled():
+            lock_acquired = _lock_context(self.background_lock)
+            try:
+                self.last_started_at[definition.identifier] = started_now_s
+            finally:
+                if lock_acquired:
+                    self.background_lock.release()
+        else:
+            self.last_started_at[definition.identifier] = started_now_s
+        try:
+            result = self.executor(definition, started_now_s)
         except Exception as error:
             duration_ms = elapsed_ms(started_at, timer_kind)
-            self.metrics.record_check(definition.identifier, duration_ms, None)
+            self._mark_probe_complete(definition)
+            return CompletedCheckRun(
+                definition=definition,
+                observed_at_s=started_now_s,
+                duration_ms=duration_ms,
+                manual=manual,
+                error=error,
+            )
+
+        duration_ms = elapsed_ms(started_at, timer_kind)
+        self._mark_probe_complete(definition)
+        return CompletedCheckRun(
+            definition=definition,
+            observed_at_s=started_now_s,
+            duration_ms=duration_ms,
+            manual=manual,
+            result=result,
+        )
+
+    def _apply_completed_check(self, completed: CompletedCheckRun):
+        definition = completed.definition
+        if completed.error is not None:
+            self.metrics.record_check(definition.identifier, completed.duration_ms, None)
             self.registered_results[definition.identifier] = {
                 "id": definition.identifier,
                 "name": definition.name,
                 "status": "FAIL",
                 "details": "executor exception",
                 "latency_ms": None,
-                "last_update_s": now_s,
-                "last_error": str(error) or type(error).__name__,
+                "last_update_s": completed.observed_at_s,
+                "last_error": str(completed.error) or type(completed.error).__name__,
             }
             self.state = integrate_observations(
                 self.state,
@@ -494,18 +678,18 @@ class RuntimeApp:
                         name=definition.name,
                         status=Status.FAIL,
                         details="executor exception",
-                        observed_at_s=now_s,
+                        observed_at_s=completed.observed_at_s,
                         source_identifier=definition.identifier,
                     ),
                 ),
                 thresholds=self.transition_thresholds,
                 replace_source_identifier=definition.identifier if _enum_text(definition.check_type) == "SERVICE" else None,
             )
-            self._record_exception("check", error, observed_at_s=now_s, identifier=definition.identifier)
+            self._record_exception("check", completed.error, observed_at_s=completed.observed_at_s, identifier=definition.identifier)
             return None
 
-        duration_ms = elapsed_ms(started_at, timer_kind)
-        self._record_result(definition, result, duration_ms, manual=manual)
+        result = completed.result
+        self._record_result(definition, result, completed.duration_ms, manual=completed.manual)
         self.state = integrate_observations(
             self.state,
             result.observations,
@@ -516,10 +700,86 @@ class RuntimeApp:
             self.inject_diagnostics(result.diagnostics, activate=False)
         return result
 
+    def _run_check(self, definition: CheckDefinition, now_s: float, manual: bool = False):
+        return self._apply_completed_check(self._execute_check_once(definition, now_s, manual=manual))
+
+    def _background_worker(self, worker_key: str):
+        while True:
+            lock_acquired = _lock_context(self.background_lock)
+            try:
+                queue = self.pending_checks_by_worker.get(worker_key)
+                if not queue:
+                    self.pending_checks_by_worker.pop(worker_key, None)
+                    self.active_workers.discard(worker_key)
+                    return
+                pending = queue.pop(0)
+                if not queue:
+                    self.pending_checks_by_worker.pop(worker_key, None)
+            finally:
+                if lock_acquired:
+                    self.background_lock.release()
+
+            completed = self._execute_check_once(
+                pending.definition,
+                pending.requested_at_s,
+                manual=pending.manual,
+            )
+
+            lock_acquired = _lock_context(self.background_lock)
+            try:
+                self.completed_checks.append(completed)
+                self.inflight_check_ids.discard(pending.definition.identifier)
+            finally:
+                if lock_acquired:
+                    self.background_lock.release()
+
+    def _queue_check(self, definition: CheckDefinition, now_s: float, manual: bool = False):
+        if not self._background_enabled():
+            self._run_check(definition, now_s, manual=manual)
+            return
+
+        worker_key = self._worker_key(definition)
+        start_worker = False
+        lock_acquired = _lock_context(self.background_lock)
+        try:
+            if definition.identifier in self.inflight_check_ids:
+                return
+            self.inflight_check_ids.add(definition.identifier)
+            self.pending_checks_by_worker.setdefault(worker_key, []).append(
+                PendingCheckRun(definition=definition, requested_at_s=now_s, manual=manual)
+            )
+            if worker_key not in self.active_workers:
+                self.active_workers.add(worker_key)
+                start_worker = True
+        finally:
+            if lock_acquired:
+                self.background_lock.release()
+
+        if start_worker and not _start_background_thread(self._background_worker, (worker_key,)):
+            lock_acquired = _lock_context(self.background_lock)
+            try:
+                self.active_workers.discard(worker_key)
+                self.inflight_check_ids.discard(definition.identifier)
+                queue = self.pending_checks_by_worker.get(worker_key, [])
+                self.pending_checks_by_worker[worker_key] = [item for item in queue if item.definition.identifier != definition.identifier]
+                if not self.pending_checks_by_worker.get(worker_key):
+                    self.pending_checks_by_worker.pop(worker_key, None)
+            finally:
+                if lock_acquired:
+                    self.background_lock.release()
+            self._run_check(definition, now_s, manual=manual)
+
+    def _drain_completed_checks(self):
+        for completed in self._pop_completed_checks():
+            self._apply_completed_check(completed)
+
     def _run_due_checks(self, now_s: float):
         # Hot path: keep metrics on every execution but only log state transitions.
-        for scheduled in due_checks(self.definitions, self.last_started_at, now_s):
-            self._run_check(scheduled.definition, now_s)
+        for scheduled in due_checks(self.definitions, self._copy_last_started_at(), now_s):
+            self._queue_check(scheduled.definition, now_s)
+
+    def prime_due_checks(self, now_s: float):
+        self._run_due_checks(now_s)
 
     def run_all_checks(self, now_s: float | None = None):
         observed_at_s = now_s if now_s is not None else (self.current_time_s() or 0.0)
@@ -530,6 +790,17 @@ class RuntimeApp:
 
     def reset_runtime_state(self):
         self.last_started_at.clear()
+        self.last_completed_at_by_host.clear()
+        if self._background_enabled():
+            lock_acquired = _lock_context(self.background_lock)
+            try:
+                self.pending_checks_by_worker.clear()
+                self.active_workers.clear()
+                self.inflight_check_ids.clear()
+                self.completed_checks.clear()
+            finally:
+                if lock_acquired:
+                    self.background_lock.release()
         self.state = AppState(
             checks=tuple(
                 CheckRuntime(
@@ -588,6 +859,26 @@ class RuntimeApp:
         self._capture_memory_snapshot("reconnect", now_s=self.current_time_s())
         return self.get_network_state_snapshot()
 
+    def connect_network(self, activate_diagnostics: bool = False):
+        if self.wifi_connector is None or self.config is None:
+            raise RuntimeError("wifi connect is not configured")
+
+        started_at, timer_kind = start_timer()
+        try:
+            diagnostics = self.wifi_connector(self.config)
+        except Exception as error:
+            self._record_exception("network", error, observed_at_s=self.current_time_s())
+            raise
+
+        duration_ms = elapsed_ms(started_at, timer_kind)
+        last_error = ""
+        if diagnostics:
+            last_error = "; ".join(getattr(item, "message", "") for item in diagnostics if getattr(item, "message", ""))
+            self.inject_diagnostics(diagnostics, activate=activate_diagnostics)
+        self._refresh_network_state(last_error=last_error, connect_duration_ms=duration_ms, reconnect=False)
+        self._capture_memory_snapshot("connect", now_s=self.current_time_s())
+        return self.get_network_state_snapshot()
+
     def _apply_shift(self, now_s: float):
         offset = self.shift_controller.offset_for_elapsed(now_s)
         if offset != self.state.shift_offset:
@@ -619,8 +910,10 @@ class RuntimeApp:
                 events = tuple(self.button_reader.poll())
 
         self._apply_button_events(events)
+        self._drain_completed_checks()
         self._maybe_reconnect_network(now_s)
         self._run_due_checks(now_s)
+        self._drain_completed_checks()
         self._apply_page_rotation(now_s)
         self._apply_shift(now_s)
 

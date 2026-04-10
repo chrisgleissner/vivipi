@@ -1,6 +1,6 @@
 # ViviPi Specification
 
-Version: 1.4
+Version: 1.5
 Status: Active
 
 A minimal, calm, glanceable monitoring system for supported Pico display modules while preserving deterministic fixed-width text rendering.
@@ -331,6 +331,16 @@ Timeout is treated as FAIL.
 
 [VIVIPI-CHECK-TIME-001]
 
+Probe pacing against the same device MUST be configurable and deterministic.
+
+- Same-device identity is derived from the normalized target host name or IP address.
+- Checks against different devices MAY run concurrently.
+- Concurrent probes against the same device MUST default to disabled.
+- The minimum time between the end of one probe and the start of the next probe against the same device MUST default to 250ms.
+- Same-device concurrency and backoff MUST both be configurable from settings.
+
+[VIVIPI-CHECK-SCHED-001]
+
 Probe transport failures MUST use bounded retries with deterministic backoff and stable failure classification.
 
 - Applies to direct HTTP, FTP, and TELNET transport failures and to Wi-Fi connection attempts.
@@ -506,7 +516,7 @@ System MUST include:
 
 ## 16. Boot Logo
 
-On device startup, the display MUST show a boot logo for at least 5 seconds.
+On device startup, the display MUST show a boot logo for at least 6 seconds by default.
 
 Layout:
 
@@ -526,7 +536,12 @@ Font sizing:
 - Version font ≤ 2/3 of title font
 - All sizes clamped to the valid font range (6–32 pixels)
 
-The boot logo is shown before WiFi connection and application initialization.
+The boot logo is shown before the first overview frame replaces it.
+
+- WiFi connection and initial probe scheduling MAY begin while the boot logo remains visible.
+- The first post-logo overview frame SHOULD include any completed initial probe results instead of an all-unknown placeholder view.
+
+Boot duration MUST be configurable from settings.
 
 [VIVIPI-BOOT-001]
 

@@ -1,5 +1,7 @@
-from vivipi.core.models import AppState, CheckDefinition, CheckType
-from vivipi.core.scheduler import due_checks, next_due_at, render_reason
+import pytest
+
+from vivipi.core.models import AppState, CheckDefinition, CheckType, ProbeSchedulingPolicy
+from vivipi.core.scheduler import due_checks, next_due_at, probe_backoff_remaining_s, probe_host_key, render_reason
 
 
 def make_definition(identifier: str, interval_s: int = 15) -> CheckDefinition:
@@ -57,3 +59,31 @@ def test_due_checks_orders_by_due_time_then_identifier():
     )
 
     assert [item.definition.identifier for item in due] == ["api", "backup"]
+
+
+def test_probe_host_key_extracts_normalized_host_from_http_and_socket_targets():
+    http_definition = CheckDefinition(
+        identifier="api",
+        name="Api",
+        check_type=CheckType.HTTP,
+        target="http://Example.COM:8080/health",
+        interval_s=30,
+        timeout_s=18,
+    )
+
+    assert probe_host_key(make_definition("router")) == "127.0.0.1"
+    assert probe_host_key(http_definition) == "example.com"
+
+
+def test_probe_backoff_remaining_s_respects_same_host_policy():
+    definition = make_definition("router")
+    policy = ProbeSchedulingPolicy(allow_concurrent_same_host=False, same_host_backoff_ms=250)
+
+    assert probe_backoff_remaining_s(definition, {"127.0.0.1": 10.0}, now_s=10.1, policy=policy) == pytest.approx(0.15)
+    assert probe_backoff_remaining_s(definition, {"127.0.0.1": 10.0}, now_s=10.3, policy=policy) == 0.0
+    assert probe_backoff_remaining_s(
+        definition,
+        {"127.0.0.1": 10.0},
+        now_s=10.1,
+        policy=ProbeSchedulingPolicy(allow_concurrent_same_host=True, same_host_backoff_ms=250),
+    ) == 0.0

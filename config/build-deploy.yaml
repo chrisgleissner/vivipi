@@ -16,6 +16,7 @@ device:
     columns: 1
     column_separator: " "
     page_interval: 15s
+    boot_logo_duration: 6s
 
 wifi:
   ssid: ${VIVIPI_WIFI_SSID}
@@ -24,5 +25,9 @@ wifi:
 service:
   base_url: ${VIVIPI_SERVICE_BASE_URL}
   default_prefix: adb
+
+probe_schedule:
+  allow_concurrent_same_host: false
+  same_host_backoff_ms: 250
 
 checks_config: checks.yaml

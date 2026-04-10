@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
 import firmware.runtime as firmware_runtime
-from vivipi.core.models import DiagnosticEvent, DisplayMode, TransitionThresholds
+from vivipi.core.models import DiagnosticEvent, DisplayMode, ProbeSchedulingPolicy, TransitionThresholds
 
 
 class FakeTime:
@@ -144,6 +144,9 @@ def test_build_runtime_app_uses_injected_factories_and_defers_wifi_startup():
             overview_columns,
             column_separator,
             transition_thresholds,
+            probe_scheduling,
+            sleep_ms,
+            probe_time_provider,
             version="",
             build_time="",
         ):
@@ -159,6 +162,9 @@ def test_build_runtime_app_uses_injected_factories_and_defers_wifi_startup():
             called["overview_columns"] = overview_columns
             called["column_separator"] = column_separator
             called["transition_thresholds"] = transition_thresholds
+            called["probe_scheduling"] = probe_scheduling
+            called["sleep_ms"] = sleep_ms
+            called["probe_time_provider"] = probe_time_provider
             called["version"] = version
             called["build_time"] = build_time
             called["diagnostics"] = None
@@ -229,12 +235,14 @@ def test_build_runtime_app_uses_injected_factories_and_defers_wifi_startup():
         failures_to_failed=1,
         successes_to_recover=1,
     )
+    assert called["probe_scheduling"] == ProbeSchedulingPolicy()
     assert called["version"] == "1.2.3"
     assert called["build_time"] == "2025-04-05T12:00Z"
     assert called["diagnostics"] is None
     assert called["network_refreshes"] == [{}]
     assert wifi_calls == []
     assert sleep_calls == []
+    assert app.boot_logo_until_s == 6.0
 
 
 def test_build_runtime_app_does_not_prime_initial_checks_during_boot():
@@ -494,23 +502,27 @@ def test_run_loop_ticks_and_sleeps_with_injected_clock():
     assert sleeps == [50, 50, 50]
 
 
-def test_run_forever_builds_app_then_runs_loop(monkeypatch):
+def test_run_forever_primes_startup_work_before_boot_logo_deadline_and_enters_run_loop(monkeypatch):
     class FakeApp:
         def __init__(self):
-            self.render_calls = []
+            self.boot_logo_until_s = 18.5
             self.tick_calls = []
+            self.prime_calls = []
 
-        def render_once(self, now_s):
-            self.render_calls.append(now_s)
+        def prime_due_checks(self, now_s):
+            self.prime_calls.append(now_s)
 
         def tick(self, now_s, button_events=None):
             self.tick_calls.append((now_s, button_events))
 
     fake_app = FakeApp()
     called = {}
+    sleep_calls = []
+    now_values = iter([12.5, 12.5, 18.5])
 
     monkeypatch.setattr(firmware_runtime, "build_runtime_app_from_path", lambda path: fake_app)
-    monkeypatch.setattr(firmware_runtime, "_now_s", lambda: 12.5)
+    monkeypatch.setattr(firmware_runtime, "_now_s", lambda: next(now_values))
+    monkeypatch.setattr(firmware_runtime, "_sleep_ms", lambda value: sleep_calls.append(value))
     monkeypatch.setattr(
         firmware_runtime,
         "run_loop",
@@ -520,41 +532,18 @@ def test_run_forever_builds_app_then_runs_loop(monkeypatch):
     firmware_runtime.run_forever(poll_interval_ms=75)
 
     assert called == {"app": fake_app, "poll_interval_ms": 75}
-    assert fake_app.render_calls == [12.5]
-    assert fake_app.tick_calls == [(12.5, ())]
+    assert sleep_calls == [6000]
+    assert fake_app.prime_calls == [12.5]
+    assert fake_app.tick_calls == [(18.5, ())]
 
 
-def test_run_startup_tick_reconnects_without_activating_diagnostics_and_renders_after_each_check():
+def test_run_startup_tick_uses_prime_due_checks_when_available():
     calls = []
 
     class FakeApp:
-        def __init__(self):
-            self.definitions = ("first", "second")
-
-        def reconnect_network(self, activate_diagnostics=True):
-            calls.append(("reconnect", activate_diagnostics))
-
-        def _run_check(self, definition, now_s):
-            calls.append(("check", definition, now_s))
-
-        def render_once(self, now_s):
-            calls.append(("render", now_s))
-
-        def _apply_page_rotation(self, now_s):
-            calls.append(("page", now_s))
-
-        def _apply_shift(self, now_s):
-            calls.append(("shift", now_s))
+        def prime_due_checks(self, now_s):
+            calls.append(("prime", now_s))
 
     firmware_runtime._run_startup_tick(FakeApp(), 12.5)
 
-    assert calls == [
-        ("reconnect", False),
-        ("check", "first", 12.5),
-        ("render", 12.5),
-        ("check", "second", 12.5),
-        ("render", 12.5),
-        ("page", 12.5),
-        ("shift", 12.5),
-        ("render", 12.5),
-    ]
+    assert calls == [("prime", 12.5)]
