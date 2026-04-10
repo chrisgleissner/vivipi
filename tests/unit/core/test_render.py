@@ -29,7 +29,7 @@ def test_idle_mode_is_centered_and_uses_the_full_grid():
     assert frame.inverted_row is None
 
 
-def test_overview_paginates_and_inverts_the_selected_row():
+def test_overview_paginates_without_row_inversion():
     checks = tuple(
         make_check(identifier=name.casefold(), name=name)
         for name in ("Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel", "India")
@@ -38,7 +38,7 @@ def test_overview_paginates_and_inverts_the_selected_row():
 
     frame = render_frame(state)
 
-    assert frame.inverted_row == 0
+    assert frame.inverted_row is None
     assert frame.rows[0].startswith("India")
     assert all(len(row) == 16 for row in frame.rows)
 
@@ -54,12 +54,13 @@ def test_render_frame_respects_dynamic_grid_dimensions():
     assert frame.rows[2].startswith("Charlie")
 
 
-def test_overview_normalizes_selection_when_checks_exist():
+def test_overview_selection_does_not_invert_rows():
     state = AppState(checks=(make_check("router", "Router"),), selected_id=None)
 
     frame = render_frame(state)
 
-    assert frame.inverted_row == 0
+    assert frame.inverted_row is None
+    assert frame.rows[0].startswith("Router")
 
 
 def test_overview_displays_unknown_status_as_question_mark():
@@ -81,7 +82,7 @@ def test_standard_single_column_overview_keeps_legacy_output_exactly():
     frame = render_frame(state)
 
     assert frame.rows[0] == "Router      FAIL"
-    assert frame.inverted_row == 0
+    assert frame.inverted_row is None
     assert frame.inverted_spans == ()
     assert frame.failure_spans == (InvertedSpan(row_index=0, start_column=12, end_column=16),)
 

@@ -1,3 +1,6 @@
+import sys
+
+
 MISSING = object()
 
 
@@ -13,16 +16,82 @@ def field(*, default=MISSING, default_factory=None, init=True, repr=True):
     return _Field(default=default, default_factory=default_factory, init=init, repr=repr)
 
 
+def _is_identifier(value):
+    if not value:
+        return False
+    first = value[0]
+    if first != "_" and not ("A" <= first <= "Z" or "a" <= first <= "z"):
+        return False
+    for character in value[1:]:
+        if character == "_":
+            continue
+        if "A" <= character <= "Z" or "a" <= character <= "z" or "0" <= character <= "9":
+            continue
+        return False
+    return True
+
+
+def _field_names_from_source(cls):
+    module = sys.modules.get(getattr(cls, "__module__", ""))
+    module_path = getattr(module, "__file__", None)
+    if not module_path:
+        return ()
+
+    try:
+        with open(module_path, "r", encoding="utf-8") as handle:
+            lines = handle.readlines()
+    except OSError:
+        return ()
+
+    class_name = cls.__name__
+    class_indent = None
+    body_indent = None
+    within_class = False
+    field_names = []
+
+    for line in lines:
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip())
+
+        if not within_class:
+            if stripped.startswith("class %s" % class_name):
+                within_class = True
+                class_indent = indent
+            continue
+
+        if stripped and indent <= class_indent:
+            break
+        if not stripped:
+            continue
+        if body_indent is None and indent > class_indent:
+            body_indent = indent
+        if indent != body_indent:
+            continue
+        if stripped.startswith("def ") or stripped.startswith("class ") or stripped.startswith("@"):
+            continue
+
+        separator = stripped.find(":")
+        if separator <= 0:
+            continue
+
+        name = stripped[:separator].strip()
+        if _is_identifier(name):
+            field_names.append(name)
+
+    return tuple(field_names)
+
+
 def _field_names(cls):
     annotations = getattr(cls, "__annotations__", {})
-    return tuple(annotations.keys())
+    if annotations:
+        return tuple(annotations.keys())
+    return _field_names_from_source(cls)
 
 
 def dataclass(_cls=None, *, frozen=False):
     def wrap(cls):
-        annotations = getattr(cls, "__annotations__", {})
         field_specs = []
-        for name in annotations:
+        for name in _field_names(cls):
             raw_value = getattr(cls, name, MISSING)
             if isinstance(raw_value, _Field):
                 spec = raw_value

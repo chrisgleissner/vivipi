@@ -128,14 +128,6 @@ def _safe_build_definitions(definitions_builder, config):
         return (), (_boot_diagnostic("CONF", "checks bad"),), (("config", error),)
 
 
-def _prime_initial_checks(app, definitions, now_s):
-    if not definitions:
-        return
-    if not hasattr(app, "run_all_checks"):
-        return
-    app.run_all_checks(now_s=now_s)
-
-
 def _safe_build_button_reader(button_reader_factory, buttons_config, input_controller):
     try:
         return button_reader_factory(buttons_config, input_controller=input_controller), (), ()
@@ -328,10 +320,9 @@ def build_runtime_app(
     if all_diagnostics:
         app.inject_diagnostics(all_diagnostics, activate=True)
 
-    prime_now_s = now_provider()
-    _prime_initial_checks(app, definitions, prime_now_s)
+    current_now_s = now_provider()
 
-    elapsed_s = prime_now_s - boot_start_s
+    elapsed_s = current_now_s - boot_start_s
     remaining_ms = max(0, int((boot_logo_min_s - elapsed_s) * 1000))
     if remaining_ms > 0:
         sleep_ms(remaining_ms)
@@ -343,6 +334,33 @@ def build_runtime_app(
 def build_runtime_app_from_path(config_path="config.json", **kwargs):
     config, boot_diagnostics, boot_errors = load_config_with_fallback(config_path)
     return build_runtime_app(config, boot_diagnostics=boot_diagnostics, boot_errors=boot_errors, **kwargs)
+
+
+def _render_initial_frame(app, now_s):
+    if hasattr(app, "render_once"):
+        try:
+            app.render_once(now_s)
+        except Exception as error:
+            if hasattr(app, "_record_exception"):
+                app._record_exception("loop", error, observed_at_s=now_s)
+        return
+    if not hasattr(app, "tick"):
+        return
+    try:
+        app.tick(now_s, button_events=())
+    except Exception as error:
+        if hasattr(app, "_record_exception"):
+            app._record_exception("loop", error, observed_at_s=now_s)
+
+
+def _run_startup_tick(app, now_s):
+    if not hasattr(app, "tick"):
+        return
+    try:
+        app.tick(now_s, button_events=())
+    except Exception as error:
+        if hasattr(app, "_record_exception"):
+            app._record_exception("loop", error, observed_at_s=now_s)
 
 
 def run_loop(app, poll_interval_ms=50, iterations=None, now_provider=_now_s, sleep_ms=_sleep_ms):
@@ -362,4 +380,7 @@ def run_loop(app, poll_interval_ms=50, iterations=None, now_provider=_now_s, sle
 
 def run_forever(config_path="config.json", poll_interval_ms=50):
     app = build_runtime_app_from_path(config_path)
+    startup_now_s = _now_s()
+    _render_initial_frame(app, startup_now_s)
+    _run_startup_tick(app, startup_now_s)
     run_loop(app, poll_interval_ms=poll_interval_ms)

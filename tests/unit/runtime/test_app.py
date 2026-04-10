@@ -64,6 +64,18 @@ def test_runtime_app_executes_due_checks_and_updates_state():
     assert display.frames[-1].rows[0].startswith("Router")
 
 
+def test_runtime_app_starts_with_unknown_rows_before_the_first_check_runs():
+    display = FakeDisplay()
+    definition = make_definition("router")
+    app = RuntimeApp(definitions=(definition,), executor=lambda definition, now_s: None, display=display)
+
+    reason = app.render_once(0.0)
+
+    assert reason == "bootstrap"
+    assert display.frames[-1].rows[0].startswith("Router")
+    assert display.frames[-1].rows[0].endswith("?")
+
+
 def test_runtime_app_renders_when_shift_changes_without_other_state_changes():
     display = FakeDisplay()
     app = RuntimeApp(definitions=(), executor=lambda definition, now_s: None, display=display)

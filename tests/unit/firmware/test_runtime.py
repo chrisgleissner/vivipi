@@ -213,7 +213,7 @@ def test_build_runtime_app_uses_injected_factories_and_records_wifi_diagnostics(
     assert called["diagnostics"] == (((DiagnosticEvent(code="WIFI", message="connected"),)), True)
 
 
-def test_build_runtime_app_primes_initial_checks_before_entering_main_loop():
+def test_build_runtime_app_does_not_prime_initial_checks_during_boot():
     called = {}
     definitions = (object(),)
 
@@ -249,7 +249,7 @@ def test_build_runtime_app_primes_initial_checks_before_entering_main_loop():
         sleep_ms=lambda ms: None,
     )
 
-    assert called["prime_now_s"] == 1.0
+    assert called["prime_now_s"] is None
 
 
 def test_build_runtime_app_falls_back_to_default_display_when_primary_display_init_fails():
@@ -511,10 +511,22 @@ def test_run_loop_ticks_and_sleeps_with_injected_clock():
 
 
 def test_run_forever_builds_app_then_runs_loop(monkeypatch):
-    fake_app = object()
+    class FakeApp:
+        def __init__(self):
+            self.render_calls = []
+            self.tick_calls = []
+
+        def render_once(self, now_s):
+            self.render_calls.append(now_s)
+
+        def tick(self, now_s, button_events=None):
+            self.tick_calls.append((now_s, button_events))
+
+    fake_app = FakeApp()
     called = {}
 
     monkeypatch.setattr(firmware_runtime, "build_runtime_app_from_path", lambda path: fake_app)
+    monkeypatch.setattr(firmware_runtime, "_now_s", lambda: 12.5)
     monkeypatch.setattr(
         firmware_runtime,
         "run_loop",
@@ -524,3 +536,5 @@ def test_run_forever_builds_app_then_runs_loop(monkeypatch):
     firmware_runtime.run_forever(poll_interval_ms=75)
 
     assert called == {"app": fake_app, "poll_interval_ms": 75}
+    assert fake_app.render_calls == [12.5]
+    assert fake_app.tick_calls == [(12.5, ())]

@@ -3,16 +3,21 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 
 from vivipi.core.input import InputController
+from vivipi.core.models import CheckRuntime
 from vivipi.core.render import render_frame
 from vivipi.core.scheduler import due_checks, render_reason
 from vivipi.core.shift import PixelShiftController
 from vivipi.core.state import integrate_observations, page_count, record_diagnostic_events, set_page_index
 from vivipi.core.logging import LogLevel, StructuredLogger, log_field
-from vivipi.core.models import AppMode, AppState, CheckDefinition, DiagnosticEvent, DisplayMode
+from vivipi.core.models import AppMode, AppState, CheckDefinition, DiagnosticEvent, DisplayMode, Status
 from vivipi.core.ring_buffer import RingBuffer
 from vivipi.core.state import overview_checks
 from vivipi.runtime.metrics import MetricsStore, elapsed_ms, start_timer
 from vivipi.runtime.state import make_error_record
+
+
+def _enum_text(value) -> str:
+    return str(getattr(value, "value", value))
 
 
 @dataclass(frozen=True)
@@ -50,6 +55,13 @@ class RuntimeApp:
         self.page_interval_s = page_interval_s
         self.last_started_at: dict[str, float] = {}
         self.state = AppState(
+            checks=tuple(
+                CheckRuntime(
+                    identifier=definition.identifier,
+                    name=definition.name,
+                )
+                for definition in self.definitions
+            ),
             page_size=page_size,
             row_width=row_width,
             display_mode=display_mode,
@@ -85,7 +97,7 @@ class RuntimeApp:
             definition.identifier: {
                 "id": definition.identifier,
                 "name": definition.name,
-                "status": "?",
+                "status": _enum_text(Status.UNKNOWN),
                 "details": "pending",
                 "latency_ms": None,
                 "last_update_s": None,
@@ -98,6 +110,21 @@ class RuntimeApp:
         self.summary_log_interval = 10
         self.display_failure_count = 0
         self.display_retry_at_s: float | None = None
+
+    def render_once(self, now_s: float) -> str:
+        reason = render_reason(self.last_rendered_state, self.state)
+        if reason == "none":
+            return reason
+        if self.display_retry_at_s is not None and now_s < self.display_retry_at_s:
+            return reason
+        try:
+            self.display.draw_frame(render_frame(self.state, now_s=now_s))
+        except Exception as error:
+            self._record_display_failure(error, now_s)
+        else:
+            self._reset_display_failure_state()
+            self.last_rendered_state = self.state
+        return reason
 
     def configure_observability(
         self,
@@ -158,7 +185,7 @@ class RuntimeApp:
             current = dict(self.registered_results[definition.identifier])
             current.update(
                 {
-                    "check_type": str(definition.check_type),
+                    "check_type": _enum_text(definition.check_type),
                     "target": definition.target,
                     "interval_s": definition.interval_s,
                     "timeout_s": definition.timeout_s,
@@ -172,7 +199,7 @@ class RuntimeApp:
             {
                 "id": check.identifier,
                 "name": check.name,
-                "status": str(check.status),
+                "status": _enum_text(check.status),
                 "details": check.details,
                 "latency_ms": check.latency_ms,
                 "last_update_s": check.last_update_s,
@@ -276,10 +303,10 @@ class RuntimeApp:
             primary = result.observations[0]
 
         if primary is not None:
-            status = str(primary.status)
+            status = _enum_text(primary.status)
             details = primary.details or details
             latency_ms = primary.latency_ms
-        elif str(definition.check_type) == "SERVICE":
+        elif _enum_text(definition.check_type) == "SERVICE":
             status = "OK"
             details = f"loaded {len(result.observations)} checks"
 
@@ -454,6 +481,13 @@ class RuntimeApp:
     def reset_runtime_state(self):
         self.last_started_at.clear()
         self.state = AppState(
+            checks=tuple(
+                CheckRuntime(
+                    identifier=definition.identifier,
+                    name=definition.name,
+                )
+                for definition in self.definitions
+            ),
             page_size=self.state.page_size,
             row_width=self.state.row_width,
             display_mode=self.state.display_mode,
@@ -474,7 +508,7 @@ class RuntimeApp:
             self.registered_results[definition.identifier] = {
                 "id": definition.identifier,
                 "name": definition.name,
-                "status": "?",
+                "status": _enum_text(Status.UNKNOWN),
                 "details": "pending",
                 "latency_ms": None,
                 "last_update_s": None,
@@ -539,16 +573,7 @@ class RuntimeApp:
         self._apply_page_rotation(now_s)
         self._apply_shift(now_s)
 
-        reason = render_reason(self.last_rendered_state, self.state)
-        if reason != "none":
-            if self.display_retry_at_s is None or now_s >= self.display_retry_at_s:
-                try:
-                    self.display.draw_frame(render_frame(self.state, now_s=now_s))
-                except Exception as error:
-                    self._record_display_failure(error, now_s)
-                else:
-                    self._reset_display_failure_state()
-                    self.last_rendered_state = self.state
+        reason = self.render_once(now_s)
 
         self.metrics.record_cycle(elapsed_ms(cycle_started, cycle_timer_kind))
         self._maybe_capture_memory_snapshot(now_s)
