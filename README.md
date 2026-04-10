@@ -1,5 +1,7 @@
 # ViviPi
 
+See your device health at a glance.
+
 [![Build](https://github.com/chrisgleissner/vivipi/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/chrisgleissner/vivipi/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/chrisgleissner/vivipi/graph/badge.svg)](https://codecov.io/gh/chrisgleissner/vivipi)
 [![License: GPL v3](https://img.shields.io/badge/License-GPL%20v3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0.en.html)
@@ -8,16 +10,19 @@
 
 ViviPi (pronounced "VEE-vee-pie", from the Latin *viv-* in *vivere*, "to live") is a minimal, glanceable monitoring system for Raspberry Pi Pico display modules. The default target is a Pico 2W with a 128x64 SH1107 OLED, but the runtime and build pipeline also support Waveshare Pico OLED, LCD, and e-paper modules.
 
-The project is intentionally narrow:
-
-- deterministic fixed-width rendering across supported Pico OLED, LCD, and e-paper modules
-- deterministic scheduling and execution for `PING`, `HTTP`, `FTP`, `TELNET`, and `SERVICE`
-- one `./build` entrypoint for install, lint, test, coverage, packaging, deploy, and service hosting
-
-Behavioral requirements live in [docs/spec.md](docs/spec.md). Requirement-to-test coverage lives in [docs/spec-traceability.md](docs/spec-traceability.md).
-
 > [!NOTE]
 > This project is under active development. Some documented features may not yet be fully functional.
+
+## Features
+
+- Supports Pico OLED, LCD, and e-paper modules.
+- Supports `PING`, `HTTP`, `FTP`, `TELNET`, and `SERVICE` health checks.
+- Configurable back-off and scheduling policies to avoid overwhelming targets.
+- Easy build and deployment via a one-stop shop `build` command.
+
+![Boot Logo](./docs/img/vivipi_boot_logo.jpg)
+![Checks all OK](./docs/img/vivipi_checks_all_ok.png)
+![Checks partially OK](./docs/img/vivipi_checks_partially_ok.png)
 
 ## System Architecture
 
@@ -57,12 +62,6 @@ flowchart TB
 ```
 
 Direct probes run from the Pico itself. `SERVICE` is the extension point for any kind of check driven not by the Pico, but by another device.
-
-## Operational Safety
-
-- Missing or malformed device runtime config no longer aborts startup; the firmware boots with a bounded fallback config and surfaces diagnostics when a display path is available.
-- If a configured display backend fails to initialize, firmware falls back to the default SH1107 OLED path when possible. If no backend can be started, the runtime stays headless and remains inspectable from the REPL surfaces.
-- Direct transport probes classify transient failures as `timeout`, `dns`, `refused`, `network`, `reset`, or `io`, and use bounded retry with deterministic backoff before reporting failure.
 
 ### Probe Reference
 
