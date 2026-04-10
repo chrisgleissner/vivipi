@@ -228,7 +228,7 @@ def test_runtime_app_rotates_over_filtered_compact_pages_only():
     assert display.frames[-1].rows[0].startswith("Echo")
 
 
-def test_runtime_app_applies_button_events_without_leaving_overview_for_check_diagnostics():
+def test_runtime_app_maps_button_b_to_refresh_without_leaving_overview():
     display = FakeDisplay()
     definition = make_definition("router")
 
@@ -257,8 +257,9 @@ def test_runtime_app_applies_button_events_without_leaving_overview_for_check_di
 
     next_reason = app.tick(1.0, button_events=(ButtonEvent(button=Button.B, held_ms=30),))
 
-    assert next_reason == "state"
-    assert app.state.mode.value == "detail"
+    assert next_reason == "overlay"
+    assert app.state.mode.value == "overview"
+    assert display.frames[-1].rows[-1].strip() == "REFRESH"
 
 
 def test_runtime_app_validates_page_interval_and_uses_button_reader_when_present():
@@ -275,7 +276,17 @@ def test_runtime_app_validates_page_interval_and_uses_button_reader_when_present
     reason = app.tick(0.0)
 
     assert reason == "bootstrap"
-    assert app.state.mode.value == "detail"
+    assert display.frames[-1].rows[-1].strip() == "REFRESH"
+
+
+def test_runtime_app_accepts_plain_string_button_events():
+    display = FakeDisplay()
+    app = RuntimeApp(definitions=(), executor=lambda definition, now_s: None, display=display)
+
+    reason = app.tick(0.0, button_events=(ButtonEvent(button="B", held_ms=30),))
+
+    assert reason == "bootstrap"
+    assert display.frames[-1].rows[-1].strip() == "REFRESH"
 
 
 def test_runtime_app_injects_diagnostics_without_forcing_mode_and_skips_rotation_when_disabled():
@@ -424,3 +435,52 @@ def test_runtime_app_can_disable_same_host_probe_backoff():
         app.tick(0.05)
 
     assert sleep_calls == []
+
+
+def test_runtime_app_spaces_same_host_requests_from_previous_probe_completion():
+    display = FakeDisplay()
+    definitions = (
+        CheckDefinition(identifier="ftp", name="Ftp", check_type=CheckType.FTP, target="router.local"),
+        CheckDefinition(identifier="http", name="Http", check_type=CheckType.HTTP, target="http://router.local/health"),
+    )
+    sleep_calls = []
+    probe_clock = {"now": 100.0}
+    started = []
+
+    def sleep_ms(value):
+        sleep_calls.append(value)
+        probe_clock["now"] += value / 1000.0
+
+    def executor(definition, now_s):
+        started.append((definition.identifier, probe_clock["now"]))
+        probe_clock["now"] += 0.1
+        return CheckExecutionResult(
+            source_identifier=definition.identifier,
+            observations=(
+                CheckObservation(
+                    identifier=definition.identifier,
+                    name=definition.name,
+                    status=Status.OK,
+                    observed_at_s=now_s,
+                ),
+            ),
+        )
+
+    app = RuntimeApp(
+        definitions=definitions,
+        executor=executor,
+        display=display,
+        page_interval_s=0,
+        sleep_ms=sleep_ms,
+        probe_time_provider=lambda: probe_clock["now"],
+    )
+
+    app.tick(0.0)
+    for _ in range(20):
+        if len(started) == 2:
+            break
+        app.tick(0.05)
+
+    assert [item[0] for item in started] == ["ftp", "http"]
+    assert started[1][1] - started[0][1] == pytest.approx(0.35)
+    assert sleep_calls == [250]

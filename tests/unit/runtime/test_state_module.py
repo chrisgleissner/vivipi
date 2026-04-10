@@ -56,3 +56,16 @@ def test_format_exception_trace_covers_sys_print_exception_and_traceback_fallbac
     assert fallback
     assert record["type"] == "RuntimeError"
     assert record["message"] == "RuntimeError"
+
+
+def test_format_exception_trace_falls_back_when_sys_print_exception_rejects_writer(monkeypatch):
+    class FakeSys:
+        @staticmethod
+        def print_exception(exception, writer):
+            raise OSError("stream operation not supported")
+
+    monkeypatch.setattr(runtime_state, "sys", FakeSys)
+    traced = runtime_state.format_exception_trace(RuntimeError("boom"), line_limit=24, max_lines=2)
+
+    assert traced
+    assert traced[0] == "RuntimeError: boom"

@@ -197,6 +197,7 @@ def test_healthy_checks_emit_sampled_summary_logs_on_cadence_boundary():
 
     app = RuntimeApp(definitions=(definition,), executor=executor, display=FakeDisplay(), page_interval_s=0)
     app.configure_observability(config={"wifi": {"ssid": "Office"}}, now_provider=lambda: 1.0)
+    app.background_workers_enabled = False
 
     for index in range(10):
         app.last_started_at.clear()
@@ -226,6 +227,7 @@ def test_failed_health_checks_emit_extra_detail_logs_every_time():
 
     app = RuntimeApp(definitions=(definition,), executor=executor, display=FakeDisplay(), page_interval_s=0)
     app.configure_observability(config={"wifi": {"ssid": "Office"}}, now_provider=lambda: 1.0)
+    app.background_workers_enabled = False
 
     app.tick(0.0)
     app.last_started_at.clear()
@@ -338,6 +340,7 @@ def test_runtime_app_reconnects_before_running_due_checks_when_network_is_down()
             "ip_address": "192.0.2.20" if connected["value"] else None,
         },
     )
+    app.background_workers_enabled = False
 
     app.tick(0.0)
 

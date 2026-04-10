@@ -179,6 +179,34 @@ def test_execute_check_maps_ftp_and_telnet_probe_results():
     assert telnet_result.observations[0].details == "login failed"
 
 
+def test_execute_check_passes_http_password_to_runner():
+    definition = CheckDefinition(
+        identifier="u64-rest",
+        name="U64 REST",
+        check_type=CheckType.HTTP,
+        target="http://192.168.1.13/v1/version",
+        interval_s=15,
+        timeout_s=10,
+        password="secret",
+    )
+    calls = []
+
+    result = execute_check(
+        definition,
+        observed_at_s=12.0,
+        ping_runner=None,
+        http_runner=lambda method, target, timeout_s, username, password: (
+            calls.append((method, target, timeout_s, username, password))
+            or HttpResponseResult(status_code=200, details="HTTP 200", latency_ms=14.0)
+        ),
+        ftp_runner=None,
+        telnet_runner=None,
+    )
+
+    assert calls == [("GET", "http://192.168.1.13/v1/version", 10, None, "secret")]
+    assert result.observations[0].status == Status.OK
+
+
 def test_execute_check_reports_ftp_and_telnet_executor_failures_via_diagnostics():
     ftp_definition = CheckDefinition(
         identifier="nas-ftp",

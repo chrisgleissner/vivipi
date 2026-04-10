@@ -91,8 +91,8 @@ Direct probes run from the Pico itself. `SERVICE` is the extension point for any
 | CS | GP9 |
 | DC | GP8 |
 | RST | GP12 |
-| BTN A | GP14 |
-| BTN B | GP15 |
+| BTN A | GP15 |
+| BTN B | GP17 |
 
 ## Quick Start
 
@@ -305,8 +305,8 @@ If `VIVIPI_SERVICE_BASE_URL` is omitted, build-time filtering drops `SERVICE` ch
 | `device.micropython_port` | `auto` or path-like string | `auto` | Default device selector for `./build deploy`; `auto` picks the first connected Pico |
 | `device.micropython.version` | string | `1.25.0` | Pinned MicroPython version reference |
 | `device.micropython.download_page` | absolute URL | Pico 2W download page | Included in the install manifest |
-| `device.buttons.a` | GPIO pin name | `GP14` | Left button pin |
-| `device.buttons.b` | GPIO pin name | `GP15` | Right button pin |
+| `device.buttons.a` | GPIO pin name | `GP15` | Left button pin |
+| `device.buttons.b` | GPIO pin name | `GP17` | Right button pin |
 | `device.display.type` | see display matrix below | `waveshare-pico-oled-1.3` | Selects the backend and infers controller, SPI mode, geometry, default pins, and default page interval |
 | `device.display.mode` | `standard`, `compact` | `standard` | Overview layout mode |
 | `device.display.columns` | integer `1` to `4` | `1` | Number of overview columns; values above `1` require `device.display.mode: compact` |

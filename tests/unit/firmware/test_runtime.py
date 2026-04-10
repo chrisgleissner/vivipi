@@ -204,7 +204,7 @@ def test_build_runtime_app_uses_injected_factories_and_defers_wifi_startup():
                     "column_separator": "|",
                     "font": {"width_px": 8, "height_px": 8},
                 },
-                "buttons": {"a": "GP14", "b": "GP15"},
+                "buttons": {"a": "GP15", "b": "GP17"},
             },
         },
         input_controller_factory=lambda: input_controller,
@@ -242,7 +242,7 @@ def test_build_runtime_app_uses_injected_factories_and_defers_wifi_startup():
     assert called["network_refreshes"] == [{}]
     assert wifi_calls == []
     assert sleep_calls == []
-    assert app.boot_logo_until_s == 6.0
+    assert app.boot_logo_until_s == 2.0
 
 
 def test_build_runtime_app_does_not_prime_initial_checks_during_boot():
@@ -267,7 +267,7 @@ def test_build_runtime_app_does_not_prime_initial_checks_during_boot():
             "project": {},
             "device": {
                 "display": {"width_px": 128, "height_px": 64, "font": {"width_px": 8, "height_px": 8}},
-                "buttons": {"a": "GP14", "b": "GP15"},
+                "buttons": {"a": "GP15", "b": "GP17"},
             },
         },
         input_controller_factory=lambda: object(),
@@ -305,7 +305,7 @@ def test_build_runtime_app_falls_back_to_default_display_when_primary_display_in
             "project": {},
             "device": {
                 "display": {"type": "waveshare-pico-epaper-2.13-v4"},
-                "buttons": {"a": "GP14", "b": "GP15"},
+                "buttons": {"a": "GP15", "b": "GP17"},
             },
         },
         input_controller_factory=lambda: object(),
@@ -339,7 +339,7 @@ def test_build_runtime_app_recovers_from_invalid_definitions_and_records_boot_er
                     "height_px": 64,
                     "font": {"width_px": 8, "height_px": 8},
                 },
-                "buttons": {"a": "GP14", "b": "GP15"},
+                "buttons": {"a": "GP15", "b": "GP17"},
             },
         },
         input_controller_factory=lambda: object(),
@@ -419,7 +419,7 @@ def test_build_runtime_app_infers_geometry_and_page_interval_from_display_type()
             "project": {},
             "device": {
                 "display": {"type": "waveshare-pico-epaper-2.13-b-v4"},
-                "buttons": {"a": "GP14", "b": "GP15"},
+                "buttons": {"a": "GP15", "b": "GP17"},
             },
         },
         input_controller_factory=lambda: object(),
@@ -465,7 +465,7 @@ def test_build_runtime_app_does_not_wait_for_boot_logo_or_wifi_during_boot():
                     "height_px": 64,
                     "font": {"width_px": 8, "height_px": 8},
                 },
-                "buttons": {"a": "GP14", "b": "GP15"},
+                "buttons": {"a": "GP15", "b": "GP17"},
             },
         },
         input_controller_factory=lambda: object(),
@@ -502,7 +502,7 @@ def test_run_loop_ticks_and_sleeps_with_injected_clock():
     assert sleeps == [50, 50, 50]
 
 
-def test_run_forever_primes_startup_work_before_boot_logo_deadline_and_enters_run_loop(monkeypatch):
+def test_run_forever_primes_startup_work_without_waiting_for_boot_logo_and_enters_run_loop(monkeypatch):
     class FakeApp:
         def __init__(self):
             self.boot_logo_until_s = 18.5
@@ -517,12 +517,10 @@ def test_run_forever_primes_startup_work_before_boot_logo_deadline_and_enters_ru
 
     fake_app = FakeApp()
     called = {}
-    sleep_calls = []
-    now_values = iter([12.5, 12.5, 18.5])
+    now_values = iter([12.5])
 
     monkeypatch.setattr(firmware_runtime, "build_runtime_app_from_path", lambda path: fake_app)
     monkeypatch.setattr(firmware_runtime, "_now_s", lambda: next(now_values))
-    monkeypatch.setattr(firmware_runtime, "_sleep_ms", lambda value: sleep_calls.append(value))
     monkeypatch.setattr(
         firmware_runtime,
         "run_loop",
@@ -532,9 +530,8 @@ def test_run_forever_primes_startup_work_before_boot_logo_deadline_and_enters_ru
     firmware_runtime.run_forever(poll_interval_ms=75)
 
     assert called == {"app": fake_app, "poll_interval_ms": 75}
-    assert sleep_calls == [6000]
     assert fake_app.prime_calls == [12.5]
-    assert fake_app.tick_calls == [(18.5, ())]
+    assert fake_app.tick_calls == [(12.5, ())]
 
 
 def test_run_startup_tick_uses_prime_due_checks_when_available():

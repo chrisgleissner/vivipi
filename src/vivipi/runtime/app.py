@@ -13,13 +13,13 @@ try:
 except ImportError:  # pragma: no cover - CPython fallback
     _thread = None
 
-from vivipi.core.input import InputController
+from vivipi.core.input import Button, InputController
 from vivipi.core.models import CheckRuntime
 from vivipi.core.render import render_frame
 from vivipi.core.scheduler import due_checks, probe_backoff_remaining_s, probe_host_key, render_reason
 from vivipi.core.shift import PixelShiftController
 from vivipi.core.state import integrate_observations, page_count, record_diagnostic_events, set_page_index
-from vivipi.core.logging import LogLevel, StructuredLogger, log_field
+from vivipi.core.logging import LogLevel, StructuredLogger, bound_text, log_field
 from vivipi.core.models import (
     AppMode,
     AppState,
@@ -38,6 +38,10 @@ from vivipi.runtime.state import make_error_record
 
 
 def _enum_text(value) -> str:
+    return str(getattr(value, "value", value))
+
+
+def _button_text(value) -> str:
     return str(getattr(value, "value", value))
 
 
@@ -66,12 +70,18 @@ def _allocate_lock():
 
 def _start_background_thread(target, args) -> bool:
     if threading is not None:
-        worker = threading.Thread(target=target, args=args, daemon=True)
-        worker.start()
-        return True
+        try:
+            worker = threading.Thread(target=target, args=args, daemon=True)
+            worker.start()
+            return True
+        except Exception:
+            return False
     if _thread is not None:
-        _thread.start_new_thread(target, args)
-        return True
+        try:
+            _thread.start_new_thread(target, args)
+            return True
+        except Exception:
+            return False
     return False
 
 
@@ -208,20 +218,48 @@ class RuntimeApp:
         self.summary_log_interval = 10
         self.display_failure_count = 0
         self.display_retry_at_s: float | None = None
+        self.feedback_message = ""
+        self.feedback_until_s: float | None = None
+        self.feedback_duration_s = 1.5
+        self.last_cycle_ms: float | None = None
+        self.last_render_at_s: float | None = None
+        self.last_render_reason = "bootstrap"
+        self.last_rendered_feedback = ""
+        self.last_rendered_debug_mode = False
+        self.last_success_at = {definition.identifier: None for definition in self.definitions}
+        self.pending_status_updates: dict[str, dict[str, object]] = {}
+        self.network_operation_inflight = False
+        self.network_operation_result: dict[str, object] | None = None
 
     def render_once(self, now_s: float) -> str:
+        boot_logo_until_s = getattr(self, "boot_logo_until_s", None)
+        if self.last_rendered_state is None and boot_logo_until_s is not None and now_s < float(boot_logo_until_s):
+            return "boot-logo"
         reason = render_reason(self.last_rendered_state, self.state)
-        if reason == "none":
+        feedback_text = self._feedback_text(now_s) or ""
+        if (
+            reason == "none"
+            and self.last_rendered_debug_mode == self.debug_mode
+            and self.last_rendered_feedback == feedback_text
+        ):
             return reason
+        if reason == "none":
+            reason = "overlay"
         if self.display_retry_at_s is not None and now_s < self.display_retry_at_s:
             return reason
         try:
-            self.display.draw_frame(render_frame(self.state, now_s=now_s))
+            frame = self._decorate_frame(render_frame(self.state, now_s=now_s), now_s)
+            self.display.draw_frame(frame)
         except Exception as error:
             self._record_display_failure(error, now_s)
         else:
             self._reset_display_failure_state()
             self.last_rendered_state = self.state
+            self.last_render_at_s = now_s
+            self.last_render_reason = reason
+            self.last_rendered_debug_mode = self.debug_mode
+            self.last_rendered_feedback = feedback_text
+            self._log_display_propagation(now_s, reason)
         return reason
 
     def configure_observability(
@@ -272,6 +310,9 @@ class RuntimeApp:
         self.logger.info("CORE", "debug-mode", (log_field("enabled", self.debug_mode),))
         return self.debug_mode
 
+    def toggle_debug_mode(self) -> bool:
+        return self.set_debug_mode(not self.debug_mode)
+
     def get_logs(self, limit: int | None = None) -> tuple[str, ...]:
         return self.logger.dump(limit=limit)
 
@@ -302,6 +343,7 @@ class RuntimeApp:
                 "details": check.details,
                 "latency_ms": check.latency_ms,
                 "last_update_s": check.last_update_s,
+                "last_success_s": self.last_success_at.get(check.identifier),
                 "last_error": self.last_error_by_check.get(check.identifier),
                 "source_identifier": check.source_identifier,
             }
@@ -384,6 +426,7 @@ class RuntimeApp:
                 log_field("scope", scope),
                 log_field("id", identifier or "-"),
                 log_field("type", record["type"]),
+                log_field("msg", record["message"]),
             ),
         )
         return record
@@ -417,8 +460,12 @@ class RuntimeApp:
             "details": details,
             "latency_ms": latency_ms,
             "last_update_s": result.observations[0].observed_at_s if result.observations else None,
+            "last_success_s": self.last_success_at.get(definition.identifier),
             "last_error": None if status == "OK" else details,
         }
+        if status == "OK" and result.observations and result.observations[0].observed_at_s is not None:
+            self.last_success_at[definition.identifier] = result.observations[0].observed_at_s
+            self.registered_results[definition.identifier]["last_success_s"] = result.observations[0].observed_at_s
         self.last_error_by_check[definition.identifier] = None if status == "OK" else details
 
         run_count = self._check_log_counts.get(definition.identifier, 0) + 1
@@ -482,9 +529,98 @@ class RuntimeApp:
         if self.last_memory_snapshot_s is None or (now_s - self.last_memory_snapshot_s) >= interval_s:
             self._capture_memory_snapshot("periodic", now_s=now_s)
 
+    def _start_network_operation(self, reconnect: bool, now_s: float):
+        if self.network_operation_inflight:
+            return
+        connector = self.wifi_reconnector if reconnect else self.wifi_connector
+        if connector is None or self.config is None:
+            return
+
+        self.network_operation_inflight = True
+        self.last_network_reconnect_attempt_s = now_s
+        self.logger.info("NET", "connect-start", (log_field("reconnect", reconnect),))
+
+        def worker():
+            started_at, timer_kind = start_timer()
+            try:
+                diagnostics = connector(self.config)
+                payload = {
+                    "ok": True,
+                    "diagnostics": tuple(diagnostics),
+                    "duration_ms": elapsed_ms(started_at, timer_kind),
+                    "reconnect": reconnect,
+                }
+            except Exception as error:
+                payload = {
+                    "ok": False,
+                    "error": error,
+                    "duration_ms": elapsed_ms(started_at, timer_kind),
+                    "reconnect": reconnect,
+                }
+
+            if self._background_enabled():
+                lock_acquired = _lock_context(self.background_lock)
+                try:
+                    self.network_operation_result = payload
+                    self.network_operation_inflight = False
+                finally:
+                    if lock_acquired:
+                        self.background_lock.release()
+                return
+
+            self.network_operation_result = payload
+            self.network_operation_inflight = False
+
+        if self._background_enabled() and _start_background_thread(worker, ()):
+            return
+
+        worker()
+
+    def _drain_network_operation(self):
+        if self._background_enabled():
+            lock_acquired = _lock_context(self.background_lock)
+            try:
+                payload = self.network_operation_result
+                self.network_operation_result = None
+            finally:
+                if lock_acquired:
+                    self.background_lock.release()
+        else:
+            payload = self.network_operation_result
+            self.network_operation_result = None
+
+        if payload is None:
+            return
+
+        if not payload.get("ok"):
+            error = payload.get("error")
+            if isinstance(error, BaseException):
+                self._record_exception("network", error, observed_at_s=self.current_time_s())
+                self._refresh_network_state(
+                    last_error=str(error) or type(error).__name__,
+                    connect_duration_ms=float(payload.get("duration_ms", 0.0)),
+                    reconnect=bool(payload.get("reconnect")),
+                )
+            return
+
+        diagnostics = tuple(payload.get("diagnostics", ()))
+        duration_ms = float(payload.get("duration_ms", 0.0))
+        last_error = ""
+        if diagnostics:
+            last_error = "; ".join(getattr(item, "message", "") for item in diagnostics if getattr(item, "message", ""))
+            self.inject_diagnostics(diagnostics, activate=False)
+        self._refresh_network_state(
+            last_error=last_error,
+            connect_duration_ms=duration_ms,
+            reconnect=bool(payload.get("reconnect")),
+        )
+        self._capture_memory_snapshot("reconnect", now_s=self.current_time_s())
+
     def _maybe_reconnect_network(self, now_s: float):
         if self.config is None or (self.wifi_reconnector is None and self.wifi_connector is None):
             return
+
+        self._drain_network_operation()
 
         if self.network_state_reader is not None:
             self.network_state.update(dict(self.network_state_reader(self.config or {})))
@@ -492,15 +628,16 @@ class RuntimeApp:
         if self.network_state.get("connected"):
             return
 
+        if self.network_operation_inflight:
+            return
+
         if self.last_network_reconnect_attempt_s is not None:
             if (now_s - self.last_network_reconnect_attempt_s) < self.network_reconnect_interval_s:
                 return
 
-        self.last_network_reconnect_attempt_s = now_s
-        try:
-            self.reconnect_network(activate_diagnostics=False)
-        except Exception:
-            return
+        self._start_network_operation(reconnect=True, now_s=now_s)
+        if not self.network_operation_inflight:
+            self._drain_network_operation()
 
     def _assert_debug_invariants(self):
         if not self.debug_mode:
@@ -549,10 +686,32 @@ class RuntimeApp:
         self.state = record_diagnostic_events(self.state, events, activate=activate)
 
     def _apply_button_events(self, button_events: tuple[ButtonEvent, ...]):
-        state = self.state
+        now_s = self.current_time_s() or self._probe_now_s()
         for event in button_events:
-            state = self.input_controller.apply(state, event.button, held_ms=event.held_ms)
-        self.state = state
+            if event.button == Button.A:
+                enabled = self.toggle_debug_mode()
+                self._set_feedback("DBG ON" if enabled else "DBG OFF", now_s)
+                self.logger.info(
+                    "BTN",
+                    "action",
+                    (
+                        log_field("button", _button_text(event.button)),
+                        log_field("action", "debug"),
+                        log_field("enabled", enabled),
+                    ),
+                )
+                continue
+            if event.button == Button.B:
+                self.request_refresh(now_s)
+                self._set_feedback("REFRESH", now_s)
+                self.logger.info(
+                    "BTN",
+                    "action",
+                    (
+                        log_field("button", _button_text(event.button)),
+                        log_field("action", "refresh"),
+                    ),
+                )
 
     def _worker_key(self, definition: CheckDefinition) -> str:
         host_key = probe_host_key(definition) or definition.identifier
@@ -623,7 +782,7 @@ class RuntimeApp:
 
     def _execute_check_once(self, definition: CheckDefinition, now_s: float, manual: bool = False) -> CompletedCheckRun:
         self._wait_for_probe_slot(definition)
-        started_now_s = self.current_time_s() or now_s
+        started_now_s = now_s if manual else (self.current_time_s() or now_s)
         started_at, timer_kind = start_timer()
         if self._background_enabled():
             lock_acquired = _lock_context(self.background_lock)
@@ -659,6 +818,7 @@ class RuntimeApp:
 
     def _apply_completed_check(self, completed: CompletedCheckRun):
         definition = completed.definition
+        previous_status = self.registered_results.get(definition.identifier, {}).get("status")
         if completed.error is not None:
             self.metrics.record_check(definition.identifier, completed.duration_ms, None)
             self.registered_results[definition.identifier] = {
@@ -668,6 +828,7 @@ class RuntimeApp:
                 "details": "executor exception",
                 "latency_ms": None,
                 "last_update_s": completed.observed_at_s,
+                "last_success_s": self.last_success_at.get(definition.identifier),
                 "last_error": str(completed.error) or type(completed.error).__name__,
             }
             self.state = integrate_observations(
@@ -686,6 +847,7 @@ class RuntimeApp:
                 replace_source_identifier=definition.identifier if _enum_text(definition.check_type) == "SERVICE" else None,
             )
             self._record_exception("check", completed.error, observed_at_s=completed.observed_at_s, identifier=definition.identifier)
+            self._track_status_transition(definition.identifier, previous_status, "FAIL", completed.observed_at_s)
             return None
 
         result = completed.result
@@ -698,6 +860,12 @@ class RuntimeApp:
         )
         if result.diagnostics:
             self.inject_diagnostics(result.diagnostics, activate=False)
+        self._track_status_transition(
+            definition.identifier,
+            previous_status,
+            self.registered_results.get(definition.identifier, {}).get("status"),
+            completed.observed_at_s,
+        )
         return result
 
     def _run_check(self, definition: CheckDefinition, now_s: float, manual: bool = False):
@@ -788,6 +956,12 @@ class RuntimeApp:
         self._capture_memory_snapshot("manual-run", now_s=observed_at_s)
         return self.get_registered_checks()
 
+    def request_refresh(self, now_s: float | None = None):
+        requested_at_s = now_s if now_s is not None else (self.current_time_s() or 0.0)
+        for definition in self.definitions:
+            self._queue_check(definition, requested_at_s, manual=True)
+        return requested_at_s
+
     def reset_runtime_state(self):
         self.last_started_at.clear()
         self.last_completed_at_by_host.clear()
@@ -824,8 +998,16 @@ class RuntimeApp:
         self._check_log_counts = {definition.identifier: 0 for definition in self.definitions}
         self.display_failure_count = 0
         self.display_retry_at_s = None
+        self.feedback_message = ""
+        self.feedback_until_s = None
+        self.last_rendered_feedback = ""
+        self.last_rendered_debug_mode = False
+        self.pending_status_updates.clear()
+        self.network_operation_inflight = False
+        self.network_operation_result = None
         for definition in self.definitions:
             self.last_error_by_check[definition.identifier] = None
+            self.last_success_at[definition.identifier] = None
             self.registered_results[definition.identifier] = {
                 "id": definition.identifier,
                 "name": definition.name,
@@ -833,6 +1015,7 @@ class RuntimeApp:
                 "details": "pending",
                 "latency_ms": None,
                 "last_update_s": None,
+                "last_success_s": None,
                 "last_error": None,
             }
         self.logger.info("CTRL", "reset", ())
@@ -879,6 +1062,88 @@ class RuntimeApp:
         self._capture_memory_snapshot("connect", now_s=self.current_time_s())
         return self.get_network_state_snapshot()
 
+    def _set_feedback(self, message: str, now_s: float, duration_s: float | None = None):
+        self.feedback_message = bound_text(message, self.state.row_width)
+        feedback_duration_s = self.feedback_duration_s if duration_s is None else max(0.0, float(duration_s))
+        self.feedback_until_s = now_s + feedback_duration_s
+
+    def _feedback_text(self, now_s: float) -> str | None:
+        if self.feedback_until_s is None or now_s > self.feedback_until_s or not self.feedback_message:
+            return None
+        return self.feedback_message
+
+    def _pad_row(self, value: str) -> str:
+        text = bound_text(value, self.state.row_width)
+        return text + (" " * max(0, self.state.row_width - len(text)))
+
+    def _last_update_age_s(self, now_s: float) -> int | None:
+        updates = [check.last_update_s for check in self.state.checks if check.last_update_s is not None]
+        if not updates:
+            return None
+        return max(0, int(now_s - max(updates)))
+
+    def _overlay_rows(self, now_s: float) -> tuple[str, ...]:
+        update_age_s = self._last_update_age_s(now_s)
+        update_text = "--" if update_age_s is None else str(update_age_s)
+        loop_text = "--" if self.last_cycle_ms is None else str(int(round(self.last_cycle_ms)))
+        network_text = "UP" if self.network_state.get("connected") else "DN"
+        return (
+            self._pad_row(f"UPD:{update_text}s LP:{loop_text}"),
+            self._pad_row(f"NET:{network_text} RF:{len(self.pending_status_updates)}"),
+        )
+
+    def _decorate_frame(self, frame, now_s: float):
+        rows = list(frame.rows)
+        if self.debug_mode and rows:
+            overlay_rows = self._overlay_rows(now_s)
+            overlay_count = min(len(rows), len(overlay_rows))
+            start_index = len(rows) - overlay_count
+            for index in range(overlay_count):
+                rows[start_index + index] = overlay_rows[index]
+        feedback = self._feedback_text(now_s)
+        if feedback and rows:
+            rows[-1] = self._pad_row(feedback)
+        return replace(frame, rows=tuple(rows))
+
+    def _track_status_transition(self, identifier: str, previous_status: object, current_status: object, observed_at_s: float | None):
+        previous = "?" if previous_status is None else str(previous_status)
+        current = "?" if current_status is None else str(current_status)
+        if previous == current or observed_at_s is None:
+            return
+        self.pending_status_updates[identifier] = {
+            "status": current,
+            "observed_at_s": observed_at_s,
+        }
+        self.logger.warn(
+            "STATE",
+            "transition",
+            (
+                log_field("id", identifier),
+                log_field("from", previous),
+                log_field("to", current),
+            ),
+        )
+
+    def _log_display_propagation(self, now_s: float, reason: str):
+        if reason == "none" or not self.pending_status_updates:
+            return
+        for identifier, update in tuple(self.pending_status_updates.items()):
+            observed_at_s = update.get("observed_at_s")
+            if observed_at_s is None:
+                self.pending_status_updates.pop(identifier, None)
+                continue
+            propagation_ms = max(0.0, (now_s - float(observed_at_s)) * 1000.0)
+            self.logger.info(
+                "DISP",
+                "propagation",
+                (
+                    log_field("id", identifier),
+                    log_field("status", update.get("status", "?")),
+                    log_field("delay_ms", f"{propagation_ms:.1f}"),
+                ),
+            )
+            self.pending_status_updates.pop(identifier, None)
+
     def _apply_shift(self, now_s: float):
         offset = self.shift_controller.offset_for_elapsed(now_s)
         if offset != self.state.shift_offset:
@@ -919,7 +1184,8 @@ class RuntimeApp:
 
         reason = self.render_once(now_s)
 
-        self.metrics.record_cycle(elapsed_ms(cycle_started, cycle_timer_kind))
+        self.last_cycle_ms = elapsed_ms(cycle_started, cycle_timer_kind)
+        self.metrics.record_cycle(self.last_cycle_ms)
         self._maybe_capture_memory_snapshot(now_s)
         self._assert_debug_invariants()
         return reason

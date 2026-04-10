@@ -12,3 +12,6 @@ coverage.xml
 dist/
 htmlcov/
 pi
+config/build-deploy.local.example.yaml
+1541ultimate
+c64commander

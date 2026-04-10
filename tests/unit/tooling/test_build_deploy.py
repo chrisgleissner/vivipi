@@ -67,14 +67,14 @@ checks:
                 "    version: 1.25.0",
                 "    download_page: https://micropython.org/download/RPI_PICO2_W/",
                 "  buttons:",
-                "    a: GP14",
-                "    b: GP15",
+                "    a: GP15",
+                "    b: GP17",
                 "  display:",
                 "    type: waveshare-pico-oled-1.3",
                 "    mode: standard",
                 "    columns: 1",
                 "    column_separator: ' '",
-                "    boot_logo_duration: 6s",
+                "    boot_logo_duration: 2s",
                 "wifi:",
                 "  ssid: ${VIVIPI_WIFI_SSID}",
                 "  password: ${VIVIPI_WIFI_PASSWORD}",
@@ -112,7 +112,7 @@ def test_load_build_deploy_settings_substitutes_environment_placeholders(tmp_pat
     assert settings["device"]["display"]["height_px"] == 64
     assert settings["device"]["display"]["font"] == {"width_px": 8, "height_px": 8}
     assert settings["device"]["display"]["page_interval_s"] == 15
-    assert settings["device"]["display"]["boot_logo_duration_s"] == 6
+    assert settings["device"]["display"]["boot_logo_duration_s"] == 2
     assert settings["device"]["display"]["brightness"] == 128
     assert settings["device"]["display"]["mode"] == "standard"
     assert settings["device"]["display"]["columns"] == 1
@@ -629,7 +629,7 @@ def test_build_deploy_helper_parsers_cover_additional_numeric_paths():
 
 def test_render_device_runtime_config_uses_empty_project_when_omitted():
     settings = {
-        "device": {"board": "pico2w", "buttons": {"a": "GP14", "b": "GP15"}},
+        "device": {"board": "pico2w", "buttons": {"a": "GP15", "b": "GP17"}},
         "wifi": {"ssid": "wifi", "password": "secret"},
         "service": {"base_url": "http://192.0.2.10:8080/checks"},
     }
@@ -650,7 +650,7 @@ def test_render_device_runtime_config_uses_empty_project_when_omitted():
 
 def test_render_device_runtime_config_serializes_optional_auth_fields():
     settings = {
-        "device": {"board": "pico2w", "buttons": {"a": "GP14", "b": "GP15"}},
+        "device": {"board": "pico2w", "buttons": {"a": "GP15", "b": "GP17"}},
         "wifi": {"ssid": "wifi", "password": "secret"},
         "service": {},
     }
@@ -683,7 +683,7 @@ def test_render_device_runtime_config_serializes_inferred_display_column_offset(
     settings = {
         "device": {
             "board": "pico2w",
-            "buttons": {"a": "GP14", "b": "GP15"},
+            "buttons": {"a": "GP15", "b": "GP17"},
             "display": {"type": "waveshare-pico-oled-1.3", "column_offset": 32},
         },
         "wifi": {"ssid": "wifi", "password": "secret"},
@@ -705,7 +705,7 @@ def test_render_device_runtime_config_serializes_inferred_display_column_offset(
 
 def test_render_device_runtime_config_serializes_optional_check_state():
     settings = {
-        "device": {"board": "pico2w", "buttons": {"a": "GP14", "b": "GP15"}},
+        "device": {"board": "pico2w", "buttons": {"a": "GP15", "b": "GP17"}},
         "wifi": {"ssid": "wifi", "password": "secret"},
         "service": {},
         "check_state": {
@@ -730,7 +730,7 @@ def test_render_device_runtime_config_serializes_optional_check_state():
 
 def test_render_device_runtime_config_serializes_probe_schedule():
     settings = {
-        "device": {"board": "pico2w", "buttons": {"a": "GP14", "b": "GP15"}},
+        "device": {"board": "pico2w", "buttons": {"a": "GP15", "b": "GP17"}},
         "wifi": {"ssid": "wifi", "password": "secret"},
         "service": {},
         "probe_schedule": {

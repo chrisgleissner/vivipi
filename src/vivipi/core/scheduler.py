@@ -12,6 +12,14 @@ class ScheduledCheck:
     due_at_s: float
 
 
+def _fold_case(value: str) -> str:
+    text = str(value)
+    casefold = getattr(text, "casefold", None)
+    if callable(casefold):
+        return casefold()
+    return text.lower()
+
+
 def probe_host_key(definition: CheckDefinition) -> str | None:
     target = str(definition.target).strip()
     if not target:
@@ -19,12 +27,13 @@ def probe_host_key(definition: CheckDefinition) -> str | None:
     if "://" in target:
         parsed = urlparse(target)
         hostname = getattr(parsed, "hostname", None)
-        return hostname.casefold() if hostname else None
+        return _fold_case(hostname) if hostname else None
 
     host, separator, port_text = target.rpartition(":")
     if separator and host and port_text.isdigit():
-        return host.strip().casefold() or None
-    return target.casefold()
+        normalized_host = _fold_case(host.strip())
+        return normalized_host or None
+    return _fold_case(target)
 
 
 def probe_backoff_remaining_s(

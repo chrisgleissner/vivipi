@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from vivipi.core.models import AppMode, AppState, CheckRuntime, DisplayMode, Status
-from vivipi.core.state import normalize_selection, overview_checks, selected_check, visible_checks
+from vivipi.core.state import selected_check, visible_checks
 from vivipi.core.text import center_text, column_widths, compact_overview_cell, overview_row, truncate_text
 
 

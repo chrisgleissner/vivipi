@@ -221,18 +221,15 @@ Checks are evaluated periodically.
 ### FTP
 
 - FTP control session
-- Optional username and password
-- Must log in successfully
-- Must list the top-level directory via passive mode
-- Failure = login failure, invalid listing, or timeout
+- Must emit a valid FTP greeting on connection
+- Failure = missing or invalid greeting, or timeout
 
 ### TELNET
 
 - Telnet session
-- Optional username and password
-- Must log in successfully when prompted
-- Must observe valid prompt or session output
-- Failure = login failure, invalid output, or timeout
+- Must accept a TCP session
+- May report banner/session output when available
+- Failure = connection failure, explicit login failure text, or timeout
 
 ### SERVICE
 
@@ -258,7 +255,7 @@ SERVICE endpoints MUST return:
       ]
     }
 
-  - Payloads MUST contain at most 64 checks.
+- Payloads MUST contain at most 64 checks.
 
 [VIVIPI-CHECK-SCHEMA-001]
 
@@ -341,11 +338,11 @@ Probe pacing against the same device MUST be configurable and deterministic.
 
 [VIVIPI-CHECK-SCHED-001]
 
-Probe transport failures MUST use bounded retries with deterministic backoff and stable failure classification.
+Probe transport failures MUST use single-attempt classification with stable failure detail.
 
-- Applies to direct HTTP, FTP, and TELNET transport failures and to Wi-Fi connection attempts.
+- Applies to direct HTTP, FTP, and TELNET transport failures.
 - Failure details MUST distinguish at least `timeout`, `dns`, `refused`, `network`, `reset`, and generic `io` failures when those classes can be determined.
-- Retries MUST remain bounded and MUST preserve deterministic scheduling order.
+- Each scheduled probe attempt MUST run at most once; later retries are deferred to the next configured interval.
 
 [VIVIPI-NET-001]
 

@@ -21,23 +21,70 @@ class FakePin:
         return self.current_value
 
 
-def test_button_reader_emits_events_and_resets_when_released(monkeypatch):
+def test_button_reader_emits_event_on_debounced_press_and_no_event_on_release(monkeypatch):
     monkeypatch.setattr(firmware_input, "time", FakeTime(100))
 
     reader = firmware_input.ButtonReader.__new__(firmware_input.ButtonReader)
     reader.input_controller = InputController()
-    reader.pins = {Button.A: FakePin(0), Button.B: FakePin(1)}
-    reader.held_since_ms = {Button.A: 60, Button.B: None}
-    reader.last_emit_ms = {Button.A: None, Button.B: None}
+    reader.logger = None
+    reader.states = {
+        Button.A: {
+            "pin": FakePin(0),
+            "pin_name": "GP15",
+            "pull": "up",
+            "idle_value": 1,
+            "raw_value": 0,
+            "stable_value": 1,
+            "raw_changed_ms": 60,
+        },
+        Button.B: {
+            "pin": FakePin(1),
+            "pin_name": "GP17",
+            "pull": "up",
+            "idle_value": 1,
+            "raw_value": 1,
+            "stable_value": 1,
+            "raw_changed_ms": 100,
+        },
+    }
+    reader._log = lambda method, message, fields=(): None
 
     events = reader.poll()
 
     assert len(events) == 1
     assert events[0].button == Button.A
 
-    reader.pins[Button.A].current_value = 1
+    reader.states[Button.A]["pin"].current_value = 1
+    reader.states[Button.A]["raw_value"] = 1
+    reader.states[Button.A]["raw_changed_ms"] = 60
     cleared = reader.poll()
 
     assert cleared == ()
-    assert reader.held_since_ms[Button.A] is None
-    assert reader.last_emit_ms[Button.A] is None
+    assert reader.states[Button.A]["stable_value"] == 1
+
+
+def test_button_reader_logs_plain_string_button_ids_without_attribute_errors(monkeypatch):
+    monkeypatch.setattr(firmware_input, "time", FakeTime(100))
+
+    logged = []
+    reader = firmware_input.ButtonReader.__new__(firmware_input.ButtonReader)
+    reader.input_controller = InputController()
+    reader.logger = None
+    reader.states = {
+        "A": {
+            "pin": FakePin(0),
+            "pin_name": "GP15",
+            "pull": "up",
+            "idle_value": 1,
+            "raw_value": 0,
+            "stable_value": 1,
+            "raw_changed_ms": 60,
+        }
+    }
+    reader._log = lambda method, message, fields=(): logged.append((method, message, fields))
+
+    events = reader.poll()
+
+    assert len(events) == 1
+    assert events[0].button == "A"
+    assert any("button=A" in field for _, _, fields in logged for field in fields)

@@ -14,7 +14,6 @@ from vivipi.core.display import normalize_display_config
 from vivipi.core.logging import bound_text
 from vivipi.core.models import DiagnosticEvent, DisplayMode, ProbeSchedulingPolicy, TransitionThresholds
 from vivipi.runtime import state as runtime_state
-from vivipi.runtime.metrics import elapsed_ms, start_timer
 from vivipi.runtime import RuntimeApp, build_executor, build_runtime_definitions
 
 try:
@@ -25,7 +24,7 @@ except ImportError:  # pragma: no cover - used by CPython tests
     from firmware.input import ButtonReader
 
 
-DEFAULT_BUTTON_PINS = {"a": "GP14", "b": "GP15"}
+DEFAULT_BUTTON_PINS = {"a": "GP15", "b": "GP17"}
 
 
 class HeadlessDisplay:
@@ -46,6 +45,13 @@ class HeadlessDisplay:
 def load_config(path="config.json"):
     with open(path, "r") as handle:
         return json.load(handle)
+
+
+def _serial_log(stage: str, message: str, **fields):
+    parts = [f"[BOOT][{stage}] {message}"]
+    for key in sorted(fields):
+        parts.append(f"{key}={fields[key]}")
+    print(" ".join(parts))
 
 
 def _diagnostic_message(value: object, limit: int = 11) -> str:
@@ -279,11 +285,12 @@ def build_runtime_app(
     wifi_connector=connect_wifi,
     now_provider=_now_s,
     sleep_ms=_sleep_ms,
-    boot_logo_min_s=5,
+    boot_logo_min_s=2,
     boot_diagnostics=(),
     boot_errors=(),
 ):
     config = _normalize_runtime_config(config)
+    _serial_log("BOOT", "config normalized")
     input_controller = input_controller_factory()
     device = config.get("device", {}) if isinstance(config.get("device"), dict) else {}
     display_input = device.get("display")
@@ -297,8 +304,17 @@ def build_runtime_app(
         display_config = normalize_display_config({})
         collected_diagnostics.append(_boot_diagnostic("CONF", "display bad"))
         collected_errors.append(("config", error))
+    _serial_log(
+        "BOOT",
+        "display config",
+        display=display_config.get("type", "?"),
+        spi_mode=display_config.get("spi_mode", "?"),
+        width=display_config.get("width_px", "?"),
+        height=display_config.get("height_px", "?"),
+    )
 
     display, display_config, display_diagnostics, display_errors = _build_display_with_fallback(display_factory, display_config)
+    _serial_log("BOOT", "display ready", backend=display_config.get("backend", "?"))
     collected_diagnostics.extend(display_diagnostics)
     collected_errors.extend(display_errors)
     font = display_config.get("font", {}) if isinstance(display_config, dict) else {}
@@ -311,14 +327,17 @@ def build_runtime_app(
 
     boot_start_s = now_provider()
     logo_diagnostics, logo_errors = _safe_show_boot_logo(display, version)
+    _serial_log("BOOT", "boot logo shown", version=version or "-")
     collected_diagnostics.extend(logo_diagnostics)
     collected_errors.extend(logo_errors)
 
     button_reader, button_diagnostics, button_errors = _safe_build_button_reader(button_reader_factory, button_input, input_controller)
+    _serial_log("BOOT", "buttons ready", a=button_input.get("a", DEFAULT_BUTTON_PINS["a"]), b=button_input.get("b", DEFAULT_BUTTON_PINS["b"]))
     collected_diagnostics.extend(button_diagnostics)
     collected_errors.extend(button_errors)
 
     definitions, definition_diagnostics, definition_errors = _safe_build_definitions(definitions_builder, config)
+    _serial_log("BOOT", "checks loaded", count=len(definitions))
     collected_diagnostics.extend(definition_diagnostics)
     collected_errors.extend(definition_errors)
 
@@ -342,6 +361,10 @@ def build_runtime_app(
         build_time=build_time_value,
     )
     app.boot_logo_until_s = boot_start_s + max(float(boot_logo_min_s), float(display_config.get("boot_logo_duration_s", boot_logo_min_s)))
+    if hasattr(app, "logger"):
+        app.logger.sink = print
+    if button_reader is not None and hasattr(button_reader, "bind_logger") and hasattr(app, "logger"):
+        button_reader.bind_logger(app.logger)
     if hasattr(app, "configure_observability"):
         app.configure_observability(
             config=config,
@@ -351,9 +374,17 @@ def build_runtime_app(
             network_state_reader=read_wifi_state,
         )
         app._refresh_network_state()
+    _serial_log("BOOT", "app ready", boot_logo_until_s=f"{app.boot_logo_until_s:.3f}")
     if hasattr(app, "_record_exception") and collected_errors:
         observed_at_s = now_provider()
         for scope, error in collected_errors:
+            _serial_log(
+                "BOOT",
+                "captured startup error",
+                scope=scope,
+                error=type(error).__name__,
+                detail=repr(error),
+            )
             app._record_exception(scope, error, observed_at_s=observed_at_s)
     all_diagnostics = tuple(collected_diagnostics)
     if all_diagnostics:
@@ -364,24 +395,13 @@ def build_runtime_app(
 
 
 def build_runtime_app_from_path(config_path="config.json", **kwargs):
+    _serial_log("BOOT", "loading config", path=config_path)
     config, boot_diagnostics, boot_errors = load_config_with_fallback(config_path)
     return build_runtime_app(config, boot_diagnostics=boot_diagnostics, boot_errors=boot_errors, **kwargs)
 
 
 def _run_startup_network(app, now_s):
-    if not hasattr(app, "reconnect_network"):
-        return
-    try:
-        app.reconnect_network(activate_diagnostics=False)
-    except TypeError:
-        try:
-            app.reconnect_network()
-        except Exception as error:
-            if hasattr(app, "_record_exception"):
-                app._record_exception("network", error, observed_at_s=now_s)
-    except Exception as error:
-        if hasattr(app, "_record_exception"):
-            app._record_exception("network", error, observed_at_s=now_s)
+    _serial_log("BOOT", "network deferred", now_s=f"{now_s:.3f}")
 
 
 def _render_initial_frame(app, now_s):
@@ -455,6 +475,7 @@ def run_loop(app, poll_interval_ms=50, iterations=None, now_provider=_now_s, sle
         except KeyboardInterrupt:
             raise
         except Exception as error:
+            _serial_log("LOOP", "exception", error=type(error).__name__, detail=repr(error))
             if hasattr(app, "_record_exception"):
                 app._record_exception("loop", error, observed_at_s=now_s)
         iteration += 1
@@ -464,15 +485,16 @@ def run_loop(app, poll_interval_ms=50, iterations=None, now_provider=_now_s, sle
 def run_forever(config_path="config.json", poll_interval_ms=50):
     app = build_runtime_app_from_path(config_path)
     startup_now_s = _now_s()
+    _serial_log("BOOT", "startup tick", now_s=f"{startup_now_s:.3f}")
     _run_startup_network(app, startup_now_s)
     _run_startup_tick(app, startup_now_s)
-    startup_ready_s = _wait_for_boot_logo(app)
     if hasattr(app, "tick"):
         try:
-            app.tick(startup_ready_s, button_events=())
+            app.tick(startup_now_s, button_events=())
         except Exception as error:
             if hasattr(app, "_record_exception"):
-                app._record_exception("loop", error, observed_at_s=startup_ready_s)
+                app._record_exception("loop", error, observed_at_s=startup_now_s)
     else:
-        _render_initial_frame(app, startup_ready_s)
+        _render_initial_frame(app, startup_now_s)
+    _serial_log("BOOT", "enter loop", poll_interval_ms=poll_interval_ms)
     run_loop(app, poll_interval_ms=poll_interval_ms)

@@ -143,6 +143,8 @@ def test_sh1107_constructor_uses_write_only_spi_and_leaves_reset_pin_free(monkey
     assert display.spi.bus == 1
     assert display.column_offset == 32
     assert display.spi.kwargs["miso"] is None
+    assert display.spi.kwargs["polarity"] == 1
+    assert display.spi.kwargs["phase"] == 1
     assert display.spi.kwargs["sck"].number == 10
     assert display.spi.kwargs["mosi"].number == 11
 
