@@ -1,7 +1,45 @@
 checks:
-  - name: u64 version
+  - name: C64U PING
+    type: ping
+    target: 192.168.1.167
+    interval_s: 15
+    timeout_s: 10
+
+  - name: C64U REST
+    type: http
+    target: http://192.168.1.167/v1/version
+    method: GET
+    interval_s: 15
+    timeout_s: 10
+
+  - name: C64U TELNET
+    type: telnet
+    target: 192.168.1.167:23
+    interval_s: 15
+    timeout_s: 10
+
+  - name: PIXEL4 ADB
+    type: http
+    target: http://mickey:8081/vivipi/probe/adb/9B081FFAZ001WX
+    method: GET
+    interval_s: 15
+    timeout_s: 10
+
+  - name: U64 PING
+    type: ping
+    target: 192.168.1.13
+    interval_s: 15
+    timeout_s: 10
+
+  - name: U64 REST
     type: http
     target: http://192.168.1.13/v1/version
     method: GET
+    interval_s: 15
+    timeout_s: 10
+
+  - name: U64 TELNET
+    type: telnet
+    target: 192.168.1.13:23
     interval_s: 15
     timeout_s: 10

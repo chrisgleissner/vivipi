@@ -162,7 +162,7 @@ def test_runtime_app_rotates_over_filtered_compact_pages_only():
     assert display.frames[-1].rows[0].startswith("Echo")
 
 
-def test_runtime_app_applies_button_events_and_activates_diagnostics():
+def test_runtime_app_applies_button_events_without_leaving_overview_for_check_diagnostics():
     display = FakeDisplay()
     definition = make_definition("router")
 
@@ -186,13 +186,13 @@ def test_runtime_app_applies_button_events_and_activates_diagnostics():
     reason = app.tick(0.0)
 
     assert reason == "bootstrap"
-    assert app.state.mode.value == "diagnostics"
+    assert app.state.mode.value == "overview"
     assert app.state.diagnostics == ("WIFI down",)
 
     next_reason = app.tick(1.0, button_events=(ButtonEvent(button=Button.B, held_ms=30),))
 
     assert next_reason == "state"
-    assert app.state.mode.value == "overview"
+    assert app.state.mode.value == "detail"
 
 
 def test_runtime_app_validates_page_interval_and_uses_button_reader_when_present():

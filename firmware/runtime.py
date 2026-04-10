@@ -276,10 +276,6 @@ def build_runtime_app(
     button_reader, button_diagnostics, button_errors = _safe_build_button_reader(button_reader_factory, button_input, input_controller)
     collected_diagnostics.extend(button_diagnostics)
     collected_errors.extend(button_errors)
-    connect_started, timer_kind = start_timer()
-    diagnostics, wifi_errors = _safe_connect_wifi(wifi_connector, config)
-    connect_duration_ms = elapsed_ms(connect_started, timer_kind)
-    collected_errors.extend(wifi_errors)
 
     definitions, definition_diagnostics, definition_errors = _safe_build_definitions(definitions_builder, config)
     collected_diagnostics.extend(definition_diagnostics)
@@ -308,24 +304,14 @@ def build_runtime_app(
             wifi_reconnector=reconnect_wifi,
             network_state_reader=read_wifi_state,
         )
-        app._refresh_network_state(
-            last_error="; ".join(event.message for event in diagnostics) if diagnostics else "",
-            connect_duration_ms=connect_duration_ms,
-        )
+        app._refresh_network_state()
     if hasattr(app, "_record_exception") and collected_errors:
         observed_at_s = now_provider()
         for scope, error in collected_errors:
             app._record_exception(scope, error, observed_at_s=observed_at_s)
-    all_diagnostics = tuple(collected_diagnostics) + tuple(diagnostics)
+    all_diagnostics = tuple(collected_diagnostics)
     if all_diagnostics:
         app.inject_diagnostics(all_diagnostics, activate=True)
-
-    current_now_s = now_provider()
-
-    elapsed_s = current_now_s - boot_start_s
-    remaining_ms = max(0, int((boot_logo_min_s - elapsed_s) * 1000))
-    if remaining_ms > 0:
-        sleep_ms(remaining_ms)
 
     runtime_state.bind_app(app)
     return app
@@ -334,6 +320,22 @@ def build_runtime_app(
 def build_runtime_app_from_path(config_path="config.json", **kwargs):
     config, boot_diagnostics, boot_errors = load_config_with_fallback(config_path)
     return build_runtime_app(config, boot_diagnostics=boot_diagnostics, boot_errors=boot_errors, **kwargs)
+
+
+def _run_startup_network(app, now_s):
+    if not hasattr(app, "reconnect_network"):
+        return
+    try:
+        app.reconnect_network(activate_diagnostics=False)
+    except TypeError:
+        try:
+            app.reconnect_network()
+        except Exception as error:
+            if hasattr(app, "_record_exception"):
+                app._record_exception("network", error, observed_at_s=now_s)
+    except Exception as error:
+        if hasattr(app, "_record_exception"):
+            app._record_exception("network", error, observed_at_s=now_s)
 
 
 def _render_initial_frame(app, now_s):
@@ -354,6 +356,21 @@ def _render_initial_frame(app, now_s):
 
 
 def _run_startup_tick(app, now_s):
+    _run_startup_network(app, now_s)
+    if all(hasattr(app, attribute) for attribute in ("definitions", "_run_check", "render_once")):
+        for definition in getattr(app, "definitions", ()):  # pragma: no branch - tiny startup loop
+            try:
+                app._run_check(definition, now_s)
+            except Exception as error:
+                if hasattr(app, "_record_exception"):
+                    app._record_exception("loop", error, observed_at_s=now_s)
+            _render_initial_frame(app, now_s)
+        if hasattr(app, "_apply_page_rotation"):
+            app._apply_page_rotation(now_s)
+        if hasattr(app, "_apply_shift"):
+            app._apply_shift(now_s)
+        _render_initial_frame(app, now_s)
+        return
     if not hasattr(app, "tick"):
         return
     try:

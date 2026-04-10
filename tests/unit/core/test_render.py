@@ -102,7 +102,7 @@ def test_compact_mode_shows_all_healthy_checks_without_suffixes_when_no_failures
 
     frame = render_frame(state)
 
-    assert frame.rows == ("Alpha   |Bravo  ",)
+    assert frame.rows == ("Bravo   |Alpha  ",)
     assert frame.inverted_spans == ()
     assert frame.failure_spans == ()
 

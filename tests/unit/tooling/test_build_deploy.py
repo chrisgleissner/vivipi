@@ -1015,6 +1015,7 @@ def test_deploy_firmware_defaults_to_auto_port_when_not_configured(tmp_path: Pat
     )
 
     assert commands[0][:4] == ["mpremote", "connect", "auto", "fs"]
+    assert commands[-1] == ["mpremote", "connect", "auto", "soft-reset"]
 
 
 def test_deploy_firmware_copies_files_via_mpremote(tmp_path: Path):
@@ -1032,6 +1033,7 @@ def test_deploy_firmware_copies_files_via_mpremote(tmp_path: Path):
     assert any(command[:4] == ["mpremote", "connect", "/dev/ttyUSB0", "fs"] for command in commands)
     assert any(command[-1] == ":boot.py" for command in commands)
     assert any(command[-1] == ":config.json" for command in commands)
+    assert commands[-1] == ["mpremote", "connect", "/dev/ttyUSB0", "soft-reset"]
 
 
 def test_deploy_firmware_reports_missing_mpremote(tmp_path: Path):

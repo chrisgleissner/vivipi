@@ -124,8 +124,10 @@ def test_read_wifi_state_and_reconnect_wifi_capture_current_link_details(monkeyp
     assert wlan.connect_calls == [("Office", "secret")]
 
 
-def test_build_runtime_app_uses_injected_factories_and_records_wifi_diagnostics():
+def test_build_runtime_app_uses_injected_factories_and_defers_wifi_startup():
     called = {}
+    wifi_calls = []
+    sleep_calls = []
 
     class FakeApp:
         def __init__(
@@ -158,9 +160,16 @@ def test_build_runtime_app_uses_injected_factories_and_records_wifi_diagnostics(
             called["version"] = version
             called["build_time"] = build_time
             called["diagnostics"] = None
+            called["network_refreshes"] = []
 
         def inject_diagnostics(self, diagnostics, activate=True):
             called["diagnostics"] = (diagnostics, activate)
+
+        def configure_observability(self, **kwargs):
+            called["observability"] = kwargs
+
+        def _refresh_network_state(self, **kwargs):
+            called["network_refreshes"].append(kwargs)
 
     input_controller = object()
     display = SimpleNamespace(show_boot_logo=lambda version: None)
@@ -191,9 +200,9 @@ def test_build_runtime_app_uses_injected_factories_and_records_wifi_diagnostics(
         runtime_app_factory=FakeApp,
         definitions_builder=lambda config: definitions,
         executor_factory=lambda: executor,
-        wifi_connector=lambda config: (DiagnosticEvent(code="WIFI", message="connected"),),
+        wifi_connector=lambda config: wifi_calls.append(config) or (DiagnosticEvent(code="WIFI", message="connected"),),
         now_provider=lambda: next(now_counter),
-        sleep_ms=lambda ms: None,
+        sleep_ms=lambda ms: sleep_calls.append(ms),
     )
 
     assert isinstance(app, FakeApp)
@@ -210,7 +219,10 @@ def test_build_runtime_app_uses_injected_factories_and_records_wifi_diagnostics(
     assert called["column_separator"] == "|"
     assert called["version"] == "1.2.3"
     assert called["build_time"] == "2025-04-05T12:00Z"
-    assert called["diagnostics"] == (((DiagnosticEvent(code="WIFI", message="connected"),)), True)
+    assert called["diagnostics"] is None
+    assert called["network_refreshes"] == [{}]
+    assert wifi_calls == []
+    assert sleep_calls == []
 
 
 def test_build_runtime_app_does_not_prime_initial_checks_during_boot():
@@ -410,17 +422,16 @@ def test_build_runtime_app_infers_geometry_and_page_interval_from_display_type()
     assert called["page_interval_s"] == 180
 
 
-def test_boot_logo_shown_for_minimum_duration_by_waiting_after_fast_wifi():
-    called = {}
+def test_build_runtime_app_does_not_wait_for_boot_logo_or_wifi_during_boot():
     sleep_calls = []
+    wifi_calls = []
 
     class FakeApp:
         def __init__(self, **kwargs):
-            called.update(kwargs)
-            called["diagnostics"] = None
+            pass
 
         def inject_diagnostics(self, diagnostics, activate=True):
-            called["diagnostics"] = diagnostics
+            pass
 
     now_times = iter([0.0, 1.0, 1.0])
     display = SimpleNamespace(show_boot_logo=lambda version: None)
@@ -443,53 +454,14 @@ def test_boot_logo_shown_for_minimum_duration_by_waiting_after_fast_wifi():
         runtime_app_factory=FakeApp,
         definitions_builder=lambda config: (),
         executor_factory=lambda: object(),
-        wifi_connector=lambda config: (),
-        now_provider=lambda: next(now_times),
-        sleep_ms=lambda ms: sleep_calls.append(ms),
-        boot_logo_min_s=5,
-    )
-
-    assert sleep_calls == [4000]
-
-
-def test_boot_logo_no_wait_when_wifi_takes_longer_than_minimum():
-    sleep_calls = []
-
-    class FakeApp:
-        def __init__(self, **kwargs):
-            pass
-
-        def inject_diagnostics(self, diagnostics, activate=True):
-            pass
-
-    now_times = iter([0.0, 6.0, 6.0])
-    display = SimpleNamespace(show_boot_logo=lambda version: None)
-
-    firmware_runtime.build_runtime_app(
-        {
-            "project": {},
-            "device": {
-                "display": {
-                    "width_px": 128,
-                    "height_px": 64,
-                    "font": {"width_px": 8, "height_px": 8},
-                },
-                "buttons": {"a": "GP14", "b": "GP15"},
-            },
-        },
-        input_controller_factory=lambda: object(),
-        display_factory=lambda config: display,
-        button_reader_factory=lambda config, input_controller: object(),
-        runtime_app_factory=FakeApp,
-        definitions_builder=lambda config: (),
-        executor_factory=lambda: object(),
-        wifi_connector=lambda config: (),
+        wifi_connector=lambda config: wifi_calls.append(config) or (),
         now_provider=lambda: next(now_times),
         sleep_ms=lambda ms: sleep_calls.append(ms),
         boot_logo_min_s=5,
     )
 
     assert sleep_calls == []
+    assert wifi_calls == []
 
 
 def test_run_loop_ticks_and_sleeps_with_injected_clock():
@@ -538,3 +510,39 @@ def test_run_forever_builds_app_then_runs_loop(monkeypatch):
     assert called == {"app": fake_app, "poll_interval_ms": 75}
     assert fake_app.render_calls == [12.5]
     assert fake_app.tick_calls == [(12.5, ())]
+
+
+def test_run_startup_tick_reconnects_without_activating_diagnostics_and_renders_after_each_check():
+    calls = []
+
+    class FakeApp:
+        def __init__(self):
+            self.definitions = ("first", "second")
+
+        def reconnect_network(self, activate_diagnostics=True):
+            calls.append(("reconnect", activate_diagnostics))
+
+        def _run_check(self, definition, now_s):
+            calls.append(("check", definition, now_s))
+
+        def render_once(self, now_s):
+            calls.append(("render", now_s))
+
+        def _apply_page_rotation(self, now_s):
+            calls.append(("page", now_s))
+
+        def _apply_shift(self, now_s):
+            calls.append(("shift", now_s))
+
+    firmware_runtime._run_startup_tick(FakeApp(), 12.5)
+
+    assert calls == [
+        ("reconnect", False),
+        ("check", "first", 12.5),
+        ("render", 12.5),
+        ("check", "second", 12.5),
+        ("render", 12.5),
+        ("page", 12.5),
+        ("shift", 12.5),
+        ("render", 12.5),
+    ]

@@ -463,7 +463,7 @@ class RuntimeApp:
             replace_source_identifier=result.source_identifier if result.replace_source else None,
         )
         if result.diagnostics:
-            self.inject_diagnostics(result.diagnostics, activate=True)
+            self.inject_diagnostics(result.diagnostics, activate=False)
         return result
 
     def _run_due_checks(self, now_s: float):
@@ -517,7 +517,7 @@ class RuntimeApp:
         self.logger.info("CTRL", "reset", ())
         return self.snapshot()
 
-    def reconnect_network(self):
+    def reconnect_network(self, activate_diagnostics: bool = True):
         connector = self.wifi_reconnector or self.wifi_connector
         if connector is None or self.config is None:
             raise RuntimeError("wifi reconnect is not configured")
@@ -533,7 +533,7 @@ class RuntimeApp:
         last_error = ""
         if diagnostics:
             last_error = "; ".join(getattr(item, "message", "") for item in diagnostics if getattr(item, "message", ""))
-            self.inject_diagnostics(diagnostics, activate=True)
+            self.inject_diagnostics(diagnostics, activate=activate_diagnostics)
         self._refresh_network_state(last_error=last_error, connect_duration_ms=duration_ms, reconnect=True)
         self._capture_memory_snapshot("reconnect", now_s=self.current_time_s())
         return self.get_network_state_snapshot()

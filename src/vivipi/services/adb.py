@@ -77,3 +77,40 @@ def collect_adb_service_payload(run_command=None) -> dict[str, list[dict[str, ob
             }
         )
     return {"checks": checks}
+
+
+def collect_adb_device_status(target_serial: str, target_name: str, run_command=None) -> tuple[int, dict[str, object]]:
+    command_runner = run_command or _run_adb
+    completed = command_runner(["adb", "devices", "-l"])
+
+    if completed.returncode != 0:
+        return 503, {
+            "name": target_name,
+            "serial": target_serial,
+            "status": "FAIL",
+            "details": str(completed.stderr).strip() or "adb command failed",
+        }
+
+    for device in parse_adb_devices(str(completed.stdout)):
+        if device.serial != target_serial:
+            continue
+        if device.state == "device":
+            return 200, {
+                "name": target_name,
+                "serial": target_serial,
+                "status": "OK",
+                "details": device.description or "Connected",
+            }
+        return 503, {
+            "name": target_name,
+            "serial": target_serial,
+            "status": "FAIL",
+            "details": device.description or device.state,
+        }
+
+    return 503, {
+        "name": target_name,
+        "serial": target_serial,
+        "status": "FAIL",
+        "details": "Target device not connected",
+    }

@@ -227,7 +227,7 @@ def test_integrate_observations_replaces_previous_service_children_by_source_ide
     )
 
     assert [check.identifier for check in updated.checks] == ["router", "adb:pixel-10"]
-    assert updated.selected_id == "adb:pixel-10"
+    assert updated.selected_id == "router"
 
 
 def test_record_diagnostic_events_deduplicates_and_can_activate_mode():

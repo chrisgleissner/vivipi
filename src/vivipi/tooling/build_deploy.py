@@ -591,6 +591,7 @@ def deploy_firmware(
             else:
                 command.extend([str(item), f":{item.name}"])
             run_command(command, check=True)
+        run_command(["mpremote", "connect", resolved_port, "soft-reset"], check=True)
     except FileNotFoundError as error:
         raise RuntimeError("mpremote is required for deploy") from error
 
