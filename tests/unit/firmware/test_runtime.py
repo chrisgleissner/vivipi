@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
 import firmware.runtime as firmware_runtime
-from vivipi.core.models import DiagnosticEvent, DisplayMode
+from vivipi.core.models import DiagnosticEvent, DisplayMode, TransitionThresholds
 
 
 class FakeTime:
@@ -143,6 +143,7 @@ def test_build_runtime_app_uses_injected_factories_and_defers_wifi_startup():
             display_mode,
             overview_columns,
             column_separator,
+            transition_thresholds,
             version="",
             build_time="",
         ):
@@ -157,6 +158,7 @@ def test_build_runtime_app_uses_injected_factories_and_defers_wifi_startup():
             called["display_mode"] = display_mode
             called["overview_columns"] = overview_columns
             called["column_separator"] = column_separator
+            called["transition_thresholds"] = transition_thresholds
             called["version"] = version
             called["build_time"] = build_time
             called["diagnostics"] = None
@@ -181,6 +183,11 @@ def test_build_runtime_app_uses_injected_factories_and_defers_wifi_startup():
     app = firmware_runtime.build_runtime_app(
         {
             "project": {"version": "1.2.3", "build_time": "2025-04-05T12:00Z"},
+            "check_state": {
+                "failures_to_degraded": 1,
+                "failures_to_failed": 1,
+                "successes_to_recover": 1,
+            },
             "device": {
                 "display": {
                     "width_px": 128,
@@ -217,6 +224,11 @@ def test_build_runtime_app_uses_injected_factories_and_defers_wifi_startup():
     assert called["display_mode"] == DisplayMode.COMPACT
     assert called["overview_columns"] == 3
     assert called["column_separator"] == "|"
+    assert called["transition_thresholds"] == TransitionThresholds(
+        failures_to_degraded=1,
+        failures_to_failed=1,
+        successes_to_recover=1,
+    )
     assert called["version"] == "1.2.3"
     assert called["build_time"] == "2025-04-05T12:00Z"
     assert called["diagnostics"] is None

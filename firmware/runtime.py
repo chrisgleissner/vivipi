@@ -12,7 +12,7 @@ except ImportError:  # pragma: no cover - imported on-device
 from vivipi.core.input import InputController
 from vivipi.core.display import normalize_display_config
 from vivipi.core.logging import bound_text
-from vivipi.core.models import DiagnosticEvent, DisplayMode
+from vivipi.core.models import DiagnosticEvent, DisplayMode, TransitionThresholds
 from vivipi.runtime import state as runtime_state
 from vivipi.runtime.metrics import elapsed_ms, start_timer
 from vivipi.runtime import RuntimeApp, build_executor, build_runtime_definitions
@@ -133,6 +133,17 @@ def _safe_build_button_reader(button_reader_factory, buttons_config, input_contr
         return button_reader_factory(buttons_config, input_controller=input_controller), (), ()
     except Exception as error:
         return None, (_boot_diagnostic("BTN", "init failed"),), (("buttons", error),)
+
+
+def _transition_thresholds_from_config(config):
+    raw = config.get("check_state") if isinstance(config, dict) else None
+    if not isinstance(raw, dict):
+        return TransitionThresholds()
+    return TransitionThresholds(
+        failures_to_degraded=int(raw.get("failures_to_degraded", 1)),
+        failures_to_failed=int(raw.get("failures_to_failed", 2)),
+        successes_to_recover=int(raw.get("successes_to_recover", 1)),
+    )
 
 
 def _safe_connect_wifi(wifi_connector, config):
@@ -293,6 +304,7 @@ def build_runtime_app(
         display_mode=DisplayMode(str(display_config.get("mode", str(DisplayMode.STANDARD)))),
         overview_columns=int(display_config.get("columns", 1)),
         column_separator=str(display_config.get("column_separator", " ")),
+        transition_thresholds=_transition_thresholds_from_config(config),
         version=version,
         build_time=build_time_value,
     )

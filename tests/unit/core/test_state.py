@@ -36,6 +36,19 @@ def test_failure_hysteresis_moves_from_ok_to_deg_to_fail():
     assert runtime.status == Status.FAIL
 
 
+def test_immediate_failure_threshold_can_replace_ok_with_fail():
+    runtime = make_check("Router", status=Status.OK)
+    thresholds = TransitionThresholds(failures_to_degraded=1, failures_to_failed=1)
+
+    updated = apply_observation(
+        runtime,
+        CheckObservation(identifier="router", name="Router", status=Status.FAIL),
+        thresholds,
+    )
+
+    assert updated.status == Status.FAIL
+
+
 def test_success_recovers_from_fail_and_unknown():
     failed = CheckRuntime(
         identifier="router",
@@ -55,6 +68,29 @@ def test_success_recovers_from_fail_and_unknown():
         CheckObservation(identifier="nas", name="NAS", status=Status.OK),
     )
     assert discovered.status == Status.OK
+
+
+def test_integrate_observations_recovers_fail_to_ok_without_retaining_stale_status():
+    state = AppState(
+        checks=(
+            CheckRuntime(
+                identifier="router",
+                name="Router",
+                status=Status.FAIL,
+                consecutive_failures=1,
+            ),
+        )
+    )
+
+    updated = integrate_observations(
+        state,
+        (
+            CheckObservation(identifier="router", name="Router", status=Status.OK, details="reachable"),
+        ),
+    )
+
+    assert updated.checks[0].status == Status.OK
+    assert updated.checks[0].details == "reachable"
 
 
 def test_selection_tracks_identity_when_wrapping_sorted_checks():

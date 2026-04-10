@@ -130,13 +130,17 @@ def _check_to_dict(check: CheckDefinition) -> dict[str, object]:
 
 def render_device_runtime_config(settings: dict[str, object], checks: tuple[CheckDefinition, ...]) -> dict[str, object]:
     project = dict(settings.get("project", {})) if isinstance(settings.get("project"), dict) else {}
-    return {
+    runtime_config = {
         "project": project,
         "device": settings["device"],
         "wifi": settings["wifi"],
         "service": settings.get("service", {}),
         "checks": [_check_to_dict(check) for check in checks],
     }
+    check_state = settings.get("check_state")
+    if isinstance(check_state, dict):
+        runtime_config["check_state"] = dict(check_state)
+    return runtime_config
 
 
 def load_runtime_checks(path: str | Path, env: dict[str, str] | None = None) -> tuple[CheckDefinition, ...]:

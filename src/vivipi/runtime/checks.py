@@ -198,6 +198,12 @@ def build_runtime_definitions(config: dict[str, object]) -> tuple[CheckDefinitio
     return tuple(definitions)
 
 
+def load_runtime_checks(path, env=None) -> tuple[CheckDefinition, ...]:
+    from vivipi.core.config import load_checks_config
+
+    return load_checks_config(path, env=env)
+
+
 def portable_ping_runner(target: str, timeout_s: int) -> PingProbeResult:
     def _single_ping() -> PingProbeResult:
         try:

@@ -9,7 +9,16 @@ from vivipi.core.scheduler import due_checks, render_reason
 from vivipi.core.shift import PixelShiftController
 from vivipi.core.state import integrate_observations, page_count, record_diagnostic_events, set_page_index
 from vivipi.core.logging import LogLevel, StructuredLogger, log_field
-from vivipi.core.models import AppMode, AppState, CheckDefinition, DiagnosticEvent, DisplayMode, Status
+from vivipi.core.models import (
+    AppMode,
+    AppState,
+    CheckDefinition,
+    CheckObservation,
+    DiagnosticEvent,
+    DisplayMode,
+    Status,
+    TransitionThresholds,
+)
 from vivipi.core.ring_buffer import RingBuffer
 from vivipi.core.state import overview_checks
 from vivipi.runtime.metrics import MetricsStore, elapsed_ms, start_timer
@@ -41,6 +50,7 @@ class RuntimeApp:
         display_mode: DisplayMode = DisplayMode.STANDARD,
         overview_columns: int = 1,
         column_separator: str = " ",
+        transition_thresholds: TransitionThresholds | None = None,
         version: str = "",
         build_time: str = "",
     ):
@@ -53,6 +63,7 @@ class RuntimeApp:
         self.input_controller = input_controller or InputController()
         self.shift_controller = shift_controller or PixelShiftController()
         self.page_interval_s = page_interval_s
+        self.transition_thresholds = transition_thresholds or TransitionThresholds()
         self.last_started_at: dict[str, float] = {}
         self.state = AppState(
             checks=tuple(
@@ -83,6 +94,8 @@ class RuntimeApp:
         self.network_state_reader = None
         self.memory_snapshot_interval_s = 30.0
         self.last_memory_snapshot_s: float | None = None
+        self.network_reconnect_interval_s = 15.0
+        self.last_network_reconnect_attempt_s: float | None = None
         self.network_state = {
             "ssid": "",
             "connected": False,
@@ -146,6 +159,7 @@ class RuntimeApp:
         if isinstance(config, dict):
             wifi = config.get("wifi", {}) if isinstance(config.get("wifi"), dict) else {}
             self.network_state["ssid"] = str(wifi.get("ssid", "")).strip()
+            self.network_reconnect_interval_s = max(5.0, float(wifi.get("reconnect_interval_s", 15)))
 
         self.logger.info(
             "CORE",
@@ -383,6 +397,26 @@ class RuntimeApp:
         if self.last_memory_snapshot_s is None or (now_s - self.last_memory_snapshot_s) >= interval_s:
             self._capture_memory_snapshot("periodic", now_s=now_s)
 
+    def _maybe_reconnect_network(self, now_s: float):
+        if self.config is None or (self.wifi_reconnector is None and self.wifi_connector is None):
+            return
+
+        if self.network_state_reader is not None:
+            self.network_state.update(dict(self.network_state_reader(self.config or {})))
+
+        if self.network_state.get("connected"):
+            return
+
+        if self.last_network_reconnect_attempt_s is not None:
+            if (now_s - self.last_network_reconnect_attempt_s) < self.network_reconnect_interval_s:
+                return
+
+        self.last_network_reconnect_attempt_s = now_s
+        try:
+            self.reconnect_network(activate_diagnostics=False)
+        except Exception:
+            return
+
     def _assert_debug_invariants(self):
         if not self.debug_mode:
             return
@@ -452,6 +486,21 @@ class RuntimeApp:
                 "last_update_s": now_s,
                 "last_error": str(error) or type(error).__name__,
             }
+            self.state = integrate_observations(
+                self.state,
+                (
+                    CheckObservation(
+                        identifier=definition.identifier,
+                        name=definition.name,
+                        status=Status.FAIL,
+                        details="executor exception",
+                        observed_at_s=now_s,
+                        source_identifier=definition.identifier,
+                    ),
+                ),
+                thresholds=self.transition_thresholds,
+                replace_source_identifier=definition.identifier if _enum_text(definition.check_type) == "SERVICE" else None,
+            )
             self._record_exception("check", error, observed_at_s=now_s, identifier=definition.identifier)
             return None
 
@@ -460,6 +509,7 @@ class RuntimeApp:
         self.state = integrate_observations(
             self.state,
             result.observations,
+            thresholds=self.transition_thresholds,
             replace_source_identifier=result.source_identifier if result.replace_source else None,
         )
         if result.diagnostics:
@@ -569,6 +619,7 @@ class RuntimeApp:
                 events = tuple(self.button_reader.poll())
 
         self._apply_button_events(events)
+        self._maybe_reconnect_network(now_s)
         self._run_due_checks(now_s)
         self._apply_page_rotation(now_s)
         self._apply_shift(now_s)

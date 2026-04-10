@@ -32,6 +32,7 @@ from vivipi.runtime.checks import (
     _telnet_strip_negotiation,
     build_executor,
     build_runtime_definitions,
+    load_runtime_checks,
     portable_ftp_runner,
     portable_http_runner,
     portable_ping_runner,
@@ -80,6 +81,27 @@ def test_build_runtime_definitions_reads_runtime_config_shape():
 
     assert definitions[0].check_type == CheckType.PING
     assert definitions[0].identifier == "router"
+
+
+def test_load_runtime_checks_reads_yaml_for_runtime_validation(tmp_path):
+    checks_path = tmp_path / "checks.yaml"
+    checks_path.write_text(
+        """
+checks:
+  - name: NAS FTP
+    type: ftp
+    target: 192.168.1.167
+    username: ${VIVIPI_NETWORK_USERNAME}
+    password: ${VIVIPI_NETWORK_PASSWORD}
+""".strip(),
+        encoding="utf-8",
+    )
+
+    definitions = load_runtime_checks(checks_path, env={})
+
+    assert definitions[0].identifier == "nas-ftp"
+    assert definitions[0].username is None
+    assert definitions[0].password is None
 
 
 def test_build_runtime_definitions_rejects_invalid_shapes_and_normalizes_blank_prefixes():

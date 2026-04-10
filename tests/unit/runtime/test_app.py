@@ -2,7 +2,7 @@ import pytest
 
 from vivipi.core.execution import CheckExecutionResult
 from vivipi.core.input import Button
-from vivipi.core.models import CheckDefinition, CheckObservation, CheckType, DiagnosticEvent, DisplayMode, Status
+from vivipi.core.models import CheckDefinition, CheckObservation, CheckType, DiagnosticEvent, DisplayMode, Status, TransitionThresholds
 from vivipi.runtime import ButtonEvent, RuntimeApp
 
 
@@ -62,6 +62,70 @@ def test_runtime_app_executes_due_checks_and_updates_state():
     assert reason == "bootstrap"
     assert app.state.checks[0].status == Status.OK
     assert display.frames[-1].rows[0].startswith("Router")
+
+
+def test_runtime_app_executor_exception_replaces_previous_ok_state_on_display():
+    display = FakeDisplay()
+    definition = make_definition("router", check_type=CheckType.HTTP)
+    calls = {"count": 0}
+
+    def executor(check_definition, now_s):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return CheckExecutionResult(
+                source_identifier=check_definition.identifier,
+                observations=(
+                    CheckObservation(
+                        identifier=check_definition.identifier,
+                        name=check_definition.name,
+                        status=Status.OK,
+                        details="HTTP 200",
+                        observed_at_s=now_s,
+                    ),
+                ),
+            )
+        raise OSError("network down")
+
+    app = RuntimeApp(definitions=(definition,), executor=executor, display=display, page_interval_s=0)
+
+    app.tick(0.0)
+    app.last_started_at.clear()
+    app.tick(1.0)
+
+    assert app.state.checks[0].status == Status.DEG
+    assert app.state.checks[0].details == "executor exception"
+    assert app.get_registered_checks()[0]["status"] == "FAIL"
+
+
+def test_runtime_app_applies_immediate_failure_thresholds_when_configured():
+    display = FakeDisplay()
+    definition = make_definition("router", check_type=CheckType.HTTP)
+
+    def executor(check_definition, now_s):
+        return CheckExecutionResult(
+            source_identifier=check_definition.identifier,
+            observations=(
+                CheckObservation(
+                    identifier=check_definition.identifier,
+                    name=check_definition.name,
+                    status=Status.FAIL,
+                    details="timeout",
+                    observed_at_s=now_s,
+                ),
+            ),
+        )
+
+    app = RuntimeApp(
+        definitions=(definition,),
+        executor=executor,
+        display=display,
+        page_interval_s=0,
+        transition_thresholds=TransitionThresholds(failures_to_degraded=1, failures_to_failed=1),
+    )
+
+    app.tick(0.0)
+
+    assert app.state.checks[0].status == Status.FAIL
 
 
 def test_runtime_app_starts_with_unknown_rows_before_the_first_check_runs():

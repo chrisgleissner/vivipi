@@ -79,6 +79,10 @@ checks:
                 "  password: ${VIVIPI_WIFI_PASSWORD}",
                 "service:",
                 "  base_url: ${VIVIPI_SERVICE_BASE_URL}",
+                "check_state:",
+                "  failures_to_degraded: 1",
+                "  failures_to_failed: 1",
+                "  successes_to_recover: 1",
                 "checks_config: checks.yaml",
             ]
         ),
@@ -98,6 +102,7 @@ def test_load_build_deploy_settings_substitutes_environment_placeholders(tmp_pat
     assert settings["wifi"]["ssid"] == "TestWifi"
     assert settings["wifi"]["password"] == "TestPassword"
     assert settings["service"]["base_url"] == FIXTURE_ENV["VIVIPI_SERVICE_BASE_URL"]
+    assert settings["check_state"]["failures_to_failed"] == 1
     assert settings["device"]["display"]["type"] == "waveshare-pico-oled-1.3"
     assert settings["device"]["display"]["width_px"] == 128
     assert settings["device"]["display"]["height_px"] == 64
@@ -134,6 +139,7 @@ def test_write_runtime_config_embeds_wifi_and_checks(tmp_path: Path):
 
     assert rendered["wifi"]["ssid"] == "TestWifi"
     assert rendered["checks"][0]["id"] == "router"
+    assert rendered["check_state"]["failures_to_failed"] == 1
 
 
 def test_build_firmware_bundle_creates_a_releaseable_zip_archive(tmp_path: Path):
@@ -685,6 +691,31 @@ def test_render_device_runtime_config_serializes_inferred_display_column_offset(
     rendered = render_device_runtime_config(settings, checks)
 
     assert rendered["device"]["display"]["column_offset"] == 32
+
+
+def test_render_device_runtime_config_serializes_optional_check_state():
+    settings = {
+        "device": {"board": "pico2w", "buttons": {"a": "GP14", "b": "GP15"}},
+        "wifi": {"ssid": "wifi", "password": "secret"},
+        "service": {},
+        "check_state": {
+            "failures_to_degraded": 1,
+            "failures_to_failed": 1,
+            "successes_to_recover": 1,
+        },
+    }
+    checks = (
+        CheckDefinition(
+            identifier="router",
+            name="Router",
+            check_type=CheckType.PING,
+            target="192.168.1.1",
+        ),
+    )
+
+    rendered = render_device_runtime_config(settings, checks)
+
+    assert rendered["check_state"]["failures_to_failed"] == 1
 
 
 def test_load_runtime_checks_skips_unconfigured_service_checks(tmp_path: Path):
