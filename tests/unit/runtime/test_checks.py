@@ -1,4 +1,5 @@
 import sys
+import builtins
 from types import SimpleNamespace
 from urllib.error import HTTPError
 
@@ -399,6 +400,24 @@ def test_portable_ping_runner_retries_transient_failures(monkeypatch):
     assert sleep_calls == [100, 200]
 
 
+def test_portable_ping_runner_reports_unsupported_without_uping_or_subprocess(monkeypatch):
+    monkeypatch.delitem(sys.modules, "uping", raising=False)
+
+    original_import = builtins.__import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "subprocess":
+            raise ImportError("no subprocess")
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    result = portable_ping_runner("192.168.1.1", 10)
+
+    assert result.ok is False
+    assert result.details == "ICMP unsupported on device"
+
+
 def test_network_retry_helpers_cover_edge_cases(monkeypatch):
     fake_time = SimpleNamespace(sleep_calls=[], sleep_ms=lambda value_ms: fake_time.sleep_calls.append(value_ms))
     monkeypatch.setattr(runtime_checks, "time", fake_time)
@@ -654,7 +673,31 @@ def test_portable_telnet_runner_requests_prompt_and_rejects_invalid_output(monke
 
     assert result.ok is False
     assert result.details == "invalid session output"
-    assert handle.sent == [b"\r\n"]
+    assert handle.sent == [bytes((255, 241)), b"\r\n"]
+
+
+def test_portable_telnet_runner_accepts_nop_response_without_prompt(monkeypatch):
+    class TimeoutThenResponseSocket(FakeSocket):
+        def __init__(self):
+            super().__init__([])
+            self.recv_calls = 0
+
+        def recv(self, _size):
+            self.recv_calls += 1
+            if self.recv_calls == 1:
+                raise OSError("timed out")
+            if self.recv_calls == 2:
+                return b"\xff\xfb\x01READY\r\n"
+            return b""
+
+    handle = TimeoutThenResponseSocket()
+    monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: handle)
+
+    result = portable_telnet_runner("switch.example.local:23", 10)
+
+    assert result.ok is True
+    assert result.details == "session ready"
+    assert handle.sent == [bytes((255, 241))]
 
 
 def test_portable_telnet_runner_handles_password_failure_and_socket_error(monkeypatch):

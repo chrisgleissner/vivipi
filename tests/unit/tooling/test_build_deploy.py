@@ -715,6 +715,32 @@ checks:
     assert all(definition.check_type != CheckType.SERVICE for definition in definitions)
 
 
+def test_load_runtime_checks_treats_missing_auth_placeholders_as_optional(tmp_path: Path):
+    checks_path = tmp_path / "checks.yaml"
+    checks_path.write_text(
+        """
+checks:
+  - name: C64U FTP
+    type: ftp
+    target: 192.168.1.167
+    username: ${VIVIPI_NETWORK_USERNAME}
+    password: ${VIVIPI_NETWORK_PASSWORD}
+  - name: U64 TELNET
+    type: telnet
+    target: 192.168.1.13:23
+    password: ${VIVIPI_NETWORK_PASSWORD}
+""".strip(),
+        encoding="utf-8",
+    )
+
+    definitions = load_runtime_checks(checks_path, env={})
+
+    assert [definition.name for definition in definitions] == ["C64U FTP", "U64 TELNET"]
+    assert definitions[0].username is None
+    assert definitions[0].password is None
+    assert definitions[1].password is None
+
+
 def test_load_runtime_checks_rejects_non_list_roots_and_preserves_invalid_items_for_parser(tmp_path: Path):
     checks_path = tmp_path / "checks.yaml"
     checks_path.write_text("checks: {}\n", encoding="utf-8")
@@ -994,6 +1020,8 @@ def test_deploy_firmware_defaults_to_auto_port_when_not_configured(tmp_path: Pat
     config_path = write_fixture_files(tmp_path)
     commands = []
 
+    monkeypatch.setattr(build_deploy, "_wrap_with_dialout", lambda command: command)
+
     def fake_build_firmware_bundle(*args, **kwargs):
         device_root = tmp_path / "release-no-port" / "vivipi-device-fs"
         device_root.mkdir(parents=True, exist_ok=True)
@@ -1018,9 +1046,11 @@ def test_deploy_firmware_defaults_to_auto_port_when_not_configured(tmp_path: Pat
     assert commands[-1] == ["mpremote", "connect", "auto", "soft-reset"]
 
 
-def test_deploy_firmware_copies_files_via_mpremote(tmp_path: Path):
+def test_deploy_firmware_copies_files_via_mpremote(tmp_path: Path, monkeypatch):
     config_path = write_fixture_files(tmp_path)
     commands = []
+
+    monkeypatch.setattr(build_deploy, "_wrap_with_dialout", lambda command: command)
 
     deploy_firmware(
         config_path,
@@ -1034,6 +1064,29 @@ def test_deploy_firmware_copies_files_via_mpremote(tmp_path: Path):
     assert any(command[-1] == ":boot.py" for command in commands)
     assert any(command[-1] == ":config.json" for command in commands)
     assert commands[-1] == ["mpremote", "connect", "/dev/ttyUSB0", "soft-reset"]
+
+
+def test_deploy_firmware_uses_sg_dialout_when_process_lacks_group_membership(tmp_path: Path, monkeypatch):
+    config_path = write_fixture_files(tmp_path)
+    commands = []
+
+    monkeypatch.setattr(build_deploy.os, "name", "posix")
+    monkeypatch.setattr(build_deploy.os, "getgroups", lambda: [1000])
+    monkeypatch.setattr(build_deploy.os, "getuid", lambda: 1000)
+    monkeypatch.setattr(build_deploy.grp, "getgrnam", lambda name: type("Group", (), {"gr_gid": 20, "gr_mem": ["chris"]})())
+    monkeypatch.setattr(build_deploy.pwd, "getpwuid", lambda uid: type("User", (), {"pw_name": "chris"})())
+
+    deploy_firmware(
+        config_path,
+        tmp_path / "release",
+        env=FIXTURE_ENV,
+        port="/dev/ttyUSB0",
+        run_command=lambda command, check: commands.append(command),
+    )
+
+    assert all(command[:3] == ["sg", "dialout", "-c"] for command in commands)
+    assert "mpremote connect /dev/ttyUSB0 fs cp" in commands[0][3]
+    assert commands[-1] == ["sg", "dialout", "-c", "mpremote connect /dev/ttyUSB0 soft-reset"]
 
 
 def test_deploy_firmware_reports_missing_mpremote(tmp_path: Path):

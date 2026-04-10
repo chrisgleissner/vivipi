@@ -203,7 +203,14 @@ def portable_ping_runner(target: str, timeout_s: int) -> PingProbeResult:
         try:
             import uping  # type: ignore
         except ImportError:
-            import subprocess
+            try:
+                import subprocess
+            except ImportError:
+                return PingProbeResult(
+                    ok=False,
+                    latency_ms=None,
+                    details="ICMP unsupported on device",
+                )
 
             started_at, uses_ticks_ms = _start_timer()
             completed = subprocess.run(
@@ -489,11 +496,24 @@ def _contains_any(value: bytes, markers: tuple[bytes, ...]) -> bool:
     return any(marker in lowered for marker in markers)
 
 
+def _has_alnum_ascii(value: str) -> bool:
+    for character in value:
+        codepoint = ord(character)
+        if 48 <= codepoint <= 57 or 65 <= codepoint <= 90 or 97 <= codepoint <= 122:
+            return True
+    return False
+
+
 def _read_until_markers(handle, markers: tuple[bytes, ...]) -> bytes:
     buffer = bytearray()
     lowered_markers = tuple(marker.lower() for marker in markers)
     while True:
-        chunk = handle.recv(4096)
+        try:
+            chunk = handle.recv(4096)
+        except OSError as error:
+            if _classify_network_error(error) == "timeout":
+                break
+            raise
         if not chunk:
             break
         buffer.extend(_telnet_strip_negotiation(handle, chunk))
@@ -503,6 +523,15 @@ def _read_until_markers(handle, markers: tuple[bytes, ...]) -> bytes:
     return bytes(buffer)
 
 
+def _recv_telnet_chunk(handle, size: int = 4096) -> bytes:
+    try:
+        return handle.recv(size)
+    except OSError as error:
+        if _classify_network_error(error) == "timeout":
+            return b""
+        raise
+
+
 def _looks_like_telnet_output(value: str) -> bool:
     stripped = value.strip()
     if not stripped:
@@ -510,7 +539,7 @@ def _looks_like_telnet_output(value: str) -> bool:
     lowered = stripped.lower()
     if any(marker.decode("utf-8") in lowered for marker in TELNET_FAILURE_MARKERS):
         return False
-    return any(character.isalnum() for character in stripped) or stripped[-1:] in ">#$%"
+    return _has_alnum_ascii(stripped) or stripped[-1:] in ">#$%"
 
 
 def portable_telnet_runner(target: str, timeout_s: int, username: str | None = None, password: str | None = None) -> PingProbeResult:
@@ -523,7 +552,8 @@ def portable_telnet_runner(target: str, timeout_s: int, username: str | None = N
         handle = None
         try:
             handle = _open_socket(host, port, timeout_s)
-            transcript = _read_until_markers(handle, TELNET_LOGIN_MARKERS + TELNET_PASSWORD_MARKERS + TELNET_PROMPT_MARKERS + TELNET_FAILURE_MARKERS)
+            initial_raw = _recv_telnet_chunk(handle)
+            transcript = _telnet_strip_negotiation(handle, initial_raw)
             if _contains_any(transcript, TELNET_FAILURE_MARKERS):
                 return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details="login failed")
 
@@ -538,6 +568,19 @@ def portable_telnet_runner(target: str, timeout_s: int, username: str | None = N
                 transcript += _read_until_markers(handle, TELNET_PROMPT_MARKERS + TELNET_FAILURE_MARKERS)
             if _contains_any(transcript, TELNET_FAILURE_MARKERS):
                 return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details="login failed")
+
+            if transcript:
+                cleaned = transcript.decode("utf-8", "replace")
+                if _looks_like_telnet_output(cleaned):
+                    return PingProbeResult(ok=True, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details="session ready")
+
+            # Some embedded telnet daemons do not present a prompt until nudged; a NOP is enough to
+            # confirm a responsive session without assuming a login shell protocol.
+            handle.sendall(bytes((TELNET_IAC, 241)))
+            _sleep_ms(200)
+            nop_raw = _recv_telnet_chunk(handle, 32)
+            if nop_raw:
+                return PingProbeResult(ok=True, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details="session ready")
 
             if not _contains_any(transcript, TELNET_PROMPT_MARKERS):
                 handle.sendall(b"\r\n")

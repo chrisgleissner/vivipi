@@ -1,10 +1,4 @@
 checks:
-  - name: C64U PING
-    type: ping
-    target: 192.168.1.167
-    interval_s: 15
-    timeout_s: 10
-
   - name: C64U REST
     type: http
     target: http://192.168.1.167/v1/version
@@ -12,9 +6,19 @@ checks:
     interval_s: 15
     timeout_s: 10
 
+  - name: C64U FTP
+    type: ftp
+    target: 192.168.1.167
+    username: ${VIVIPI_NETWORK_USERNAME}
+    password: ${VIVIPI_NETWORK_PASSWORD}
+    interval_s: 15
+    timeout_s: 10
+
   - name: C64U TELNET
     type: telnet
     target: 192.168.1.167:23
+    username: ${VIVIPI_NETWORK_USERNAME}
+    password: ${VIVIPI_NETWORK_PASSWORD}
     interval_s: 15
     timeout_s: 10
 
@@ -25,12 +29,6 @@ checks:
     interval_s: 15
     timeout_s: 10
 
-  - name: U64 PING
-    type: ping
-    target: 192.168.1.13
-    interval_s: 15
-    timeout_s: 10
-
   - name: U64 REST
     type: http
     target: http://192.168.1.13/v1/version
@@ -38,8 +36,18 @@ checks:
     interval_s: 15
     timeout_s: 10
 
+  - name: U64 FTP
+    type: ftp
+    target: 192.168.1.13
+    username: ${VIVIPI_NETWORK_USERNAME}
+    password: ${VIVIPI_NETWORK_PASSWORD}
+    interval_s: 15
+    timeout_s: 10
+
   - name: U64 TELNET
     type: telnet
     target: 192.168.1.13:23
+    username: ${VIVIPI_NETWORK_USERNAME}
+    password: ${VIVIPI_NETWORK_PASSWORD}
     interval_s: 15
     timeout_s: 10
