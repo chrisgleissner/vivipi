@@ -36,9 +36,42 @@ def _run_adb(command: list[str]) -> SimpleNamespace:
     return SimpleNamespace(returncode=completed.returncode, stdout=completed.stdout, stderr=completed.stderr)
 
 
-def collect_adb_service_payload(run_command=None) -> dict[str, list[dict[str, object]]]:
+def _target_device(devices: tuple[AdbDevice, ...], target_serial: str) -> AdbDevice | None:
+    for device in devices:
+        if device.serial == target_serial:
+            return device
+    return None
+
+
+def _should_recover(completed: SimpleNamespace, devices: tuple[AdbDevice, ...], target_serial: str | None = None) -> bool:
+    if completed.returncode != 0:
+        return True
+    if target_serial is not None:
+        target = _target_device(devices, target_serial)
+        return target is None or target.state != "device"
+    return any(device.state != "device" for device in devices)
+
+
+def _recover_adb_transport(command_runner) -> None:
+    command_runner(["adb", "start-server"])
+    command_runner(["adb", "reconnect", "offline"])
+
+
+def _collect_devices(run_command=None, *, target_serial: str | None = None) -> tuple[SimpleNamespace, tuple[AdbDevice, ...]]:
     command_runner = run_command or _run_adb
     completed = command_runner(["adb", "devices", "-l"])
+    devices = parse_adb_devices(str(completed.stdout)) if completed.returncode == 0 else ()
+
+    if _should_recover(completed, devices, target_serial=target_serial):
+        _recover_adb_transport(command_runner)
+        completed = command_runner(["adb", "devices", "-l"])
+        devices = parse_adb_devices(str(completed.stdout)) if completed.returncode == 0 else ()
+
+    return completed, devices
+
+
+def collect_adb_service_payload(run_command=None) -> dict[str, list[dict[str, object]]]:
+    completed, devices = _collect_devices(run_command=run_command)
 
     if completed.returncode != 0:
         return {
@@ -52,7 +85,6 @@ def collect_adb_service_payload(run_command=None) -> dict[str, list[dict[str, ob
             ]
         }
 
-    devices = parse_adb_devices(str(completed.stdout))
     if not devices:
         return {
             "checks": [
@@ -83,8 +115,7 @@ def collect_adb_service_payload(run_command=None) -> dict[str, list[dict[str, ob
 
 
 def collect_adb_device_status(target_serial: str, target_name: str, run_command=None) -> tuple[int, dict[str, object]]:
-    command_runner = run_command or _run_adb
-    completed = command_runner(["adb", "devices", "-l"])
+    completed, devices = _collect_devices(run_command=run_command, target_serial=target_serial)
 
     if completed.returncode != 0:
         return 503, {
@@ -94,7 +125,7 @@ def collect_adb_device_status(target_serial: str, target_name: str, run_command=
             "details": str(completed.stderr).strip() or "adb command failed",
         }
 
-    for device in parse_adb_devices(str(completed.stdout)):
+    for device in devices:
         if device.serial != target_serial:
             continue
         if device.state == "device":

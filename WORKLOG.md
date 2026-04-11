@@ -254,3 +254,126 @@
   - host-side global serialization was one real difference and is now removed from `vivipulse`
   - after removing that difference, the host still does not reproduce the Ultimate failures seen from the Pico in the same time window
   - the remaining gap is therefore more likely in the Pico-side network stack or timing environment than in the shared direct probe definitions alone
+
+## 2026-04-11T15:10:00Z
+
+- Investigated the new `Pico OLED 1.3` button failure report against `docs/spec.md` and the live firmware path.
+- Confirmed the current button pin assignment remained correct for this board:
+  - `GP15` = User Key 0
+  - `GP17` = User Key 1
+- Identified three concrete causes for “no display change” on button press:
+  - `RuntimeApp._apply_button_events()` had been repurposed to map `Button.A` to debug-mode toggle and `Button.B` to manual refresh instead of the spec-defined next/detail navigation behavior.
+  - `render_frame()` did not visually mark the selected check in overview mode, so selection changes were invisible on-screen even when the state changed.
+  - `firmware/input.py` only emitted debounced edge presses, so `Button.A` did not provide the required `500 ms` auto-repeat behavior on hold.
+- Implemented the button fix:
+  - `firmware/input.py`
+    - added held-button tracking and repeat-step emission for `Button.A`
+    - kept `Button.B` single-fire while pressed
+  - `src/vivipi/runtime/app.py`
+    - restored spec-driven button routing through `InputController.apply()`
+    - preserved compatibility with plain-string button IDs when present
+  - `src/vivipi/core/render.py`
+    - restored visible overview selection highlighting via `inverted_row` for standard overview
+    - added selected-cell inversion spans for compact overview
+- Updated focused behavioral coverage and traceability:
+  - `tests/unit/firmware/test_firmware_input.py`
+  - `tests/unit/runtime/test_app.py`
+  - `tests/unit/core/test_render.py`
+  - `docs/spec-traceability.md`
+- Validation results:
+  - `./.venv/bin/python -m pytest -o addopts='' tests/unit/firmware/test_firmware_input.py tests/unit/core/test_input.py tests/unit/core/test_render.py tests/unit/runtime/test_app.py` passed with `57 passed`
+  - `./.venv/bin/python -m ruff check firmware/input.py src/vivipi/runtime/app.py src/vivipi/core/render.py tests/unit/firmware/test_firmware_input.py tests/unit/core/test_render.py tests/unit/runtime/test_app.py docs/spec-traceability.md` passed
+  - `./.venv/bin/python -m pytest -o addopts='' tests/spec/test_traceability.py` passed with `3 passed`
+- Deployed the updated bundle to the connected Pico with `./build deploy`.
+- Remaining gap:
+  - I deployed the fix, but I cannot physically press the two on-board buttons from this shell, so final real-device button proof still requires a human press and visible/serial capture.
+
+## 2026-04-11T15:40:00Z
+
+- Implemented a simpler local host-side health workflow in `vivipulse`:
+  - added `scripts/vivipulse --mode local` as a one-command single-pass run of all resolved local checks
+  - covered it in `tests/unit/tooling/test_vivipulse_cli.py`
+- Hardened the ADB-backed host health path for Kubuntu boot/resume:
+  - `src/vivipi/services/adb.py` now attempts a bounded `adb start-server` plus `adb reconnect offline` recovery before returning the final device state when `adb` is down or the target device is offline/missing
+  - `scripts/run_adb_service.sh` now supports `serve`, `start`, and `ensure-adb` modes
+  - added `scripts/install_adb_service_user_units.sh` to install and enable user-level systemd units for the `:8081` ADB health endpoint and periodic `adb` recovery
+- Installed the user units on this host:
+  - `~/.config/systemd/user/vivipi-adb-service.service`
+  - `~/.config/systemd/user/vivipi-adb-recover.service`
+  - `~/.config/systemd/user/vivipi-adb-recover.timer`
+- Verified the live host-side ADB endpoint after installation:
+  - `curl http://127.0.0.1:8081/adb/9B081FFAZ001WX` returned `status = OK` for the connected Pixel 4
+- Verified the simplified local health workflow end to end:
+  - `scripts/vivipulse --mode local --json`
+  - artifact written to `artifacts/vivipulse/20260411T143936Z-local`
+  - result: `7` requests, `0` transport failures, active checks `c64u-rest`, `c64u-ftp`, `c64u-telnet`, `pixel4-adb`, `u64-rest`, `u64-ftp`, `u64-telnet`
+- Validation results:
+  - `./.venv/bin/python -m pytest -o addopts='' tests/unit/services/test_adb.py tests/unit/services/test_adb_service.py tests/unit/tooling/test_vivipulse_cli.py` passed with `37 passed`
+  - `./.venv/bin/python -m ruff check src/vivipi/services/adb.py src/vivipi/tooling/vivipulse.py tests/unit/services/test_adb.py tests/unit/tooling/test_vivipulse_cli.py README.md` passed
+  - `bash -n scripts/run_adb_service.sh scripts/install_adb_service_user_units.sh` passed
+- Full repository test status after this turn:
+  - `./build test` now passes functionally with `418 passed`
+  - the repository still fails the global coverage gate at `94.66%` versus the required `96%`; that remaining gap is broader than the specific ADB/button/local-run fixes in this turn
+
+## 2026-04-11T18:06:40Z
+
+- Task: `fix-buttons phase-a ladder + step-1 assert`
+- Action:
+  - re-read [docs/research/fix-buttons/PLAN.md](docs/research/fix-buttons/PLAN.md), [docs/spec.md](docs/spec.md), [firmware/input.py](firmware/input.py), [src/vivipi/runtime/app.py](src/vivipi/runtime/app.py), and the button/runtime unit tests before editing
+  - ran live ladder commands that were possible from this shell:
+    - `sg dialout -c 'mpremote connect auto exec "import machine; print(machine.freq())"'`
+    - `sg dialout -c 'mpremote connect auto ls /'`
+    - `sg dialout -c 'mpremote connect auto exec "from machine import Pin; import time; a=Pin(15, Pin.IN, Pin.PULL_UP); b=Pin(17, Pin.IN, Pin.PULL_UP); print(\"idle\", a.value(), b.value()); [print(a.value(), b.value()) or time.sleep_ms(50) for _ in range(10)]"'`
+    - `sg dialout -c 'timeout 3s mpremote connect auto run scripts/monitor_pico_buttons.py'`
+- Result:
+  - Phase 0 passed with live board reachability and deployed runtime files present
+  - Phase 1 showed the expected idle-high pull-up baseline on `GP15` / `GP17`
+  - Phase 3 showed `pull=up idle=1` for both buttons at startup
+  - actual press pairs, boot self-test confirmation, and OLED observations were blocked because this shell could not physically press the HAT buttons or watch the display
+- Next step: apply `5.A + 5.B + 5.C` together because the blocked hardware actuation prevented branch disambiguation and the plan explicitly allows the safe vendor-equivalent simplifications in that case
+
+## 2026-04-11T18:18:00Z
+
+- Task: `fix-buttons 5.a 5.b 5.c implementation`
+- Action:
+  - touched [firmware/input.py](firmware/input.py), [src/vivipi/runtime/app.py](src/vivipi/runtime/app.py), [tests/unit/firmware/test_firmware_input.py](tests/unit/firmware/test_firmware_input.py), [tests/unit/runtime/test_app.py](tests/unit/runtime/test_app.py), and [docs/spec-traceability.md](docs/spec-traceability.md)
+  - code delta before documentation append: `5 files changed, 415 insertions(+), 158 deletions(-)` from `git diff --stat -- firmware/input.py src/vivipi/runtime/app.py tests/unit/firmware/test_firmware_input.py tests/unit/runtime/test_app.py docs/spec-traceability.md`
+  - removed `_sample_with_pull`, `_detect_bias`, `_bind_irq`, `_drain_latched_presses`, and the IRQ latch state from `ButtonReader`
+  - defaulted string button config to pull-up, kept explicit `pull="down"` support, and preserved the polling/debounce/repeat path with the `Button.B` one-step clamp
+  - added a `150 ms` `BTN <button>` runtime overlay so accepted button presses visibly acknowledge even when selection or mode do not change
+- Result:
+  - firmware and runtime now match the plan’s requested root-cause fixes without changing the `snapshot()` shape
+  - firmware input coverage now exercises constructor defaults, explicit pull-down, single press/release, A repeat, B clamp, snapshot state, and rejection of the removed `auto` mode
+- Next step: run focused pytest, then repository lint / coverage / firmware build / deploy gates
+
+## 2026-04-11T18:27:00Z
+
+- Task: `fix-buttons validation and deploy`
+- Action:
+  - ran `./.venv/bin/python -m pytest -o addopts='' tests/unit/firmware/test_firmware_input.py tests/unit/runtime/test_app.py`
+  - ran `./build test`
+  - ran `./build lint`
+  - ran `./build coverage`
+  - ran `./build build-firmware`
+  - ran `./build deploy`
+  - re-ran `sg dialout -c 'timeout 3s mpremote connect auto run scripts/monitor_pico_buttons.py'` after deploy
+- Result:
+  - focused button slice passed with `35 passed`
+  - full repository pytest passed functionally with `429 passed`
+  - `./build lint` passed
+  - repository coverage measured `94.86%`, which is above the prompt’s `>=91%` target but still below the repo-wide `96%` fail-under, so `./build test` / `./build coverage` exit non-zero on the broader global coverage gate
+  - firmware bundle build succeeded and deploy succeeded to the connected Pico
+  - post-deploy monitor startup still printed `CONFIG button=A pin=GP15 pull=up idle=1` and the same for `B`
+- Next step: append the final execution log, plan extension, and operator-deferred hardware runbook
+
+## 2026-04-11T18:06:40Z
+
+- Task: `fix-buttons plan and spec reconciliation`
+- Action:
+  - appended the ladder evidence and chosen fix branches to [docs/research/fix-buttons/PLAN.md](docs/research/fix-buttons/PLAN.md)
+  - added the plan extension to [PLANS.md](PLANS.md)
+  - refreshed [docs/spec-traceability.md](docs/spec-traceability.md) for the new firmware input test names
+  - recorded the operator runbook for the remaining real-device proof steps in this worklog and the execution log
+- Result:
+  - required documentation updates are in place and the remaining uncertainty is explicit: the code, tests, lint, firmware build, and deploy are complete; the only unresolved proof requires a human to press KEY0 / KEY1 and observe the OLED on the real board
+- Next step: operator reruns phases 1–4 on hardware and appends the resulting serial / OLED evidence

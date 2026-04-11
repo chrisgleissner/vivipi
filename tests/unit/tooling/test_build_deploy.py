@@ -1,5 +1,7 @@
+import importlib.util
 import json
 import runpy
+import sys
 import zipfile
 from pathlib import Path
 
@@ -1173,6 +1175,26 @@ def test_deploy_firmware_copies_files_via_mpremote(tmp_path: Path, monkeypatch):
     assert any(command[-1] == ":boot.py" for command in commands)
     assert any(command[-1] == ":config.json" for command in commands)
     assert commands[-1] == ["mpremote", "connect", "/dev/ttyUSB0", "soft-reset"]
+
+
+def test_build_firmware_bundle_staged_entrypoint_imports_on_flattened_filesystem(tmp_path: Path):
+    config_path = write_fixture_files(tmp_path)
+
+    build_firmware_bundle(config_path, tmp_path / "release", env=FIXTURE_ENV, version_resolver=lambda: "0.0.0-test")
+
+    staging_dir = tmp_path / "release" / "vivipi-device-fs"
+    sys.path.insert(0, str(staging_dir))
+    try:
+        spec = importlib.util.spec_from_file_location("staged_main", staging_dir / "main.py")
+        module = importlib.util.module_from_spec(spec)
+        assert spec is not None
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+        assert callable(module.main)
+    finally:
+        sys.path.remove(str(staging_dir))
+        for module_name in ("runtime", "display", "input", "displays", "vivipi"):
+            sys.modules.pop(module_name, None)
 
 
 def test_deploy_firmware_uses_sg_dialout_when_process_lacks_group_membership(tmp_path: Path, monkeypatch):

@@ -240,7 +240,7 @@ def test_runtime_app_rotates_over_filtered_compact_pages_only():
     assert display.frames[-1].rows[0].startswith("Echo")
 
 
-def test_runtime_app_maps_button_b_to_refresh_without_leaving_overview():
+def test_runtime_app_enters_detail_on_button_b_and_returns_to_overview():
     display = FakeDisplay()
     definition = make_definition("router")
 
@@ -269,9 +269,75 @@ def test_runtime_app_maps_button_b_to_refresh_without_leaving_overview():
 
     next_reason = app.tick(1.0, button_events=(ButtonEvent(button=Button.B, held_ms=30),))
 
-    assert next_reason == "overlay"
+    assert next_reason == "state"
+    assert app.state.mode.value == "detail"
+    assert display.frames[-1].rows[0].startswith("Router")
+    assert display.frames[-1].rows[1].startswith("STATUS:")
+
+    final_reason = app.tick(2.0, button_events=(ButtonEvent(button=Button.B, held_ms=30),))
+
+    assert final_reason == "state"
     assert app.state.mode.value == "overview"
-    assert display.frames[-1].rows[-1].strip() == "REFRESH"
+
+
+def test_runtime_app_moves_selection_with_button_a():
+    display = FakeDisplay()
+    definitions = (make_definition("alpha"), make_definition("bravo"))
+
+    def executor(check_definition, now_s):
+        return CheckExecutionResult(
+            source_identifier=check_definition.identifier,
+            observations=(
+                CheckObservation(
+                    identifier=check_definition.identifier,
+                    name=check_definition.name,
+                    status=Status.OK,
+                    observed_at_s=now_s,
+                ),
+            ),
+        )
+
+    app = RuntimeApp(definitions=definitions, executor=executor, display=display, page_interval_s=0)
+
+    app.tick(0.0)
+    reason = app.tick(1.0, button_events=(ButtonEvent(button=Button.A, held_ms=30),))
+
+    assert reason == "state"
+    assert app.state.selected_id == "bravo"
+    assert display.frames[-1].inverted_row == 1
+
+
+def test_apply_button_events_sets_and_clears_press_feedback_for_no_op_button_press():
+    display = FakeDisplay()
+    definition = make_definition("router")
+
+    app = RuntimeApp(
+        definitions=(definition,),
+        executor=lambda check_definition, now_s: CheckExecutionResult(
+            source_identifier=check_definition.identifier,
+            observations=(
+                CheckObservation(
+                    identifier=check_definition.identifier,
+                    name=check_definition.name,
+                    status=Status.OK,
+                    observed_at_s=now_s,
+                ),
+            ),
+        ),
+        display=display,
+        page_interval_s=0,
+        probe_time_provider=lambda: 2.0,
+    )
+
+    app.tick(0.0)
+    unchanged_state = app.state
+
+    app._apply_button_events((ButtonEvent(button=Button.A, held_ms=30),))
+
+    assert app.state == unchanged_state
+    assert app.press_feedback_until_s == pytest.approx(2.15)
+    assert app._press_feedback_text(2.0) == "BTN A"
+    assert app._press_feedback_text(2.2) is None
 
 
 def test_runtime_app_validates_page_interval_and_uses_button_reader_when_present():
@@ -283,12 +349,29 @@ def test_runtime_app_validates_page_interval_and_uses_button_reader_when_present
             return (ButtonEvent(button=Button.B, held_ms=30),)
 
     display = FakeDisplay()
-    app = RuntimeApp(definitions=(), executor=lambda definition, now_s: None, display=display, button_reader=FakeButtonReader())
+    definition = make_definition("router")
+    app = RuntimeApp(
+        definitions=(definition,),
+        executor=lambda check_definition, now_s: CheckExecutionResult(
+            source_identifier=check_definition.identifier,
+            observations=(
+                CheckObservation(
+                    identifier=check_definition.identifier,
+                    name=check_definition.name,
+                    status=Status.OK,
+                    observed_at_s=now_s,
+                ),
+            ),
+        ),
+        display=display,
+        button_reader=FakeButtonReader(),
+    )
 
     reason = app.tick(0.0)
 
     assert reason == "bootstrap"
-    assert display.frames[-1].rows[-1].strip() == "REFRESH"
+    assert app.state.mode.value == "detail"
+    assert display.frames[-1].rows[0].startswith("Router")
 
 
 def test_runtime_app_helper_functions_cover_platform_fallbacks(monkeypatch):
@@ -403,7 +486,7 @@ def test_runtime_app_accepts_plain_string_button_events():
     reason = app.tick(0.0, button_events=(ButtonEvent(button="B", held_ms=30),))
 
     assert reason == "bootstrap"
-    assert display.frames[-1].rows[-1].strip() == "REFRESH"
+    assert app.state.mode.value == "detail"
 
 
 def test_runtime_app_record_result_falls_back_to_first_observation_and_warns_for_degraded_status():
@@ -593,6 +676,34 @@ def test_runtime_app_background_worker_queue_controls_and_reset_paths(monkeypatc
     assert app.completed_checks == []
     assert app.active_workers == set()
 
+
+def test_runtime_app_queues_probe_traces_from_background_workers_and_drains_them():
+    definition = make_definition("router", check_type=CheckType.HTTP)
+    app = RuntimeApp(definitions=(definition,), executor=lambda definition, now_s: None, display=FakeDisplay(), page_interval_s=0)
+
+    class FakeLock:
+        def __init__(self):
+            self.depth = 0
+
+        def acquire(self):
+            self.depth += 1
+
+        def release(self):
+            self.depth -= 1
+
+    app.background_workers_enabled = True
+    app.background_lock = FakeLock()
+
+    app.emit_probe_trace(definition, "socket-open", {"stage": "connect", "target": "192.0.2.1:80"})
+
+    assert len(app.pending_probe_traces) == 1
+    assert not any("[INFO][PROBE]" in line for line in app.get_logs())
+
+    app._drain_probe_traces()
+
+    assert app.pending_probe_traces == []
+    assert any(line.startswith("[INFO][PROBE] socket-open") and "id=router" in line for line in app.get_logs())
+
 def test_runtime_app_manual_control_overlay_feedback_and_propagation_paths():
     definition = make_definition("router")
     app = RuntimeApp(definitions=(definition,), executor=lambda definition, now_s: None, display=FakeDisplay(), page_interval_s=0, page_size=2)
@@ -640,6 +751,7 @@ def test_runtime_app_manual_control_overlay_feedback_and_propagation_paths():
 
 def test_runtime_app_button_a_probe_slot_and_network_control_edge_paths(monkeypatch):
     definition = make_definition("router", check_type=CheckType.HTTP)
+    second_definition = replace(definition, identifier="switch", name="Switch", target="192.168.1.2")
     sleep_calls = []
     display = FakeDisplay()
 
@@ -658,7 +770,7 @@ def test_runtime_app_button_a_probe_slot_and_network_control_edge_paths(monkeypa
         )
 
     app = RuntimeApp(
-        definitions=(definition,),
+        definitions=(definition, second_definition),
         executor=executor,
         display=display,
         page_interval_s=0,
@@ -670,9 +782,9 @@ def test_runtime_app_button_a_probe_slot_and_network_control_edge_paths(monkeypa
     reason = app.tick(0.0, button_events=(ButtonEvent(button=Button.A, held_ms=30),))
 
     assert reason == "bootstrap"
-    assert app.debug_mode is True
-    assert display.frames[-1].rows[-1].strip() == "DBG ON"
-    assert any(line.startswith("[INFO][BTN] action") and "action=debug" in line for line in app.get_logs())
+    assert app.state.selected_id == "switch"
+    assert display.frames[-1].inverted_row == 1
+    assert any(line.startswith("[INFO][BTN] action") and "selected=switch" in line for line in app.get_logs())
 
     app.inject_diagnostics((), activate=False)
 

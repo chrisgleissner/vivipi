@@ -479,7 +479,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--checks-config")
     parser.add_argument("--runtime-config")
     parser.add_argument("--build-config")
-    parser.add_argument("--mode", choices=("plan", "reproduce", "search", "soak"), required=True)
+    parser.add_argument("--mode", choices=("plan", "local", "reproduce", "search", "soak"), required=True)
     parser.add_argument("--duration")
     parser.add_argument("--passes", type=int)
     parser.add_argument("--same-host-backoff-ms", type=int)
@@ -543,6 +543,9 @@ def main(argv: list[str] | None = None, *, prompt=input, output_stream=None) -> 
 
     if args.mode == "plan":
         pass
+    elif args.mode == "local":
+        runner = runner_factory(resolved.profile)
+        outcome = runner.run_passes(1)
     elif args.mode == "reproduce":
         runner = runner_factory(resolved.profile)
         if duration_s is not None:

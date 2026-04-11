@@ -253,6 +253,50 @@ checks:
     assert "firmware.main.main -> firmware.runtime.run_forever" in (artifact_dir / "reuse-map.txt").read_text(encoding="utf-8")
 
 
+def test_main_local_mode_runs_one_pass_without_extra_flags(tmp_path, monkeypatch):
+    runtime_path = tmp_path / "config.json"
+    runtime_path.write_text(
+        json.dumps(
+            {
+                "checks": [
+                    {"id": "alpha", "name": "Alpha", "type": "PING", "target": "shared.local"},
+                ],
+                "probe_schedule": {"allow_concurrent_same_host": False, "same_host_backoff_ms": 250},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        tooling_vivipulse,
+        "build_executor",
+        lambda: (lambda definition, observed_at_s: success_result(definition, observed_at_s)),
+    )
+
+    output = io.StringIO()
+
+    exit_code = tooling_vivipulse.main(
+        [
+            "--runtime-config",
+            str(runtime_path),
+            "--mode",
+            "local",
+            "--artifacts-dir",
+            str(tmp_path / "artifacts"),
+            "--json",
+        ],
+        output_stream=output,
+    )
+
+    payload = json.loads(output.getvalue())
+    artifact_dir = Path(payload["artifacts_dir"])
+
+    assert exit_code == 0
+    assert payload["mode"] == "local"
+    assert payload["outcome"]["request_count"] == 1
+    assert artifact_dir.is_dir()
+
+
 def test_render_helpers_cover_empty_branches(tmp_path):
     resolved = tooling_vivipulse.ResolvedInput(
         definitions=(make_definition("alpha"),),

@@ -2,9 +2,6 @@ from __future__ import annotations
 
 import os
 import re
-from pathlib import Path
-
-import yaml
 
 from vivipi.core.models import CheckDefinition, CheckType, ProbeSchedulingPolicy
 
@@ -163,8 +160,10 @@ def parse_checks_config(raw: object) -> tuple[CheckDefinition, ...]:
     return tuple(definitions)
 
 
-def load_checks_config(path: str | Path, env: dict[str, str] | None = None) -> tuple[CheckDefinition, ...]:
-    config_path = Path(path)
-    raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+def load_checks_config(path: str | os.PathLike[str], env: dict[str, str] | None = None) -> tuple[CheckDefinition, ...]:
+    import yaml
+
+    with open(path, "r", encoding="utf-8") as handle:
+        raw = yaml.safe_load(handle.read()) or {}
     raw = _resolve_placeholders(raw, env or dict(os.environ))
     return parse_checks_config(raw)

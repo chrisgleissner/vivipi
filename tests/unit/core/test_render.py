@@ -29,7 +29,7 @@ def test_idle_mode_is_centered_and_uses_the_full_grid():
     assert frame.inverted_row is None
 
 
-def test_overview_paginates_without_row_inversion():
+def test_overview_paginates_with_selected_row_inversion():
     checks = tuple(
         make_check(identifier=name.casefold(), name=name)
         for name in ("Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel", "India")
@@ -38,7 +38,7 @@ def test_overview_paginates_without_row_inversion():
 
     frame = render_frame(state)
 
-    assert frame.inverted_row is None
+    assert frame.inverted_row == 0
     assert frame.rows[0].startswith("India")
     assert all(len(row) == 16 for row in frame.rows)
 
@@ -52,9 +52,10 @@ def test_render_frame_respects_dynamic_grid_dimensions():
     assert len(frame.rows) == 3
     assert all(len(row) == 12 for row in frame.rows)
     assert frame.rows[2].startswith("Charlie")
+    assert frame.inverted_row == 2
 
 
-def test_overview_selection_does_not_invert_rows():
+def test_overview_without_selection_does_not_invert_rows():
     state = AppState(checks=(make_check("router", "Router"),), selected_id=None)
 
     frame = render_frame(state)
@@ -82,7 +83,7 @@ def test_standard_single_column_overview_keeps_legacy_output_exactly():
     frame = render_frame(state)
 
     assert frame.rows[0] == "Router      FAIL"
-    assert frame.inverted_row is None
+    assert frame.inverted_row == 0
     assert frame.inverted_spans == ()
     assert frame.failure_spans == (InvertedSpan(row_index=0, start_column=12, end_column=16),)
 
@@ -103,7 +104,7 @@ def test_compact_mode_shows_all_healthy_checks_without_suffixes_when_no_failures
     frame = render_frame(state)
 
     assert frame.rows == ("Bravo   |Alpha  ",)
-    assert frame.inverted_spans == ()
+    assert frame.inverted_spans == (InvertedSpan(row_index=0, start_column=9, end_column=16),)
     assert frame.failure_spans == ()
 
 
@@ -124,6 +125,9 @@ def test_compact_mode_filters_to_non_healthy_checks_and_marks_only_failed_text_s
     frame = render_frame(state)
 
     assert frame.rows == ("BravoX  |Charli!",)
+    assert frame.inverted_spans == (
+        InvertedSpan(row_index=0, start_column=9, end_column=16),
+    )
     assert frame.failure_spans == (
         InvertedSpan(row_index=0, start_column=0, end_column=6),
     )

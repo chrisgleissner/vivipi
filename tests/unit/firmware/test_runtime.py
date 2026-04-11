@@ -263,6 +263,41 @@ def test_build_executor_with_optional_trace_uses_trace_sink_when_runtime_app_exp
     assert built.__self__ is app
     assert built.__func__ is FakeApp.emit_probe_trace
 
+def test_build_runtime_app_disables_trace_sink_when_background_workers_are_enabled():
+    trace_sinks = []
+
+    class FakeApp:
+        background_workers_enabled = True
+
+        def __init__(self, **kwargs):
+            self.executor = None
+            self.logger = SimpleNamespace(sink=None)
+
+        def emit_probe_trace(self, definition, event, fields):
+            return (definition, event, fields)
+
+        def configure_observability(self, **kwargs):
+            return None
+
+        def _refresh_network_state(self, **kwargs):
+            return None
+
+    app = firmware_runtime.build_runtime_app(
+        {"device": {"display": {"width_px": 128, "height_px": 64, "font": {"width_px": 8, "height_px": 8}}}},
+        input_controller_factory=lambda: object(),
+        display_factory=lambda config: SimpleNamespace(show_boot_logo=lambda version: None),
+        button_reader_factory=lambda config, input_controller: None,
+        runtime_app_factory=lambda **kwargs: FakeApp(**kwargs),
+        definitions_builder=lambda config: (),
+        executor_factory=lambda trace_sink=None: trace_sinks.append(trace_sink) or object(),
+        wifi_connector=lambda config: (),
+        now_provider=lambda: 0.0,
+        sleep_ms=lambda ms: None,
+    )
+
+    assert app.executor is not None
+    assert trace_sinks == [None]
+
 
 def test_build_runtime_app_does_not_prime_initial_checks_during_boot():
     called = {}
@@ -533,6 +568,154 @@ def test_build_runtime_app_does_not_wait_for_boot_logo_or_wifi_during_boot():
 
     assert sleep_calls == []
     assert wifi_calls == []
+
+
+def test_build_runtime_app_runs_button_self_test_when_enabled():
+    calls = []
+
+    class FakeApp:
+        def __init__(self, **kwargs):
+            self.executor = None
+
+        def inject_diagnostics(self, diagnostics, activate=True):
+            pass
+
+    display = SimpleNamespace(show_boot_logo=lambda version: None)
+    button_reader = object()
+
+    original_self_test = firmware_runtime._run_button_self_test
+    firmware_runtime._run_button_self_test = (
+        lambda display, button_reader, button_config, row_width, page_size, now_provider, sleep_ms: calls.append(
+            {
+                "display": display,
+                "button_reader": button_reader,
+                "button_config": button_config,
+                "row_width": row_width,
+                "page_size": page_size,
+            }
+        )
+    )
+    try:
+        firmware_runtime.build_runtime_app(
+            {
+                "project": {"version": "0.1.0"},
+                "device": {
+                    "display": {
+                        "width_px": 128,
+                        "height_px": 64,
+                        "font": {"width_px": 8, "height_px": 8},
+                    },
+                    "buttons": {"a": "GP15", "b": "GP17", "startup_self_test_s": 12},
+                },
+            },
+            input_controller_factory=lambda: object(),
+            display_factory=lambda config: display,
+            button_reader_factory=lambda config, input_controller: button_reader,
+            runtime_app_factory=FakeApp,
+            definitions_builder=lambda config: (),
+            executor_factory=lambda trace_sink=None: object(),
+            wifi_connector=lambda config: (),
+            now_provider=lambda: 0.0,
+            sleep_ms=lambda ms: None,
+        )
+    finally:
+        firmware_runtime._run_button_self_test = original_self_test
+
+    assert calls == [
+        {
+            "display": display,
+            "button_reader": button_reader,
+            "button_config": {"a": "GP15", "b": "GP17", "startup_self_test_s": 12},
+            "row_width": 16,
+            "page_size": 8,
+        }
+    ]
+
+
+def test_button_self_test_frame_shows_configured_and_candidate_pins():
+    frame = firmware_runtime._button_self_test_frame(
+        {
+            "A": {"pin": "GP15", "raw": 0, "stable": 1},
+            "B": {"pin": "GP17", "raw": 1, "stable": 1},
+        },
+        {"GP15": 0, "GP17": 1, "GP21": 1, "GP22": 1},
+        row_width=16,
+        page_size=8,
+        remaining_s=11.4,
+    )
+
+    assert tuple(row.rstrip() for row in frame.rows[:7]) == (
+        "BTN SELFTEST",
+        "A15 r0 s1",
+        "B17 r1 s1",
+        "15:0 17:1",
+        "21:1 22:1",
+        "PRESS BTN NOW",
+        "T-11.4s",
+    )
+
+
+def test_run_button_self_test_skips_when_disabled(monkeypatch):
+    logs = []
+
+    monkeypatch.setattr(firmware_runtime, "_serial_log", lambda stage, message, **fields: logs.append((stage, message, fields)))
+
+    ran = firmware_runtime._run_button_self_test(
+        display=object(),
+        button_reader=object(),
+        button_config={"a": "GP15", "b": "GP17"},
+        row_width=16,
+        page_size=8,
+        now_provider=lambda: 0.0,
+        sleep_ms=lambda ms: None,
+    )
+
+    assert ran is False
+    assert logs == [("BTNTEST", "skip", {"reason": "disabled"})]
+
+
+def test_run_forever_runs_second_chance_button_self_test_before_startup_tick(monkeypatch):
+    class FakeApp:
+        def __init__(self):
+            self.boot_logo_until_s = 18.5
+            self.tick_calls = []
+            self.prime_calls = []
+            self.config = {"device": {"buttons": {"a": "GP15", "b": "GP17", "startup_self_test_s": 12}}}
+            self.display = object()
+            self.button_reader = object()
+            self.state = SimpleNamespace(row_width=16, page_size=8)
+            self.button_self_test_ran = False
+
+        def prime_due_checks(self, now_s):
+            self.prime_calls.append(now_s)
+
+        def tick(self, now_s, button_events=None):
+            self.tick_calls.append((now_s, button_events))
+
+    fake_app = FakeApp()
+    called = {}
+    self_test_calls = []
+    now_values = iter([12.5])
+
+    monkeypatch.setattr(firmware_runtime, "build_runtime_app_from_path", lambda path: fake_app)
+    monkeypatch.setattr(firmware_runtime, "_now_s", lambda: next(now_values))
+    monkeypatch.setattr(
+        firmware_runtime,
+        "_maybe_run_button_self_test_from_app",
+        lambda app, now_provider, sleep_ms: self_test_calls.append(app),
+    )
+    monkeypatch.setattr(
+        firmware_runtime,
+        "run_loop",
+        lambda app, poll_interval_ms=50: called.update({"app": app, "poll_interval_ms": poll_interval_ms}),
+    )
+
+    firmware_runtime.run_forever(poll_interval_ms=75)
+
+    assert self_test_calls == [fake_app]
+    assert called == {"app": fake_app, "poll_interval_ms": 75}
+    assert fake_app.prime_calls == [12.5]
+    assert fake_app.tick_calls == [(12.5, ())]
 
 
 def test_run_loop_ticks_and_sleeps_with_injected_clock():

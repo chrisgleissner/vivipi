@@ -131,6 +131,12 @@ Without `VIVIPI_SERVICE_BASE_URL`, ViviPi builds only the direct `PING`, `HTTP`,
 ./build service --host 0.0.0.0 --port 8080
 ```
 
+1. Run one local pass of all configured health checks from the host.
+
+```bash
+scripts/vivipulse --mode local
+```
+
 1. Build and deploy to the Pico when hardware is connected.
 
 ```bash
@@ -225,6 +231,7 @@ Each GitHub release publishes a small, versioned set of assets. Download the fil
 | `./build release-assets` | Build the versioned GitHub release assets |
 | `./build deploy` | Build the firmware bundle and copy it to the first connected Pico via `mpremote` |
 | `./build service --host 0.0.0.0 --port 8080` | Run the default ADB-backed Vivi Service |
+| `scripts/vivipulse --mode local` | Run one local pass of all configured health checks |
 | `scripts/vivipulse --mode plan` | Resolve the host-side probe plan without sending traffic |
 
 Typical examples:
@@ -269,6 +276,29 @@ The default host-side service discovers connected ADB devices and exposes them a
 
 The HTTP endpoint implementation lives in [src/vivipi/services/adb_service.py](src/vivipi/services/adb_service.py). The sample `SERVICE` check in [config/checks.yaml](config/checks.yaml) points at `VIVIPI_SERVICE_BASE_URL`.
 
+### Kubuntu ADB Auto-Start
+
+The checked-in local development config in [config/checks.local.yaml](config/checks.local.yaml) probes the Pixel 4 through `http://mickey:8081/vivipi/probe/adb/9B081FFAZ001WX`, so this machine needs the ADB-backed service listening on port `8081`.
+
+Install the user-level systemd units once:
+
+```bash
+./scripts/install_adb_service_user_units.sh
+```
+
+That installer:
+
+- enables `vivipi-adb-service.service` so the HTTP service starts automatically for your user session
+- enables `vivipi-adb-recover.timer` so `adb start-server` and `adb reconnect offline` run periodically after boot and resume
+- starts the service immediately on the current login session
+
+Manual fallback commands:
+
+```bash
+./scripts/run_adb_service.sh start
+./scripts/run_adb_service.sh ensure-adb
+```
+
 ## Vivipulse
 
 `scripts/vivipulse` is the host-side stability, reproduction, mitigation-search, and soak-testing entrypoint for direct ViviPi probes.
@@ -306,6 +336,12 @@ Supported input shapes:
 - `--checks-config PATH`
 
 ### Modes
+
+`local` runs exactly one host-side pass of all resolved checks and is the simplest way to verify the full local health configuration:
+
+```bash
+scripts/vivipulse --mode local
+```
 
 `plan` resolves checks, same-host groups, and ordering without sending traffic:
 

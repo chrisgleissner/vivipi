@@ -13,7 +13,9 @@ except ImportError:  # pragma: no cover - imported on-device
 
 try:
     from displays.rendering import HorizontalMonochromeSurface, MonochromeSurface, _build_glyph_lookup, _pin_number, render_boot_logo_to_surface, render_to_surface
-except ImportError:  # pragma: no cover - used by CPython tests
+except ImportError as error:  # pragma: no cover - used by CPython tests
+    if getattr(error, "name", None) != "displays":
+        raise
     from firmware.displays.rendering import HorizontalMonochromeSurface, MonochromeSurface, _build_glyph_lookup, _pin_number, render_boot_logo_to_surface, render_to_surface
 
 

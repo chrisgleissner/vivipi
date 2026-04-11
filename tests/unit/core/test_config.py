@@ -1,3 +1,7 @@
+import builtins
+import importlib.util
+import sys
+
 from pathlib import Path
 
 import pytest
@@ -334,3 +338,30 @@ checks:
 
     with pytest.raises(ValueError, match="timeout_s must be positive"):
         load_checks_config(config_path, env={"OTHER": "value"})
+
+
+def test_config_module_import_does_not_require_pathlib_or_yaml(monkeypatch):
+    config_path = Path(__file__).resolve().parents[3] / "src" / "vivipi" / "core" / "config.py"
+    original_import = builtins.__import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name in {"pathlib", "yaml"}:
+            raise ImportError(f"no module named '{name}'", name=name)
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    spec = importlib.util.spec_from_file_location("test_config_micropython", config_path)
+    assert spec is not None
+    assert spec.loader is not None
+
+    module = importlib.util.module_from_spec(spec)
+    sys.modules.pop("test_config_micropython", None)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.modules.pop("test_config_micropython", None)
+
+    defaults = module.parse_probe_schedule_config(None)
+    assert defaults.allow_concurrent_same_host is False
+    assert defaults.same_host_backoff_ms == 250
