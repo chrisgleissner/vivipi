@@ -120,6 +120,7 @@ def test_vivipulse_helpers_cover_classification_and_runtime_config():
     assert vivipulse_core._direct_summary("", (), "boom") == "boom"
     runtime_config = vivipulse_core.definitions_to_runtime_config((definition,), profile=VivipulseProfile().probe_policy())
     assert runtime_config["checks"][0]["id"] == "alpha"
+    assert runtime_config["probe_schedule"]["allow_concurrent_hosts"] is False
     assert runtime_config["probe_schedule"]["same_host_backoff_ms"] == 250
 
 
@@ -235,7 +236,45 @@ def test_host_probe_runner_run_passes_applies_pass_spacing_and_trace_sink():
     assert outcome.total_sleep_s == 0.5
 
 
-def test_host_probe_runner_runs_distinct_hosts_in_parallel():
+def test_host_probe_runner_runs_distinct_hosts_serially_by_default():
+    lock = threading.Lock()
+    active = 0
+    max_active = 0
+    barrier = threading.Barrier(2)
+    definitions = (
+        make_definition("alpha", target="shared-a.local"),
+        make_definition("beta", target="shared-b.local"),
+    )
+
+    def executor(definition: CheckDefinition, observed_at_s: float):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        try:
+            with pytest.raises(threading.BrokenBarrierError):
+                barrier.wait(timeout=0.05)
+        finally:
+            with lock:
+                active -= 1
+        return success_result(definition, observed_at_s)
+
+    runner = HostProbeRunner(
+        definitions,
+        executor,
+        "reproduce",
+        VivipulseProfile(same_host_backoff_ms=250),
+    )
+
+    outcome = runner.run_passes(1)
+
+    assert outcome.transport_failure_count == 0
+    assert [event.check_id for event in outcome.trace_events] == ["alpha", "beta"]
+    assert max_active == 1
+    assert {event.probe_host_key for event in outcome.trace_events} == {"shared-a.local", "shared-b.local"}
+
+
+def test_host_probe_runner_can_run_distinct_hosts_in_parallel_when_enabled():
     barrier = threading.Barrier(2)
     definitions = (
         make_definition("alpha", target="shared-a.local"),
@@ -250,14 +289,13 @@ def test_host_probe_runner_runs_distinct_hosts_in_parallel():
         definitions,
         executor,
         "reproduce",
-        VivipulseProfile(same_host_backoff_ms=250),
+        VivipulseProfile(allow_concurrent_hosts=True, same_host_backoff_ms=250),
     )
 
     outcome = runner.run_passes(1)
 
     assert outcome.transport_failure_count == 0
     assert [event.check_id for event in outcome.trace_events] == ["alpha", "beta"]
-    assert {event.probe_host_key for event in outcome.trace_events} == {"shared-a.local", "shared-b.local"}
 
 
 def test_host_probe_runner_stops_same_host_traffic_after_first_transport_failure_boundary():

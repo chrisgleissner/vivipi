@@ -94,6 +94,7 @@ def parse_duration(value: str) -> float:
 
 def _profile_from_policy(policy: ProbeSchedulingPolicy) -> VivipulseProfile:
     return VivipulseProfile(
+        allow_concurrent_hosts=policy.allow_concurrent_hosts,
         allow_concurrent_same_host=policy.allow_concurrent_same_host,
         same_host_backoff_ms=policy.same_host_backoff_ms,
     )
@@ -296,6 +297,7 @@ def render_plan_summary(plan: PlanView, resolved: ResolvedInput) -> str:
         [
             "",
             "Probe schedule:",
+            f"- allow_concurrent_hosts={plan.probe_schedule.allow_concurrent_hosts}",
             f"- allow_concurrent_same_host={plan.probe_schedule.allow_concurrent_same_host}",
             f"- same_host_backoff_ms={plan.probe_schedule.same_host_backoff_ms}",
         ]
@@ -450,6 +452,7 @@ def _summary_payload(
             "same_host_groups": [[host_key, list(check_ids)] for host_key, check_ids in plan.same_host_groups],
             "pass_order": list(plan.pass_order),
             "probe_schedule": {
+                "allow_concurrent_hosts": plan.probe_schedule.allow_concurrent_hosts,
                 "allow_concurrent_same_host": plan.probe_schedule.allow_concurrent_same_host,
                 "same_host_backoff_ms": plan.probe_schedule.same_host_backoff_ms,
             },

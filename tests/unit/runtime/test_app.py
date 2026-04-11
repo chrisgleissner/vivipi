@@ -677,6 +677,28 @@ def test_runtime_app_background_worker_queue_controls_and_reset_paths(monkeypatc
     assert app.active_workers == set()
 
 
+def test_runtime_app_serializes_different_hosts_by_default():
+    first = CheckDefinition(identifier="router", name="Router", check_type=CheckType.PING, target="router.local")
+    second = CheckDefinition(identifier="phone", name="Phone", check_type=CheckType.PING, target="phone.local")
+    app = RuntimeApp(definitions=(first, second), executor=lambda definition, now_s: None, display=FakeDisplay(), page_interval_s=0)
+
+    assert app._worker_key(first) == app._worker_key(second)
+
+
+def test_runtime_app_can_opt_into_cross_host_parallel_workers():
+    first = CheckDefinition(identifier="router", name="Router", check_type=CheckType.PING, target="router.local")
+    second = CheckDefinition(identifier="phone", name="Phone", check_type=CheckType.PING, target="phone.local")
+    app = RuntimeApp(
+        definitions=(first, second),
+        executor=lambda definition, now_s: None,
+        display=FakeDisplay(),
+        page_interval_s=0,
+        probe_scheduling=ProbeSchedulingPolicy(allow_concurrent_hosts=True, allow_concurrent_same_host=False, same_host_backoff_ms=250),
+    )
+
+    assert app._worker_key(first) != app._worker_key(second)
+
+
 def test_runtime_app_queues_probe_traces_from_background_workers_and_drains_them():
     definition = make_definition("router", check_type=CheckType.HTTP)
     app = RuntimeApp(definitions=(definition,), executor=lambda definition, now_s: None, display=FakeDisplay(), page_interval_s=0)
@@ -925,7 +947,7 @@ def test_runtime_app_waits_between_due_checks_for_the_same_host_by_default():
         app.tick(0.05)
 
     assert set(calls) == {"ftp", "http", "other"}
-    assert calls.index("ftp") < calls.index("http")
+    assert calls.index("http") < calls.index("ftp")
     assert sleep_calls == [250]
 
 
@@ -1013,6 +1035,6 @@ def test_runtime_app_spaces_same_host_requests_from_previous_probe_completion():
             break
         app.tick(0.05)
 
-    assert [item[0] for item in started] == ["ftp", "http"]
+    assert [item[0] for item in started] == ["http", "ftp"]
     assert started[1][1] - started[0][1] == pytest.approx(0.35)
     assert sleep_calls == [250]

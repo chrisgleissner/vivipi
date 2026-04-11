@@ -100,6 +100,11 @@ def parse_probe_schedule_config(raw: object) -> ProbeSchedulingPolicy:
     if not isinstance(raw, dict):
         raise ValueError("probe_schedule must be a mapping")
     return ProbeSchedulingPolicy(
+        allow_concurrent_hosts=_parse_bool(
+            raw.get("allow_concurrent_hosts"),
+            "probe_schedule.allow_concurrent_hosts",
+            False,
+        ),
         allow_concurrent_same_host=_parse_bool(
             raw.get("allow_concurrent_same_host"),
             "probe_schedule.allow_concurrent_same_host",

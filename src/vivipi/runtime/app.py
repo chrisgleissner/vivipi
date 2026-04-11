@@ -60,6 +60,17 @@ def _monotonic_now_s() -> float:
     return float(time.perf_counter())
 
 
+def _network_priority(definition: CheckDefinition) -> tuple[int, str]:
+    check_order = {
+        "PING": 0,
+        "HTTP": 1,
+        "SERVICE": 2,
+        "TELNET": 3,
+        "FTP": 4,
+    }
+    return (check_order.get(_enum_text(definition.check_type), 99), definition.identifier)
+
+
 def _allocate_lock():
     if threading is not None:
         return threading.Lock()
@@ -762,6 +773,8 @@ class RuntimeApp:
             )
 
     def _worker_key(self, definition: CheckDefinition) -> str:
+        if not self.probe_scheduling.allow_concurrent_hosts:
+            return "__all__"
         host_key = probe_host_key(definition) or definition.identifier
         if self.probe_scheduling.allow_concurrent_same_host:
             return f"{host_key}:{definition.identifier}"
@@ -1045,7 +1058,21 @@ class RuntimeApp:
 
     def _run_due_checks(self, now_s: float):
         # Hot path: keep metrics on every execution but only log state transitions.
-        for scheduled in due_checks(self.definitions, self._copy_last_started_at(), now_s):
+        scheduled_checks = due_checks(self.definitions, self._copy_last_started_at(), now_s)
+        host_order: list[str | None] = []
+        groups: dict[str | None, list[object]] = {}
+        for scheduled in scheduled_checks:
+            host_key = probe_host_key(scheduled.definition)
+            if host_key not in groups:
+                host_order.append(host_key)
+                groups[host_key] = []
+            groups[host_key].append(scheduled)
+        ordered: list[object] = []
+        for host_key in host_order:
+            group = groups[host_key]
+            group.sort(key=lambda item: _network_priority(item.definition))
+            ordered.extend(group)
+        for scheduled in ordered:
             self._queue_check(scheduled.definition, now_s)
 
     def prime_due_checks(self, now_s: float):

@@ -125,6 +125,7 @@ def test_load_build_deploy_settings_substitutes_environment_placeholders(tmp_pat
     assert settings["device"]["display"]["failure_color"] == "red"
     assert settings["device"]["display"]["pins"]["dc"] == "GP8"
     assert settings["probe_schedule"] == {
+        "allow_concurrent_hosts": False,
         "allow_concurrent_same_host": False,
         "same_host_backoff_ms": 250,
     }
@@ -1216,8 +1217,36 @@ def test_deploy_firmware_uses_sg_dialout_when_process_lacks_group_membership(tmp
     )
 
     assert all(command[:3] == ["sg", "dialout", "-c"] for command in commands)
-    assert "mpremote connect /dev/ttyUSB0 fs cp" in commands[0][3]
-    assert commands[-1] == ["sg", "dialout", "-c", "mpremote connect /dev/ttyUSB0 soft-reset"]
+    assert "exec mpremote connect /dev/ttyUSB0 fs cp" in commands[0][3]
+    assert commands[-1] == ["sg", "dialout", "-c", "exec mpremote connect /dev/ttyUSB0 soft-reset"]
+
+
+def test_deploy_firmware_retries_mpremote_after_timeout(tmp_path: Path, monkeypatch):
+    config_path = write_fixture_files(tmp_path)
+    commands = []
+    attempts = {"fs": 0}
+
+    monkeypatch.setattr(build_deploy, "_wrap_with_dialout", lambda command: command)
+
+    def fake_run(command, check, timeout=None):
+        commands.append((command, check, timeout))
+        if command[:4] == ["mpremote", "connect", "/dev/ttyUSB0", "fs"]:
+            attempts["fs"] += 1
+            if attempts["fs"] == 1:
+                raise build_deploy.subprocess.TimeoutExpired(command, timeout or 0)
+
+    deploy_firmware(
+        config_path,
+        tmp_path / "release",
+        env=FIXTURE_ENV,
+        port="/dev/ttyUSB0",
+        run_command=fake_run,
+    )
+
+    fs_commands = [command for command, _, _ in commands if command[:4] == ["mpremote", "connect", "/dev/ttyUSB0", "fs"]]
+    soft_resets = [command for command, _, _ in commands if command == ["mpremote", "connect", "/dev/ttyUSB0", "soft-reset"]]
+    assert len(fs_commands) >= 2
+    assert len(soft_resets) >= 2
 
 
 def test_deploy_firmware_reports_missing_mpremote(tmp_path: Path):
@@ -1263,6 +1292,7 @@ def test_load_build_deploy_settings_handles_missing_device_and_validates_probe_s
     settings = load_build_deploy_settings(config_path, env={})
 
     assert settings["probe_schedule"] == {
+        "allow_concurrent_hosts": False,
         "allow_concurrent_same_host": True,
         "same_host_backoff_ms": 0,
     }
@@ -1291,6 +1321,7 @@ def test_load_build_deploy_settings_parses_false_probe_schedule_values(tmp_path:
     settings = load_build_deploy_settings(config_path, env={})
 
     assert settings["probe_schedule"] == {
+        "allow_concurrent_hosts": False,
         "allow_concurrent_same_host": False,
         "same_host_backoff_ms": 25,
     }

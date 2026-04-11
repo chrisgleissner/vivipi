@@ -104,6 +104,7 @@ def definitions_to_runtime_config(
     return {
         "checks": [definition_to_runtime_item(definition) for definition in definitions],
         "probe_schedule": {
+            "allow_concurrent_hosts": policy.allow_concurrent_hosts,
             "allow_concurrent_same_host": policy.allow_concurrent_same_host,
             "same_host_backoff_ms": policy.same_host_backoff_ms,
         },
@@ -112,11 +113,12 @@ def definitions_to_runtime_config(
 
 @dataclass(frozen=True)
 class VivipulseProfile:
+    allow_concurrent_hosts: bool = False
     allow_concurrent_same_host: bool = False
     same_host_backoff_ms: int = 250
     pass_spacing_s: float = 0.0
     same_host_spacing_ms: int = 0
-    check_order: str = "identifier"
+    check_order: str = "network-light-first"
     interval_scale_by_check_id: dict[str, float] = field(default_factory=dict)
     disabled_check_ids: tuple[str, ...] = field(default_factory=tuple)
 
@@ -137,6 +139,7 @@ class VivipulseProfile:
 
     def probe_policy(self) -> ProbeSchedulingPolicy:
         return ProbeSchedulingPolicy(
+            allow_concurrent_hosts=self.allow_concurrent_hosts,
             allow_concurrent_same_host=self.allow_concurrent_same_host,
             same_host_backoff_ms=self.same_host_backoff_ms,
         )
@@ -655,6 +658,15 @@ class HostProbeRunner:
         host_groups: tuple[tuple[str | None, tuple[CheckDefinition, ...]], ...],
         pass_index: int,
     ):
+        if not self.profile.allow_concurrent_hosts:
+            for _, definitions in host_groups:
+                if not definitions:
+                    continue
+                self._run_host_group(definitions, pass_index)
+                with self.state_lock:
+                    if self.aborted:
+                        break
+            return
         threads = [
             threading.Thread(target=self._run_host_group, args=(definitions, pass_index), daemon=True)
             for _, definitions in host_groups
@@ -757,6 +769,7 @@ def generate_candidate_profiles(
 
     def add_candidate(candidate: VivipulseProfile):
         signature = (
+            candidate.allow_concurrent_hosts,
             candidate.allow_concurrent_same_host,
             candidate.same_host_backoff_ms,
             candidate.pass_spacing_s,
