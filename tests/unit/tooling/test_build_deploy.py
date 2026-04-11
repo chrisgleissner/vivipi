@@ -1,4 +1,5 @@
 import json
+import runpy
 import zipfile
 from pathlib import Path
 
@@ -16,8 +17,10 @@ from vivipi.tooling.build_deploy import (
     _parse_display_mode,
     _parse_duration_s,
     _parse_font_size_px,
+    _release_version_from_wheel,
     _resolve_checks_path,
     _resolve_release_wheel,
+    _wrap_with_dialout,
     build_firmware_bundle,
     build_service_bundle,
     build_source_archives,
@@ -67,18 +70,26 @@ checks:
                 "    version: 1.25.0",
                 "    download_page: https://micropython.org/download/RPI_PICO2_W/",
                 "  buttons:",
-                "    a: GP14",
-                "    b: GP15",
+                "    a: GP15",
+                "    b: GP17",
                 "  display:",
                 "    type: waveshare-pico-oled-1.3",
                 "    mode: standard",
                 "    columns: 1",
                 "    column_separator: ' '",
+                "    boot_logo_duration: 2s",
                 "wifi:",
                 "  ssid: ${VIVIPI_WIFI_SSID}",
                 "  password: ${VIVIPI_WIFI_PASSWORD}",
                 "service:",
                 "  base_url: ${VIVIPI_SERVICE_BASE_URL}",
+                "check_state:",
+                "  failures_to_degraded: 1",
+                "  failures_to_failed: 1",
+                "  successes_to_recover: 1",
+                "probe_schedule:",
+                "  allow_concurrent_same_host: false",
+                "  same_host_backoff_ms: 250",
                 "checks_config: checks.yaml",
             ]
         ),
@@ -98,17 +109,23 @@ def test_load_build_deploy_settings_substitutes_environment_placeholders(tmp_pat
     assert settings["wifi"]["ssid"] == "TestWifi"
     assert settings["wifi"]["password"] == "TestPassword"
     assert settings["service"]["base_url"] == FIXTURE_ENV["VIVIPI_SERVICE_BASE_URL"]
+    assert settings["check_state"]["failures_to_failed"] == 1
     assert settings["device"]["display"]["type"] == "waveshare-pico-oled-1.3"
     assert settings["device"]["display"]["width_px"] == 128
     assert settings["device"]["display"]["height_px"] == 64
     assert settings["device"]["display"]["font"] == {"width_px": 8, "height_px": 8}
     assert settings["device"]["display"]["page_interval_s"] == 15
+    assert settings["device"]["display"]["boot_logo_duration_s"] == 2
     assert settings["device"]["display"]["brightness"] == 128
     assert settings["device"]["display"]["mode"] == "standard"
     assert settings["device"]["display"]["columns"] == 1
     assert settings["device"]["display"]["column_separator"] == " "
     assert settings["device"]["display"]["failure_color"] == "red"
     assert settings["device"]["display"]["pins"]["dc"] == "GP8"
+    assert settings["probe_schedule"] == {
+        "allow_concurrent_same_host": False,
+        "same_host_backoff_ms": 250,
+    }
 
 
 def test_resolve_config_path_prefers_existing_local_override_when_requested(tmp_path: Path):
@@ -119,6 +136,16 @@ def test_resolve_config_path_prefers_existing_local_override_when_requested(tmp_
 
     assert resolve_config_path(config_path) == config_path.resolve()
     assert resolve_config_path(config_path, prefer_local_config=True) == local_path.resolve()
+
+
+def test_resolve_config_path_handles_non_yaml_and_missing_local_override(tmp_path: Path):
+    text_path = tmp_path / "config.txt"
+    text_path.write_text("device:\n  board: pico2w\n", encoding="utf-8")
+    yaml_path = tmp_path / "build-deploy.yaml"
+    yaml_path.write_text("device:\n  board: pico2w\n", encoding="utf-8")
+
+    assert resolve_config_path(text_path, prefer_local_config=True) == text_path.resolve()
+    assert resolve_config_path(yaml_path, prefer_local_config=True) == yaml_path
 
 
 def test_write_runtime_config_embeds_wifi_and_checks(tmp_path: Path):
@@ -134,6 +161,8 @@ def test_write_runtime_config_embeds_wifi_and_checks(tmp_path: Path):
 
     assert rendered["wifi"]["ssid"] == "TestWifi"
     assert rendered["checks"][0]["id"] == "router"
+    assert rendered["check_state"]["failures_to_failed"] == 1
+    assert rendered["probe_schedule"]["same_host_backoff_ms"] == 250
 
 
 def test_build_firmware_bundle_creates_a_releaseable_zip_archive(tmp_path: Path):
@@ -149,6 +178,9 @@ def test_build_firmware_bundle_creates_a_releaseable_zip_archive(tmp_path: Path)
     with zipfile.ZipFile(archive_path) as archive:
         names = set(archive.namelist())
     assert "boot.py" in names
+    assert "__future__.py" in names
+    assert "dataclasses.py" in names
+    assert "enum.py" in names
     assert "config.json" in names
     assert "display.py" in names
     assert "control.py" in names
@@ -156,6 +188,8 @@ def test_build_firmware_bundle_creates_a_releaseable_zip_archive(tmp_path: Path)
     assert "input.py" in names
     assert "main.py" in names
     assert "state.py" in names
+    assert "urllib/__init__.py" in names
+    assert "urllib/parse.py" in names
     assert "vivipi/__init__.py" in names
     assert not any("__pycache__/" in name for name in names)
     assert not any(name.endswith(".pyc") for name in names)
@@ -163,6 +197,26 @@ def test_build_firmware_bundle_creates_a_releaseable_zip_archive(tmp_path: Path)
     assert (tmp_path / "release" / "pico2w-micropython-0.2.1-rc0.txt").exists()
     assert not (tmp_path / "release" / "vivipi-firmware-bundle.zip").exists()
     assert not (tmp_path / "release" / "vivipi-device-filesystem.zip").exists()
+
+
+def test_build_firmware_bundle_uses_build_time_resolver_and_replaces_existing_staging_dir(tmp_path: Path):
+    config_path = write_fixture_files(tmp_path)
+    staging_dir = tmp_path / "release" / "vivipi-device-fs"
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    (staging_dir / "stale.txt").write_text("stale", encoding="utf-8")
+
+    archive_path = build_firmware_bundle(
+        config_path,
+        tmp_path / "release",
+        env=FIXTURE_ENV,
+        version_resolver=lambda: "0.2.1-rc0",
+        build_time_resolver=lambda: "2026-04-11T00:00Z",
+    )
+    rendered = json.loads((tmp_path / "release" / "vivipi-device-fs" / "config.json").read_text(encoding="utf-8"))
+
+    assert archive_path.exists()
+    assert not (staging_dir / "stale.txt").exists()
+    assert rendered["project"]["build_time"] == "2026-04-11T00:00Z"
 
 
 def test_build_service_bundle_packages_wheel_and_service_examples(tmp_path: Path):
@@ -209,6 +263,14 @@ def test_resolve_release_wheel_requires_exactly_one_match(tmp_path: Path):
 
     with pytest.raises(ValueError, match="exactly one built wheel"):
         _resolve_release_wheel(dist_dir)
+
+
+def test_release_version_from_wheel_validates_filename_shape(tmp_path: Path):
+    with pytest.raises(ValueError, match="vivipi wheel filename"):
+        _release_version_from_wheel(tmp_path / "other-0.2.1-py3-none-any.whl")
+
+    with pytest.raises(ValueError, match="standard wheel filename"):
+        _release_version_from_wheel(tmp_path / "vivipi-0.2.1.whl")
 
 
 def test_copy_release_tree_skips_python_cache_files(tmp_path: Path):
@@ -608,7 +670,7 @@ def test_build_deploy_helper_parsers_cover_additional_numeric_paths():
 
 def test_render_device_runtime_config_uses_empty_project_when_omitted():
     settings = {
-        "device": {"board": "pico2w", "buttons": {"a": "GP14", "b": "GP15"}},
+        "device": {"board": "pico2w", "buttons": {"a": "GP15", "b": "GP17"}},
         "wifi": {"ssid": "wifi", "password": "secret"},
         "service": {"base_url": "http://192.0.2.10:8080/checks"},
     }
@@ -629,7 +691,7 @@ def test_render_device_runtime_config_uses_empty_project_when_omitted():
 
 def test_render_device_runtime_config_serializes_optional_auth_fields():
     settings = {
-        "device": {"board": "pico2w", "buttons": {"a": "GP14", "b": "GP15"}},
+        "device": {"board": "pico2w", "buttons": {"a": "GP15", "b": "GP17"}},
         "wifi": {"ssid": "wifi", "password": "secret"},
         "service": {},
     }
@@ -658,6 +720,82 @@ def test_render_device_runtime_config_serializes_optional_auth_fields():
     assert rendered["checks"][1]["password"] is None
 
 
+def test_render_device_runtime_config_serializes_inferred_display_column_offset():
+    settings = {
+        "device": {
+            "board": "pico2w",
+            "buttons": {"a": "GP15", "b": "GP17"},
+            "display": {"type": "waveshare-pico-oled-1.3", "column_offset": 32},
+        },
+        "wifi": {"ssid": "wifi", "password": "secret"},
+        "service": {},
+    }
+    checks = (
+        CheckDefinition(
+            identifier="router",
+            name="Router",
+            check_type=CheckType.PING,
+            target="192.168.1.1",
+        ),
+    )
+
+    rendered = render_device_runtime_config(settings, checks)
+
+    assert rendered["device"]["display"]["column_offset"] == 32
+
+
+def test_render_device_runtime_config_serializes_optional_check_state():
+    settings = {
+        "device": {"board": "pico2w", "buttons": {"a": "GP15", "b": "GP17"}},
+        "wifi": {"ssid": "wifi", "password": "secret"},
+        "service": {},
+        "check_state": {
+            "failures_to_degraded": 1,
+            "failures_to_failed": 1,
+            "successes_to_recover": 1,
+        },
+    }
+    checks = (
+        CheckDefinition(
+            identifier="router",
+            name="Router",
+            check_type=CheckType.PING,
+            target="192.168.1.1",
+        ),
+    )
+
+    rendered = render_device_runtime_config(settings, checks)
+
+    assert rendered["check_state"]["failures_to_failed"] == 1
+
+
+def test_render_device_runtime_config_serializes_probe_schedule():
+    settings = {
+        "device": {"board": "pico2w", "buttons": {"a": "GP15", "b": "GP17"}},
+        "wifi": {"ssid": "wifi", "password": "secret"},
+        "service": {},
+        "probe_schedule": {
+            "allow_concurrent_same_host": False,
+            "same_host_backoff_ms": 250,
+        },
+    }
+    checks = (
+        CheckDefinition(
+            identifier="router",
+            name="Router",
+            check_type=CheckType.PING,
+            target="192.168.1.1",
+        ),
+    )
+
+    rendered = render_device_runtime_config(settings, checks)
+
+    assert rendered["probe_schedule"] == {
+        "allow_concurrent_same_host": False,
+        "same_host_backoff_ms": 250,
+    }
+
+
 def test_load_runtime_checks_skips_unconfigured_service_checks(tmp_path: Path):
     checks_path = tmp_path / "checks.yaml"
     checks_path.write_text(
@@ -684,6 +822,32 @@ checks:
 
     assert [definition.identifier for definition in definitions] == ["router", "nas-api"]
     assert all(definition.check_type != CheckType.SERVICE for definition in definitions)
+
+
+def test_load_runtime_checks_treats_missing_auth_placeholders_as_optional(tmp_path: Path):
+    checks_path = tmp_path / "checks.yaml"
+    checks_path.write_text(
+        """
+checks:
+  - name: C64U FTP
+    type: ftp
+    target: 192.168.1.167
+    username: ${VIVIPI_NETWORK_USERNAME}
+    password: ${VIVIPI_NETWORK_PASSWORD}
+  - name: U64 TELNET
+    type: telnet
+    target: 192.168.1.13:23
+    password: ${VIVIPI_NETWORK_PASSWORD}
+""".strip(),
+        encoding="utf-8",
+    )
+
+    definitions = load_runtime_checks(checks_path, env={})
+
+    assert [definition.name for definition in definitions] == ["C64U FTP", "U64 TELNET"]
+    assert definitions[0].username is None
+    assert definitions[0].password is None
+    assert definitions[1].password is None
 
 
 def test_load_runtime_checks_rejects_non_list_roots_and_preserves_invalid_items_for_parser(tmp_path: Path):
@@ -965,6 +1129,8 @@ def test_deploy_firmware_defaults_to_auto_port_when_not_configured(tmp_path: Pat
     config_path = write_fixture_files(tmp_path)
     commands = []
 
+    monkeypatch.setattr(build_deploy, "_wrap_with_dialout", lambda command: command)
+
     def fake_build_firmware_bundle(*args, **kwargs):
         device_root = tmp_path / "release-no-port" / "vivipi-device-fs"
         device_root.mkdir(parents=True, exist_ok=True)
@@ -986,11 +1152,14 @@ def test_deploy_firmware_defaults_to_auto_port_when_not_configured(tmp_path: Pat
     )
 
     assert commands[0][:4] == ["mpremote", "connect", "auto", "fs"]
+    assert commands[-1] == ["mpremote", "connect", "auto", "soft-reset"]
 
 
-def test_deploy_firmware_copies_files_via_mpremote(tmp_path: Path):
+def test_deploy_firmware_copies_files_via_mpremote(tmp_path: Path, monkeypatch):
     config_path = write_fixture_files(tmp_path)
     commands = []
+
+    monkeypatch.setattr(build_deploy, "_wrap_with_dialout", lambda command: command)
 
     deploy_firmware(
         config_path,
@@ -1003,6 +1172,30 @@ def test_deploy_firmware_copies_files_via_mpremote(tmp_path: Path):
     assert any(command[:4] == ["mpremote", "connect", "/dev/ttyUSB0", "fs"] for command in commands)
     assert any(command[-1] == ":boot.py" for command in commands)
     assert any(command[-1] == ":config.json" for command in commands)
+    assert commands[-1] == ["mpremote", "connect", "/dev/ttyUSB0", "soft-reset"]
+
+
+def test_deploy_firmware_uses_sg_dialout_when_process_lacks_group_membership(tmp_path: Path, monkeypatch):
+    config_path = write_fixture_files(tmp_path)
+    commands = []
+
+    monkeypatch.setattr(build_deploy.os, "name", "posix")
+    monkeypatch.setattr(build_deploy.os, "getgroups", lambda: [1000])
+    monkeypatch.setattr(build_deploy.os, "getuid", lambda: 1000)
+    monkeypatch.setattr(build_deploy.grp, "getgrnam", lambda name: type("Group", (), {"gr_gid": 20, "gr_mem": ["chris"]})())
+    monkeypatch.setattr(build_deploy.pwd, "getpwuid", lambda uid: type("User", (), {"pw_name": "chris"})())
+
+    deploy_firmware(
+        config_path,
+        tmp_path / "release",
+        env=FIXTURE_ENV,
+        port="/dev/ttyUSB0",
+        run_command=lambda command, check: commands.append(command),
+    )
+
+    assert all(command[:3] == ["sg", "dialout", "-c"] for command in commands)
+    assert "mpremote connect /dev/ttyUSB0 fs cp" in commands[0][3]
+    assert commands[-1] == ["sg", "dialout", "-c", "mpremote connect /dev/ttyUSB0 soft-reset"]
 
 
 def test_deploy_firmware_reports_missing_mpremote(tmp_path: Path):
@@ -1016,3 +1209,98 @@ def test_deploy_firmware_reports_missing_mpremote(tmp_path: Path):
             port="/dev/ttyUSB0",
             run_command=lambda command, check: (_ for _ in ()).throw(FileNotFoundError("mpremote")),
         )
+
+
+def test_wrap_with_dialout_returns_original_command_for_non_posix_and_non_membership(monkeypatch):
+    command = ["mpremote", "connect", "auto"]
+
+    monkeypatch.setattr(build_deploy.os, "name", "nt")
+    assert _wrap_with_dialout(command) == command
+
+    monkeypatch.setattr(build_deploy.os, "name", "posix")
+    monkeypatch.setattr(build_deploy.grp, "getgrnam", lambda name: (_ for _ in ()).throw(KeyError("dialout")))
+    assert _wrap_with_dialout(command) == command
+
+    monkeypatch.setattr(build_deploy.grp, "getgrnam", lambda name: type("Group", (), {"gr_gid": 20, "gr_mem": ["chris"]})())
+    monkeypatch.setattr(build_deploy.os, "getgroups", lambda: [20])
+    assert _wrap_with_dialout(command) == command
+
+    monkeypatch.setattr(build_deploy.os, "getgroups", lambda: [1000])
+    monkeypatch.setattr(build_deploy.os, "getuid", lambda: 1000)
+    monkeypatch.setattr(build_deploy.pwd, "getpwuid", lambda uid: (_ for _ in ()).throw(KeyError("uid")))
+    assert _wrap_with_dialout(command) == command
+
+    monkeypatch.setattr(build_deploy.pwd, "getpwuid", lambda uid: type("User", (), {"pw_name": "alex"})())
+    assert _wrap_with_dialout(command) == command
+
+
+def test_load_build_deploy_settings_handles_missing_device_and_validates_probe_schedule(tmp_path: Path):
+    config_path = tmp_path / "build-deploy.yaml"
+    config_path.write_text("probe_schedule:\n  allow_concurrent_same_host: on\n  same_host_backoff_ms: 0\n", encoding="utf-8")
+
+    settings = load_build_deploy_settings(config_path, env={})
+
+    assert settings["probe_schedule"] == {
+        "allow_concurrent_same_host": True,
+        "same_host_backoff_ms": 0,
+    }
+
+    config_path.write_text("device: []\nprobe_schedule: []\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="probe_schedule must be a mapping"):
+        load_build_deploy_settings(config_path, env={})
+
+    config_path.write_text(
+        "probe_schedule:\n  allow_concurrent_same_host: maybe\n  same_host_backoff_ms: -1\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="probe_schedule.same_host_backoff_ms|must be a boolean"):
+        load_build_deploy_settings(config_path, env={})
+
+
+def test_load_build_deploy_settings_parses_false_probe_schedule_values(tmp_path: Path):
+    config_path = tmp_path / "build-deploy.yaml"
+    config_path.write_text(
+        "probe_schedule:\n  allow_concurrent_same_host: off\n  same_host_backoff_ms: 25\n",
+        encoding="utf-8",
+    )
+
+    settings = load_build_deploy_settings(config_path, env={})
+
+    assert settings["probe_schedule"] == {
+        "allow_concurrent_same_host": False,
+        "same_host_backoff_ms": 25,
+    }
+
+
+def test_build_deploy_main_rejects_monkeypatched_unknown_command(monkeypatch):
+    monkeypatch.setattr(
+        build_deploy.argparse.ArgumentParser,
+        "parse_args",
+        lambda self, argv=None: type("Args", (), {"command": "unknown"})(),
+    )
+
+    with pytest.raises(ValueError, match="unsupported command: unknown"):
+        build_deploy.main(["unknown"])
+
+
+def test_parse_bool_covers_default_and_string_branches():
+    assert build_deploy._parse_bool(None, "flag", True) is True
+    assert build_deploy._parse_bool(" yes ", "flag", False) is True
+    assert build_deploy._parse_bool(" off ", "flag", True) is False
+
+    with pytest.raises(ValueError, match="flag must be a boolean"):
+        build_deploy._parse_bool("maybe", "flag", False)
+
+
+def test_build_deploy_module_entrypoint_executes_main(monkeypatch):
+    monkeypatch.setattr(
+        build_deploy.argparse.ArgumentParser,
+        "parse_args",
+        lambda self, argv=None: type("Args", (), {"command": "unknown"})(),
+    )
+
+    with pytest.warns(RuntimeWarning, match="found in sys.modules"):
+        with pytest.raises(ValueError, match="unsupported command: unknown"):
+            runpy.run_module("vivipi.tooling.build_deploy", run_name="__main__")

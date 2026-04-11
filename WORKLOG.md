@@ -1,71 +1,147 @@
-# Worklog
+# ViviPi Work Log
 
-## 2026-04-07 Strict Convergence
+## 2026-04-10T21:16:30Z
 
-- 2026-04-07T00:00:00+01:00 Started the strict convergence pass requested for full firmware productionization.
-- 2026-04-07T00:00:00+01:00 Re-read the authoritative inputs in required order: `README.md`, runtime and firmware source paths, `docs/spec.md`, `docs/spec-traceability.md`, build and deployment configs, and the hardware-facing display/runtime code paths.
-- 2026-04-07T00:00:00+01:00 Verified the git worktree was clean before changes.
-- 2026-04-07T00:00:00+01:00 Replaced the stale plan with a strict convergence plan in `PLANS.md` using explicit task IDs, statuses, and acceptance criteria. Next step is closing the boot/config, display fail-safe, and network-resilience gaps with regression proof.
-- 2026-04-07T00:12:00+01:00 Hardened `firmware/runtime.py` with guarded config loading, fallback runtime config shaping, safe display bootstrap, bounded Wi-Fi retry with backoff, safe button and definition initialization, and `build_runtime_app_from_path()` for boot recovery from missing or malformed `config.json`.
-- 2026-04-07T00:12:00+01:00 Hardened `src/vivipi/runtime/app.py` with retained display-failure errors, diagnostics activation, and deterministic display retry backoff so render failures no longer unwind the runtime loop.
-- 2026-04-07T00:18:00+01:00 Hardened `src/vivipi/runtime/checks.py` with bounded retry helpers, deterministic backoff, stable transport failure classification, and transient retry coverage for HTTP, socket-based probes, and ping failure results.
-- 2026-04-07T00:18:00+01:00 Hardened `src/vivipi/services/schema.py` by capping SERVICE fan-out at `64` checks to bound device-side expansion.
-- 2026-04-07T00:24:00+01:00 Added regression coverage in `tests/unit/firmware/test_runtime.py`, `tests/unit/runtime/test_app.py`, `tests/unit/runtime/test_checks.py`, and `tests/contract/test_service_schema.py` for boot recovery, display fail-safe behavior, Wi-Fi retry, network classification, and service payload bounds.
-- 2026-04-07T00:24:00+01:00 Focused functional validation passed: `pytest --no-cov -q tests/unit/firmware/test_runtime.py tests/unit/runtime/test_app.py tests/unit/runtime/test_checks.py tests/contract/test_service_schema.py` -> `56 passed`.
-- 2026-04-07T00:28:00+01:00 Updated `README.md`, `docs/spec.md`, and `docs/spec-traceability.md` to reflect operational fail-safe behavior, bounded network retry, and the SERVICE payload limit. Published the requested audit at `docs/research/vivipi/production-audit.md`.
-- 2026-04-07T00:30:00+01:00 Traceability validation passed: `pytest --no-cov -q tests/spec/test_traceability.py` -> `3 passed`.
-- 2026-04-07T00:33:00+01:00 Repository-wide validation passed: `./build coverage` -> `291 passed`, `96.31%` total coverage.
-- 2026-04-07T00:34:00+01:00 CI-style validation passed: `VIVIPI_WIFI_SSID=ci-ssid VIVIPI_WIFI_PASSWORD=ci-password VIVIPI_SERVICE_BASE_URL=http://192.0.2.10:8080/checks ./build ci --config config/build-deploy.yaml` -> lint + tests + coverage gate passed locally.
-- 2026-04-07T00:35:00+01:00 Final firmware bundle validation completed: `VIVIPI_WIFI_SSID=ci-ssid VIVIPI_WIFI_PASSWORD=ci-password VIVIPI_SERVICE_BASE_URL=http://192.0.2.10:8080/checks ./build build-firmware --config config/build-deploy.yaml` completed without error output and `artifacts/release/vivipi-device-fs/` remains present as the deployable filesystem tree.
-- 2026-04-07T00:35:00+01:00 Hardware-bound external limit remains unchanged: live deploy to a connected Pico was not executed because this environment does not expose an accessible serial device.
+- Created `PLANS.md` as the authoritative execution plan.
+- Began repository inspection for Phase A.
+- Confirmed clean worktree before edits.
+- Identified two immediate Phase A issues:
+  - Boot logo hold defaults to 6 seconds, which violates the 3 second boot-screen target.
+  - Firmware button defaults still target `GP14` and `GP15` instead of the required `GP22` and `GP21`.
+- Next step: instrument the boot sequence and tighten startup timing without introducing blocking behavior.
 
-## 2026-04-05
+## 2026-04-10T21:29:21Z
 
-- 2026-04-06T17:28:25+01:00 Started the observability / REPL convergence execution and recorded sequential tasks `T1` through `T12` in `PLANS.md` with explicit dependencies and proof criteria.
-- 2026-04-06T17:28:25+01:00 Gathered baseline context from `docs/spec.md`, `src/vivipi/core/*`, `src/vivipi/runtime/*`, and the existing runtime / firmware test suites to identify the concrete extension points for logging, registry state, control, memory, and metrics.
-- 2026-04-06T17:28:25+01:00 Established the current architecture boundary: `RuntimeApp.tick()` is the cycle boundary, `build_runtime_app()` is the firmware wiring point, and the new observability surfaces will be implemented in `src/vivipi` with thin firmware-facing wrappers only where REPL ergonomics require them.
-- 2026-04-06T17:49:09+01:00 Added bounded observability modules in `src/vivipi/core/logging.py`, `src/vivipi/core/ring_buffer.py`, `src/vivipi/runtime/metrics.py`, `src/vivipi/runtime/state.py`, `src/vivipi/runtime/control.py`, and `src/vivipi/runtime/debug.py`, then wired them through `src/vivipi/runtime/app.py` and `firmware/runtime.py` with explicit hot-path comments in the polling and rendering loops.
-- 2026-04-06T17:49:09+01:00 Exposed REPL-safe firmware wrappers via `firmware/state.py`, `firmware/control.py`, and `firmware/debug.py`. Verified REPL-style usage with a bound runtime app: `state.get_registered_checks()`, `state.get_metrics()`, `control.run_all_checks(now_s=5.0)`, `control.set_log_level("DEBUG")`, `debug.mem()`, and `control.dump_logs(limit=4)` all returned deterministic results.
-- 2026-04-06T17:49:09+01:00 Extended health-check logging so unhealthy checks log both a summary and bounded failure detail on every failing run, while healthy checks emit sampled summary logs to keep overhead bounded in repeated steady-state polling.
-- 2026-04-06T17:49:09+01:00 Added focused tests for logging, ring buffers, metrics, runtime state/control/debug, firmware Wi-Fi helpers, and release bundling. Validation results: `pytest -q` passed with `274` tests at `96.31%` coverage before the final spec update, then `./build ci` passed end-to-end with explicit build env vars and `275` tests at `96.32%` coverage.
-- 2026-04-06T17:49:09+01:00 Updated `docs/spec.md` and `docs/spec-traceability.md` with observability and REPL requirements (`VIVIPI-OBS-001` through `VIVIPI-OBS-004`), then reran `tests/spec/test_traceability.py` successfully.
-- 2026-04-06T17:49:09+01:00 Performance evidence: pre-change benchmark recorded `idle_tick_ms=0.0136` and `loaded_tick_ms=0.2811`; after sampled healthy-check logging the post-change benchmark measured `idle_tick_ms=0.0117` and `loaded_tick_ms=0.3483`. In the same code revision, measured observability overhead versus an unconfigured `RuntimeApp` at `8` checks was `0.0413 ms` per loaded tick (`11.31%`), with bounded ring-buffer retention (`32` log lines) and no growth beyond the configured buffers.
+- Implemented Phase A boot instrumentation in `firmware/runtime.py`:
+  - Added serial boot-stage logs for config load, display setup, boot logo, button setup, check loading, startup tick, and loop entry.
+  - Removed blocking startup Wi-Fi connect from `run_forever`; network reconnect is now deferred into the runtime tick path.
+  - Changed the default boot logo duration from `6s` to `2s` and updated deploy config defaults accordingly.
+  - Changed runtime button defaults from `GP14/GP15` to `GP22/GP21`.
+- Implemented Phase C, D, and E runtime behavior in `src/vivipi/runtime/app.py`:
+  - Added non-blocking network reconnect worker handling in the runtime.
+  - Added `last_success_s` tracking for checks.
+  - Added manual force-refresh queueing for all checks.
+  - Added display propagation logging for state transitions.
+  - Added debug overlay rows and transient on-screen feedback messages.
+  - Remapped buttons at the runtime boundary:
+    - Button A toggles debug overlay.
+    - Button B requests an immediate refresh of all checks.
+- Implemented Phase E button instrumentation in `firmware/input.py`:
+  - Added per-button bias detection with `auto`, `up`, and `down` handling.
+  - Added debounced edge detection with raw value, stable value, and event logging.
+  - Added logger binding so button activity reaches the serial log stream.
+- Updated SH1107 and config validation coverage:
+  - Added an explicit SPI mode 3 assertion to firmware display tests.
+  - Preserved the SH1107 `column_offset = 32` path.
+- Validation results:
+  - `python -m pytest -o addopts='' tests/unit/runtime/test_observability.py tests/unit/runtime/test_app.py tests/unit/firmware/test_runtime.py tests/unit/firmware/test_firmware_input.py tests/unit/firmware/test_display.py tests/unit/core/test_display_config.py tests/unit/tooling/test_build_deploy.py` passed with `145 passed`.
+  - `./build lint` passed.
+  - `./build test` completed with `330 passed` but still failed the repository coverage gate at `90.38%` versus the required `96%`.
+- Remaining blockers:
+  - Hardware-only acceptance proof is still pending in this environment:
+    - actual button electrical polarity on `GP22` and `GP21`
+    - OLED framebuffer photos/screenshots
+    - serial logs from a live Pico boot
+    - Pixel 4 / ADB / scrcpy screenshots
+  - The repository-wide coverage threshold remains below the required floor and is not isolated to the firmware changes in this turn.
 
-- 2026-04-05T20:53:24+01:00 Started execution for display mode and multi-column convergence.
-- 2026-04-05T20:53:24+01:00 Inspected the current render, state, runtime, and firmware display paths plus existing tests and docs to identify the compact-layout integration points.
-- 2026-04-05T20:53:24+01:00 Recorded the implementation loop in `PLANS.md`; next step is threading validated display settings into the core model and overview renderer.
-- 2026-04-05T21:01:38+01:00 Added validated display mode, column count, and separator settings to the build/runtime configuration path and threaded them into `AppState`.
-- 2026-04-05T21:01:38+01:00 Refactored overview pagination to use item capacity (`rows * columns`), added compact-mode filtering, and introduced per-span inversion metadata for compact overview layouts.
-- 2026-04-05T21:03:15+01:00 Renamed the new overview mode to `compact` across the enum, config validation, runtime plumbing, tests, and supporting notes.
-- 2026-04-05T21:08:29+01:00 Full repository validation passed with `142` tests green and `93.38%` total branch coverage.
-- 2026-04-05T21:08:29+01:00 Built firmware artifacts under `artifacts/release/`, including `vivipi-firmware-bundle.zip`, `vivipi-device-filesystem.zip`, and `display-validation-snapshots.txt`.
-- 2026-04-05T21:08:29+01:00 Installed `mpremote` in the project virtualenv and retried deploy. Deployment remains blocked because `/dev/ttyACM0` is not accessible from this environment (`mpremote: failed to access /dev/ttyACM0`).
-- 2026-04-05T21:08:29+01:00 Captured deterministic renderer snapshots for `standard` and `compact` modes across `1` to `4` columns in `artifacts/release/display-validation-snapshots.txt` as non-hardware evidence for layout, truncation, and failed-only inversion spans.
-- 2026-04-05T21:25:23+01:00 Reproduced the failing GitHub Actions `./build ci` workflow locally. Root cause was an invalid checked-in sample config value: `device.display.brightness: compact` in `config/build-deploy.yaml`.
-- 2026-04-05T21:25:23+01:00 Restored `device.display.brightness` to `medium` and reran `./build ci` with CI-like environment variables. The full local CI entrypoint now passes with `142` tests green and `93.38%` branch coverage.
-- 2026-04-05T21:25:23+01:00 Renamed the `REST` check type to `HTTP` across the enum, execution diagnostics, checked-in configs, tests, and docs. Parser compatibility for legacy `rest` / `REST` inputs is preserved at the config and runtime-config loaders.
-- 2026-04-05T21:40:16+01:00 Validated the `REST` to `HTTP` rename with targeted suites and the full `./build ci` path. Final validation result: `144` tests green and `93.44%` branch coverage.
-- 2026-04-05T21:44:11+01:00 Extended the plan for new `FTP` and `TELNET` check types with optional credentials and for a stricter branch-coverage gate above `95%`.
-- 2026-04-05T21:44:11+01:00 Next step is updating the shared check model and config/runtime serialization path before implementing the new protocol runners.
-- 2026-04-05T21:01:38+01:00 Replaced the SH1107 text draw path with a pure framebuffer renderer and added unit coverage for layout math, filtering, runtime wiring, and byte-level inversion.
-- 2026-04-05T22:28:00+01:00 Added `FTP` and `TELNET` check support end-to-end across the shared model, YAML parsing, runtime config serialization, core execution dispatch, and socket-based runtime runners with optional username/password handling.
-- 2026-04-05T22:28:00+01:00 Added coverage-heavy protocol and validation tests across runtime checks, build/deploy tooling, config parsing, runtime app behavior, state/model validation, and the ADB service handler to lift the repository-wide gate safely.
-- 2026-04-05T22:28:00+01:00 Updated `README.md`, `docs/spec.md`, `docs/spec-traceability.md`, `AGENTS.md`, `pyproject.toml`, and the traceability gate test to document FTP/Telnet support and enforce `96%` minimum coverage in CI.
-- 2026-04-05T22:28:00+01:00 Full validation now passes via `./build ci` with explicit test env vars: `178` tests green and `96.97%` total coverage.
+## 2026-04-10T21:30:50Z
 
-## 2026-04-06 Productionization Convergence
+- Ran `./build render-config` and verified the generated device config carries:
+  - `buttons.a = GP22`
+  - `buttons.b = GP21`
+  - `device.display.boot_logo_duration_s = 2`
+  - `device.display.spi_mode = 3`
+  - `device.display.column_offset = 32`
+- Rebuilt the firmware bundle with `./build build-firmware`.
+- Verified the release filesystem artifact now matches the same runtime config values as the device staging artifact.
 
-- 2026-04-06T18:00:00+01:00 Started the full productionization convergence pass.
-- 2026-04-06T18:00:00+01:00 Read the authoritative repository contract in the required order: `README.md`, `docs/spec.md`, `docs/spec-traceability.md`, `.github/copilot-instructions.md`, `AGENTS.md`, existing `PLANS.md`, and existing `WORKLOG.md`.
-- 2026-04-06T18:00:00+01:00 Verified the git worktree was clean before changes.
-- 2026-04-06T18:00:00+01:00 Audited the executable entrypoints and release path baselines in `build`, `pyproject.toml`, `config/build-deploy.yaml`, `config/checks.yaml`, `.github/workflows/ci.yml`, `.github/workflows/release.yml`, `src/vivipi/tooling/build_deploy.py`, `src/vivipi/services/adb_service.py`, `src/vivipi/services/adb.py`, `src/vivipi/services/schema.py`, `src/vivipi/core/config.py`, `src/vivipi/runtime/app.py`, and `firmware/runtime.py`.
-- 2026-04-06T18:00:00+01:00 Replaced the stale task-specific plan with an authoritative productionization convergence plan in `PLANS.md`; next step is completing the deep audit, classifying findings by severity, and executing fixes with tests and validation evidence.
-- 2026-04-06T21:13:07+01:00 Fixed H2 release packaging drift by making `stage_release_assets()` select a single authoritative version per release set: the repository tag form when it semantically matches the built wheel, otherwise the built wheel version. This removed the observed mismatch where `vivipi-service-bundle-0.2.2.zip` embedded `vivipi-0.2.3.dev0+...whl`. Added regression coverage in `tests/unit/tooling/test_build_deploy.py`.
-- 2026-04-06T21:13:07+01:00 Fixed H2 overview-layout contract drift by rejecting `device.display.mode: standard` with `device.display.columns > 1`, enforcing the same rule in `AppState`, restoring the tracked sample configs to `columns: 1`, and aligning `README.md`, `docs/spec.md`, and `docs/spec-traceability.md`. Added regression coverage in `tests/unit/core/test_display_config.py`, `tests/unit/core/test_models.py`, `tests/unit/core/test_state.py`, `tests/unit/core/test_render.py`, and `tests/unit/tooling/test_build_deploy.py`.
-- 2026-04-06T21:13:07+01:00 Fixed H3 build-entrypoint operator friction by making explicit `--config` arguments bypass the automatic sibling local-config preference in `build`, and by tightening `require_runtime_env()` so it only trusts a local override when that override will actually be used. Added a regression test that executes the real `build` script in `tests/unit/tooling/test_build_entrypoint.py`.
-- 2026-04-06T21:13:07+01:00 Fixed H3 service-schema validation drift by rejecting negative `latency_ms` values in `src/vivipi/services/schema.py` and extending `tests/contract/test_service_schema.py`.
-- 2026-04-06T21:13:07+01:00 Focused validation passed: `.venv/bin/python -m pytest --no-cov tests/unit/tooling/test_build_deploy.py tests/unit/tooling/test_build_entrypoint.py tests/unit/core/test_display_config.py tests/unit/core/test_models.py tests/unit/core/test_state.py tests/unit/core/test_render.py tests/contract/test_service_schema.py -q` -> `113 passed`.
-- 2026-04-06T21:13:07+01:00 Packaging validation passed: `VIVIPI_WIFI_SSID=ci-ssid VIVIPI_WIFI_PASSWORD=ci-password VIVIPI_SERVICE_BASE_URL=http://192.0.2.10:8080/checks ./build release-assets --config config/build-deploy.yaml` produced a consistent `0.2.3.dev0+g029105f9a.d20260406` release set, and the rebuilt service bundle contained a wheel with the same version string.
-- 2026-04-06T21:13:07+01:00 Firmware bundle validation passed: `VIVIPI_WIFI_SSID=ci-ssid VIVIPI_WIFI_PASSWORD=ci-password VIVIPI_SERVICE_BASE_URL=http://192.0.2.10:8080/checks ./build build-firmware --config config/build-deploy.yaml` rebuilt `artifacts/release/vivipi-device-fs/config.json` with the tracked single-column standard OLED config.
-- 2026-04-06T21:13:07+01:00 Repository-wide validation passed: `./build coverage` -> `279 passed`, `96.24%` total coverage; `VIVIPI_WIFI_SSID=ci-ssid VIVIPI_WIFI_PASSWORD=ci-password VIVIPI_SERVICE_BASE_URL=http://192.0.2.10:8080/checks ./build ci --config config/build-deploy.yaml` -> lint + `279 passed` + `96.24%` total coverage.
-- 2026-04-06T21:13:07+01:00 External validation limit remains unchanged: real `./build deploy` against hardware was not re-executed in this environment because there is no accessible Pico serial device. The repository deploy path remains covered by unit tests and the documented hardware requirement.
+## 2026-04-10T21:37:32Z
+
+- Replaced `PLANS.md` with a hardware-first recovery plan.
+- Marked the previous `GP22` / `GP21` assumption as untrusted pending real-board proof.
+- Started Phase 1 ground-truth recovery:
+  - identify connected Pico USB/serial paths
+  - identify actual deployment path
+  - identify Pixel 4 / `adb` / `scrcpy` observation path
+  - prove whether the connected device is running stale firmware
+
+## 2026-04-10T21:56:28Z
+
+- Established the actual hardware access paths:
+  - Pico serial device: `/dev/ttyACM0`
+  - Pico deploy/access command: `sg dialout -c 'mpremote connect /dev/ttyACM0 ...'`
+  - Pixel 4 observation path: `adb shell screencap -p ...` plus `adb pull ...`
+  - Pixel camera app confirmed active via `dumpsys window` with `org.lineageos.aperture/.CameraLauncher`
+- Proved the connected Pico was running the freshly deployed bundle by reading live `/config.json` from device storage and matching the deployed build metadata over serial.
+- Captured the first real Pico boot traceback:
+  - startup crashed in `vivipi/runtime/state.py` while formatting an exception via `sys.print_exception`
+  - on-device exception: `OSError: stream operation not supported`
+  - effect: runtime handoff aborted, leaving the OLED on the boot logo
+- Fixed the stuck-logo root cause:
+  - made exception-trace capture non-fatal on MicroPython
+  - added serial breadcrumbs for captured startup and loop exceptions
+- Captured the next real hardware faults after the boot crash was removed:
+  - startup button exception: `AttributeError("'str' object has no attribute 'value'")`
+  - loop scheduler exception: `AttributeError("'str' object has no attribute 'casefold'")`
+- Fixed the next on-device compatibility faults:
+  - button logging now tolerates plain-string button identifiers on MicroPython
+  - scheduler host normalization now falls back to `.lower()` when `.casefold()` is unavailable
+  - background thread startup now falls back cleanly instead of surfacing `OSError: core1 in use`
+- Verified the repaired runtime path on real hardware:
+  - boot logs now proceed through config load, display init, button bind, network state, startup tick, and live check execution
+  - first rendered check/progression logs show live runtime activity beyond the boot logo
+- Captured real health-transition proof on the running Pico:
+  - forced `pixel4-adb` into `FAIL` by stopping the host ADB-backed service
+  - serial log showed `transition id=pixel4-adb from=OK to=FAIL`
+  - serial log showed `DISP propagation id=pixel4-adb status=FAIL delay_ms=0.0`
+  - after restoring the service on `0.0.0.0:8081`, serial log showed `transition id=pixel4-adb from=FAIL to=OK`
+  - serial log showed `DISP propagation id=pixel4-adb status=OK delay_ms=0.0`
+- Updated the active deployed button mapping from the known-bad `GP22/GP21` to the board-image lead `GP15/GP17`.
+- Current remaining blockers are physical, not software:
+  - no autonomous actuation path exists for the on-board buttons
+  - no autonomous cold-power-cycle path exists from this shell; `usbreset`/raw USB reset is blocked by device permissions
+- Proof artifacts captured in `artifacts/hardware-proof/`:
+  - `health-transition-serial.log`
+  - `health-recovery-serial-2.log`
+  - `pico-runtime-screen-2.png`
+
+## 2026-04-10T21:58:46Z
+
+- Cleaned remaining stale repo references from `GP22/GP21` to `GP15/GP17` in:
+  - `README.md`
+  - `tests/unit/firmware/test_firmware_input.py`
+  - `tests/unit/firmware/test_runtime.py`
+  - `tests/unit/tooling/test_build_deploy.py`
+- Re-ran the affected unit slices and confirmed they pass with the corrected mapping.
+- Re-confirmed the live Pico filesystem is deployed with:
+  - `device.buttons.a = GP15`
+  - `device.buttons.b = GP17`
+
+## 2026-04-10T22:10:29Z
+
+- Investigated the local `1541ultimate` source tree to match ViviPi probe behavior against the actual device implementations.
+- Ruled out the earlier `X-Password` null-pointer path as the active root cause for this setup after confirming the user does not run a network password on the C64U/U64.
+- Identified the active crash-risk probe behaviors from source:
+  - FTP health checks were using `PASV` + `LIST`, which forces an extra passive data socket, an extra task, and a full directory transfer on the 1541ultimate FTP daemon.
+  - Telnet health checks were sending fallback probe bytes (`IAC NOP`, then newline) that are not required for the 1541ultimate telnet server and are risky against its minimal parser and login flow.
+  - Probe-local retry backoff was still `100 ms` / `200 ms`, which violated the intended `>= 500 ms` same-device spacing rule even after the scheduler-level fix.
+- Implemented the corresponding ViviPi fixes:
+  - HTTP runner now supports explicit request headers cleanly and always asks the server to close the connection.
+  - FTP runner was reduced to a control-channel-only probe: login, `PWD`, `QUIT`.
+  - Telnet runner no longer sends fallback `NOP`/newline probe bytes; after login it only waits briefly for additional server output and otherwise treats the connected session as sufficient.
+  - Probe retry backoff base was raised to `500 ms`, producing retry spacing of `500 ms`, then `800 ms`.
+- Validation:
+  - `./.venv/bin/python -m pytest -o addopts='' tests/unit/runtime/test_checks.py tests/unit/core/test_execution.py` passed with `42 passed`.
+  - `./.venv/bin/python -m pytest -o addopts='' tests/unit/core/test_scheduler.py tests/unit/runtime/test_app.py tests/unit/tooling/test_build_deploy.py` passed with `77 passed`.
+
+## 2026-04-10T22:12:43Z
+
+- Deployed the updated bundle to the real Pico with `./build deploy --device-port /dev/ttyACM0`.
+- Forced a Pico reset and captured the next on-device serial window in:
+  - `artifacts/hardware-proof/u64-safe-probes-serial-after-reset.log`
+- Verified from real serial output that the deployed runtime is active and running the updated health-check set:
+  - boot completed through display init and button bind
+  - `checks loaded count=7`
+  - live executions started for `u64-rest`, `u64-ftp`, `u64-telnet`, `c64u-rest`, `c64u-ftp`, and `c64u-telnet`
+- The captured window shows the Pico executing the new probe bundle on-device; the individual device checks were failing at transport level in that capture window rather than crashing the Pico runtime.

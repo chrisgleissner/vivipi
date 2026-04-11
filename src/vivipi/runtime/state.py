@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import io
 import sys
-import traceback
+
+try:
+    import traceback
+except ImportError:  # pragma: no cover - MicroPython fallback
+    traceback = None
 
 from vivipi.core.logging import bound_text
 
@@ -14,7 +19,9 @@ class _TraceWriter:
         self._chunks: list[str] = []
 
     def write(self, value: str):
-        self._chunks.append(str(value))
+        text = str(value)
+        self._chunks.append(text)
+        return len(text)
 
     def lines(self, line_limit: int, max_lines: int) -> tuple[str, ...]:
         text = "".join(self._chunks).strip()
@@ -24,13 +31,35 @@ class _TraceWriter:
 
 
 def format_exception_trace(exception: BaseException, line_limit: int = 96, max_lines: int = 6) -> tuple[str, ...]:
-    writer = _TraceWriter()
     if hasattr(sys, "print_exception"):
-        sys.print_exception(exception, writer)
-        return writer.lines(line_limit, max_lines)
+        try:
+            buffer = io.StringIO()
+            sys.print_exception(exception, buffer)
+            text = buffer.getvalue().strip()
+            if text:
+                return tuple(bound_text(line, line_limit) for line in text.splitlines()[:max_lines])
+        except Exception:
+            writer = _TraceWriter()
+            try:
+                sys.print_exception(exception, writer)
+                traced = writer.lines(line_limit, max_lines)
+                if traced:
+                    return traced
+            except Exception:
+                pass
 
-    traceback.print_exception(type(exception), exception, exception.__traceback__, file=writer)
-    return writer.lines(line_limit, max_lines)
+    writer = _TraceWriter()
+    if traceback is not None:
+        try:
+            traceback.print_exception(type(exception), exception, exception.__traceback__, file=writer)
+            traced = writer.lines(line_limit, max_lines)
+            if traced:
+                return traced
+        except Exception:
+            pass
+
+    fallback = f"{type(exception).__name__}: {exception}".strip()
+    return (bound_text(fallback, line_limit),) if fallback else ()
 
 
 def make_error_record(

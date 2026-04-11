@@ -3,8 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from vivipi.core.models import AppMode, AppState, CheckRuntime, DisplayMode, Status
-from vivipi.core.state import normalize_selection, overview_checks, selected_check, visible_checks
+from vivipi.core.state import selected_check, visible_checks
 from vivipi.core.text import center_text, column_widths, compact_overview_cell, overview_row, truncate_text
+
+
+def _enum_text(value) -> str:
+    return str(getattr(value, "value", value))
 
 
 @dataclass(frozen=True)
@@ -30,8 +34,14 @@ def _blank_rows(row_width: int, page_size: int) -> list[str]:
     return [" " * row_width for _ in range(page_size)]
 
 
+def _pad_right(value: str, width: int) -> str:
+    if width <= len(value):
+        return value[:width]
+    return value + (" " * (width - len(value)))
+
+
 def _fixed_width_row(value: str, row_width: int) -> str:
-    return truncate_text(value, row_width).ljust(row_width)
+    return _pad_right(truncate_text(value, row_width), row_width)
 
 
 def _detail_rows(check: CheckRuntime | None, now_s: float | None, row_width: int, page_size: int) -> tuple[str, ...]:
@@ -39,7 +49,7 @@ def _detail_rows(check: CheckRuntime | None, now_s: float | None, row_width: int
         return tuple(_blank_rows(row_width, page_size))
 
     rows = [_fixed_width_row(check.name, row_width)]
-    rows.append(_fixed_width_row(f"STATUS: {check.status.value}", row_width))
+    rows.append(_fixed_width_row(f"STATUS: {_enum_text(check.status)}", row_width))
 
     if check.latency_ms is not None:
         rows.append(_fixed_width_row(f"LAT: {int(check.latency_ms)}ms", row_width))
@@ -84,18 +94,14 @@ def _about_rows(state: AppState, row_width: int, page_size: int) -> tuple[str, .
 
 def _legacy_overview_frame(state: AppState, checks: tuple[CheckRuntime, ...]) -> Frame:
     rows = _blank_rows(state.row_width, state.page_size)
-    selected_index = None
     failure_spans: list[TextSpan] = []
-    selected_id = normalize_selection(state.checks, state.selected_id, overview_checks(state))
     for row_index, check in enumerate(checks):
-        rows[row_index] = overview_row(check.name, check.status.value, state.row_width)
+        status_text = _enum_text(check.status)
+        rows[row_index] = overview_row(check.name, status_text, state.row_width)
         if check.status == Status.FAIL:
-            failure_spans.append(_status_span(row_index, state.row_width, check.status.value))
-        if check.identifier == selected_id:
-            selected_index = row_index
+            failure_spans.append(_status_span(row_index, state.row_width, status_text))
     return Frame(
         rows=tuple(rows),
-        inverted_row=selected_index,
         shift_offset=state.shift_offset,
         failure_spans=tuple(failure_spans),
     )
@@ -119,8 +125,8 @@ def _compact_overview_frame(state: AppState, checks: tuple[CheckRuntime, ...]) -
                 display_text = ""
                 cell = " " * width
             else:
-                display_text = compact_overview_cell(check.name, check.status.value, width)
-                cell = display_text.ljust(width)
+                display_text = compact_overview_cell(check.name, _enum_text(check.status), width)
+                cell = _pad_right(display_text, width)
                 if display_text and check.status == Status.FAIL:
                     failure_spans.append(
                         TextSpan(
@@ -161,7 +167,7 @@ def render_frame(state: AppState, now_s: float | None = None) -> Frame:
         failure_spans = ()
         if selected is not None and selected.status == Status.FAIL:
             failure_spans = (
-                TextSpan(row_index=1, start_column=len("STATUS: "), end_column=len(f"STATUS: {selected.status.value}")),
+                TextSpan(row_index=1, start_column=len("STATUS: "), end_column=len(f"STATUS: {_enum_text(selected.status)}")),
             )
         return Frame(
             rows=_detail_rows(selected, now_s, state.row_width, state.page_size),

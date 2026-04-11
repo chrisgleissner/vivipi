@@ -172,7 +172,16 @@ def execute_check(
 
     if definition.check_type == CheckType.HTTP:
         try:
-            result = http_runner(definition.method, definition.target, definition.timeout_s)
+            if definition.username is not None or definition.password is not None:
+                result = http_runner(
+                    definition.method,
+                    definition.target,
+                    definition.timeout_s,
+                    definition.username,
+                    definition.password,
+                )
+            else:
+                result = http_runner(definition.method, definition.target, definition.timeout_s)
         except Exception:
             return _execution_error(definition, observed_at_s, "HTTP", "request failed")
 

@@ -1,3 +1,4 @@
+import io
 from types import SimpleNamespace
 
 import pytest
@@ -56,3 +57,38 @@ def test_format_exception_trace_covers_sys_print_exception_and_traceback_fallbac
     assert fallback
     assert record["type"] == "RuntimeError"
     assert record["message"] == "RuntimeError"
+
+
+def test_format_exception_trace_falls_back_when_sys_print_exception_rejects_writer(monkeypatch):
+    class FakeSys:
+        @staticmethod
+        def print_exception(exception, writer):
+            raise OSError("stream operation not supported")
+
+    monkeypatch.setattr(runtime_state, "sys", FakeSys)
+    traced = runtime_state.format_exception_trace(RuntimeError("boom"), line_limit=24, max_lines=2)
+
+    assert traced
+    assert traced[0] == "RuntimeError: boom"
+
+
+def test_format_exception_trace_uses_trace_writer_and_final_fallback_paths(monkeypatch):
+    class FakeSys:
+        @staticmethod
+        def print_exception(exception, writer):
+            if isinstance(writer, io.StringIO):
+                raise OSError("stringio unsupported")
+            writer.write("writer line\n")
+
+    monkeypatch.setattr(runtime_state, "sys", FakeSys)
+
+    traced = runtime_state.format_exception_trace(RuntimeError("boom"), line_limit=24, max_lines=2)
+
+    assert traced == ("writer line",)
+
+    monkeypatch.setattr(runtime_state, "sys", SimpleNamespace())
+    monkeypatch.setattr(runtime_state, "traceback", SimpleNamespace(print_exception=lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("no traceback"))))
+
+    fallback = runtime_state.format_exception_trace(RuntimeError("boom"), line_limit=24, max_lines=2)
+
+    assert fallback == ("RuntimeError: boom",)

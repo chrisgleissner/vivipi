@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
-from vivipi.services.adb import collect_adb_service_payload, parse_adb_devices
+import vivipi.services.adb as adb_module
+from vivipi.services.adb import collect_adb_device_status, collect_adb_service_payload, parse_adb_devices
 from vivipi.services.adb_service import route_request
 
 
@@ -64,14 +65,88 @@ def test_collect_adb_payload_returns_failure_when_the_command_fails():
     assert payload["checks"][0]["details"] == "adb missing"
 
 
+def test_collect_adb_payload_returns_failure_when_adb_is_not_installed(monkeypatch):
+    def raise_missing_binary(*args, **kwargs):
+        raise FileNotFoundError("adb not found")
+
+    monkeypatch.setattr(adb_module.subprocess, "run", raise_missing_binary)
+
+    payload = collect_adb_service_payload()
+
+    assert payload["checks"][0]["status"] == "FAIL"
+    assert "adb not found" in payload["checks"][0]["details"]
+
+
+def test_collect_adb_device_status_returns_ok_for_the_target_serial():
+    status_code, payload = collect_adb_device_status(
+        "9B081FFAZ001WX",
+        "PIXEL4 ADB",
+        run_command=lambda command: SimpleNamespace(
+            returncode=0,
+            stdout="List of devices attached\n9B081FFAZ001WX device product:flame model:Pixel_4 device:flame\n",
+            stderr="",
+        ),
+    )
+
+    assert status_code == 200
+    assert payload["status"] == "OK"
+    assert payload["name"] == "PIXEL4 ADB"
+
+
+def test_collect_adb_device_status_fails_when_target_is_missing():
+    status_code, payload = collect_adb_device_status(
+        "9B081FFAZ001WX",
+        "PIXEL4 ADB",
+        run_command=lambda command: SimpleNamespace(
+            returncode=0,
+            stdout="List of devices attached\nemulator-5554 device product:sdk_gphone model:Pixel_8\n",
+            stderr="",
+        ),
+    )
+
+    assert status_code == 503
+    assert payload["status"] == "FAIL"
+    assert payload["details"] == "Target device not connected"
+
+
+def test_collect_adb_device_status_returns_command_failure_and_offline_target_details():
+    status_code, payload = collect_adb_device_status(
+        "9B081FFAZ001WX",
+        "PIXEL4 ADB",
+        run_command=lambda command: SimpleNamespace(returncode=1, stdout="", stderr="adb unavailable"),
+    )
+
+    assert status_code == 503
+    assert payload["details"] == "adb unavailable"
+
+    status_code, payload = collect_adb_device_status(
+        "9B081FFAZ001WX",
+        "PIXEL4 ADB",
+        run_command=lambda command: SimpleNamespace(
+            returncode=0,
+            stdout="List of devices attached\n9B081FFAZ001WX offline transport_id:1\n",
+            stderr="",
+        ),
+    )
+
+    assert status_code == 503
+    assert payload["details"] == "transport_id:1"
+
+
 def test_route_request_serves_health_and_check_routes():
     health_status, health_body = route_request("/health")
     checks_status, checks_body = route_request("/checks", payload_factory=lambda: {"checks": []})
+    adb_status, adb_body = route_request(
+        "/adb/9B081FFAZ001WX",
+        payload_factory=lambda: {"checks": []},
+    )
     missing_status, missing_body = route_request("/missing")
 
     assert health_status == 200
     assert health_body == {"status": "OK"}
     assert checks_status == 200
     assert checks_body == {"checks": []}
+    assert adb_status in {200, 503}
+    assert adb_body["name"] == "PIXEL4 ADB"
     assert missing_status == 404
     assert missing_body == {"error": "not_found"}

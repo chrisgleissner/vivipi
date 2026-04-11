@@ -47,6 +47,16 @@ class TransitionThresholds:
 
 
 @dataclass(frozen=True)
+class ProbeSchedulingPolicy:
+    allow_concurrent_same_host: bool = False
+    same_host_backoff_ms: int = 250
+
+    def __post_init__(self):
+        if self.same_host_backoff_ms < 0:
+            raise ValueError("same_host_backoff_ms must not be negative")
+
+
+@dataclass(frozen=True)
 class CheckDefinition:
     identifier: str
     name: str

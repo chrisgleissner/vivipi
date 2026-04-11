@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
 import firmware.runtime as firmware_runtime
-from vivipi.core.models import DiagnosticEvent, DisplayMode
+from vivipi.core.models import DiagnosticEvent, DisplayMode, ProbeSchedulingPolicy, TransitionThresholds
 
 
 class FakeTime:
@@ -124,8 +124,10 @@ def test_read_wifi_state_and_reconnect_wifi_capture_current_link_details(monkeyp
     assert wlan.connect_calls == [("Office", "secret")]
 
 
-def test_build_runtime_app_uses_injected_factories_and_records_wifi_diagnostics():
+def test_build_runtime_app_uses_injected_factories_and_defers_wifi_startup():
     called = {}
+    wifi_calls = []
+    sleep_calls = []
 
     class FakeApp:
         def __init__(
@@ -141,6 +143,10 @@ def test_build_runtime_app_uses_injected_factories_and_records_wifi_diagnostics(
             display_mode,
             overview_columns,
             column_separator,
+            transition_thresholds,
+            probe_scheduling,
+            sleep_ms,
+            probe_time_provider,
             version="",
             build_time="",
         ):
@@ -155,12 +161,23 @@ def test_build_runtime_app_uses_injected_factories_and_records_wifi_diagnostics(
             called["display_mode"] = display_mode
             called["overview_columns"] = overview_columns
             called["column_separator"] = column_separator
+            called["transition_thresholds"] = transition_thresholds
+            called["probe_scheduling"] = probe_scheduling
+            called["sleep_ms"] = sleep_ms
+            called["probe_time_provider"] = probe_time_provider
             called["version"] = version
             called["build_time"] = build_time
             called["diagnostics"] = None
+            called["network_refreshes"] = []
 
         def inject_diagnostics(self, diagnostics, activate=True):
             called["diagnostics"] = (diagnostics, activate)
+
+        def configure_observability(self, **kwargs):
+            called["observability"] = kwargs
+
+        def _refresh_network_state(self, **kwargs):
+            called["network_refreshes"].append(kwargs)
 
     input_controller = object()
     display = SimpleNamespace(show_boot_logo=lambda version: None)
@@ -172,6 +189,11 @@ def test_build_runtime_app_uses_injected_factories_and_records_wifi_diagnostics(
     app = firmware_runtime.build_runtime_app(
         {
             "project": {"version": "1.2.3", "build_time": "2025-04-05T12:00Z"},
+            "check_state": {
+                "failures_to_degraded": 1,
+                "failures_to_failed": 1,
+                "successes_to_recover": 1,
+            },
             "device": {
                 "display": {
                     "width_px": 128,
@@ -182,7 +204,7 @@ def test_build_runtime_app_uses_injected_factories_and_records_wifi_diagnostics(
                     "column_separator": "|",
                     "font": {"width_px": 8, "height_px": 8},
                 },
-                "buttons": {"a": "GP14", "b": "GP15"},
+                "buttons": {"a": "GP15", "b": "GP17"},
             },
         },
         input_controller_factory=lambda: input_controller,
@@ -191,9 +213,9 @@ def test_build_runtime_app_uses_injected_factories_and_records_wifi_diagnostics(
         runtime_app_factory=FakeApp,
         definitions_builder=lambda config: definitions,
         executor_factory=lambda: executor,
-        wifi_connector=lambda config: (DiagnosticEvent(code="WIFI", message="connected"),),
+        wifi_connector=lambda config: wifi_calls.append(config) or (DiagnosticEvent(code="WIFI", message="connected"),),
         now_provider=lambda: next(now_counter),
-        sleep_ms=lambda ms: None,
+        sleep_ms=lambda ms: sleep_calls.append(ms),
     )
 
     assert isinstance(app, FakeApp)
@@ -208,9 +230,90 @@ def test_build_runtime_app_uses_injected_factories_and_records_wifi_diagnostics(
     assert called["display_mode"] == DisplayMode.COMPACT
     assert called["overview_columns"] == 3
     assert called["column_separator"] == "|"
+    assert called["transition_thresholds"] == TransitionThresholds(
+        failures_to_degraded=1,
+        failures_to_failed=1,
+        successes_to_recover=1,
+    )
+    assert called["probe_scheduling"] == ProbeSchedulingPolicy()
     assert called["version"] == "1.2.3"
     assert called["build_time"] == "2025-04-05T12:00Z"
-    assert called["diagnostics"] == (((DiagnosticEvent(code="WIFI", message="connected"),)), True)
+    assert called["diagnostics"] is None
+    assert called["network_refreshes"] == [{}]
+    assert wifi_calls == []
+    assert sleep_calls == []
+    assert app.boot_logo_until_s == 2.0
+
+
+def test_build_runtime_app_does_not_prime_initial_checks_during_boot():
+    called = {}
+    definitions = (object(),)
+
+    class FakeApp:
+        def __init__(self, **kwargs):
+            called.update(kwargs)
+            called["prime_now_s"] = None
+
+        def inject_diagnostics(self, diagnostics, activate=True):
+            called["diagnostics"] = (diagnostics, activate)
+
+        def run_all_checks(self, now_s=None):
+            called["prime_now_s"] = now_s
+
+    now_values = iter([0.0, 1.0, 1.0])
+
+    firmware_runtime.build_runtime_app(
+        {
+            "project": {},
+            "device": {
+                "display": {"width_px": 128, "height_px": 64, "font": {"width_px": 8, "height_px": 8}},
+                "buttons": {"a": "GP15", "b": "GP17"},
+            },
+        },
+        input_controller_factory=lambda: object(),
+        display_factory=lambda config: SimpleNamespace(show_boot_logo=lambda version: None),
+        button_reader_factory=lambda config, input_controller: object(),
+        runtime_app_factory=FakeApp,
+        definitions_builder=lambda config: definitions,
+        executor_factory=lambda: object(),
+        wifi_connector=lambda config: (),
+        now_provider=lambda: next(now_values),
+        sleep_ms=lambda ms: None,
+    )
+
+    assert called["prime_now_s"] is None
+
+
+def test_build_runtime_app_honors_explicit_boot_logo_duration_from_config():
+    class FakeApp:
+        def __init__(self, **kwargs):
+            pass
+
+    app = firmware_runtime.build_runtime_app(
+        {
+            "project": {"version": "1.2.3"},
+            "device": {
+                "display": {
+                    "width_px": 128,
+                    "height_px": 64,
+                    "boot_logo_duration_s": 7,
+                    "font": {"width_px": 8, "height_px": 8},
+                },
+                "buttons": {"a": "GP15", "b": "GP17"},
+            },
+        },
+        input_controller_factory=lambda: object(),
+        display_factory=lambda config: SimpleNamespace(show_boot_logo=lambda version: None),
+        button_reader_factory=lambda config, input_controller: object(),
+        runtime_app_factory=FakeApp,
+        definitions_builder=lambda config: (),
+        executor_factory=lambda: object(),
+        wifi_connector=lambda config: (),
+        now_provider=lambda: 10.0,
+        sleep_ms=lambda ms: None,
+    )
+
+    assert app.boot_logo_until_s == 17.0
 
 
 def test_build_runtime_app_falls_back_to_default_display_when_primary_display_init_fails():
@@ -234,7 +337,7 @@ def test_build_runtime_app_falls_back_to_default_display_when_primary_display_in
             "project": {},
             "device": {
                 "display": {"type": "waveshare-pico-epaper-2.13-v4"},
-                "buttons": {"a": "GP14", "b": "GP15"},
+                "buttons": {"a": "GP15", "b": "GP17"},
             },
         },
         input_controller_factory=lambda: object(),
@@ -268,7 +371,7 @@ def test_build_runtime_app_recovers_from_invalid_definitions_and_records_boot_er
                     "height_px": 64,
                     "font": {"width_px": 8, "height_px": 8},
                 },
-                "buttons": {"a": "GP14", "b": "GP15"},
+                "buttons": {"a": "GP15", "b": "GP17"},
             },
         },
         input_controller_factory=lambda: object(),
@@ -348,7 +451,7 @@ def test_build_runtime_app_infers_geometry_and_page_interval_from_display_type()
             "project": {},
             "device": {
                 "display": {"type": "waveshare-pico-epaper-2.13-b-v4"},
-                "buttons": {"a": "GP14", "b": "GP15"},
+                "buttons": {"a": "GP15", "b": "GP17"},
             },
         },
         input_controller_factory=lambda: object(),
@@ -371,17 +474,16 @@ def test_build_runtime_app_infers_geometry_and_page_interval_from_display_type()
     assert called["page_interval_s"] == 180
 
 
-def test_boot_logo_shown_for_minimum_duration_by_waiting_after_fast_wifi():
-    called = {}
+def test_build_runtime_app_does_not_wait_for_boot_logo_or_wifi_during_boot():
     sleep_calls = []
+    wifi_calls = []
 
     class FakeApp:
         def __init__(self, **kwargs):
-            called.update(kwargs)
-            called["diagnostics"] = None
+            pass
 
         def inject_diagnostics(self, diagnostics, activate=True):
-            called["diagnostics"] = diagnostics
+            pass
 
     now_times = iter([0.0, 1.0, 1.0])
     display = SimpleNamespace(show_boot_logo=lambda version: None)
@@ -395,7 +497,7 @@ def test_boot_logo_shown_for_minimum_duration_by_waiting_after_fast_wifi():
                     "height_px": 64,
                     "font": {"width_px": 8, "height_px": 8},
                 },
-                "buttons": {"a": "GP14", "b": "GP15"},
+                "buttons": {"a": "GP15", "b": "GP17"},
             },
         },
         input_controller_factory=lambda: object(),
@@ -404,53 +506,14 @@ def test_boot_logo_shown_for_minimum_duration_by_waiting_after_fast_wifi():
         runtime_app_factory=FakeApp,
         definitions_builder=lambda config: (),
         executor_factory=lambda: object(),
-        wifi_connector=lambda config: (),
-        now_provider=lambda: next(now_times),
-        sleep_ms=lambda ms: sleep_calls.append(ms),
-        boot_logo_min_s=5,
-    )
-
-    assert sleep_calls == [4000]
-
-
-def test_boot_logo_no_wait_when_wifi_takes_longer_than_minimum():
-    sleep_calls = []
-
-    class FakeApp:
-        def __init__(self, **kwargs):
-            pass
-
-        def inject_diagnostics(self, diagnostics, activate=True):
-            pass
-
-    now_times = iter([0.0, 6.0, 6.0])
-    display = SimpleNamespace(show_boot_logo=lambda version: None)
-
-    firmware_runtime.build_runtime_app(
-        {
-            "project": {},
-            "device": {
-                "display": {
-                    "width_px": 128,
-                    "height_px": 64,
-                    "font": {"width_px": 8, "height_px": 8},
-                },
-                "buttons": {"a": "GP14", "b": "GP15"},
-            },
-        },
-        input_controller_factory=lambda: object(),
-        display_factory=lambda config: display,
-        button_reader_factory=lambda config, input_controller: object(),
-        runtime_app_factory=FakeApp,
-        definitions_builder=lambda config: (),
-        executor_factory=lambda: object(),
-        wifi_connector=lambda config: (),
+        wifi_connector=lambda config: wifi_calls.append(config) or (),
         now_provider=lambda: next(now_times),
         sleep_ms=lambda ms: sleep_calls.append(ms),
         boot_logo_min_s=5,
     )
 
     assert sleep_calls == []
+    assert wifi_calls == []
 
 
 def test_run_loop_ticks_and_sleeps_with_injected_clock():
@@ -471,11 +534,25 @@ def test_run_loop_ticks_and_sleeps_with_injected_clock():
     assert sleeps == [50, 50, 50]
 
 
-def test_run_forever_builds_app_then_runs_loop(monkeypatch):
-    fake_app = object()
+def test_run_forever_primes_startup_work_without_waiting_for_boot_logo_and_enters_run_loop(monkeypatch):
+    class FakeApp:
+        def __init__(self):
+            self.boot_logo_until_s = 18.5
+            self.tick_calls = []
+            self.prime_calls = []
+
+        def prime_due_checks(self, now_s):
+            self.prime_calls.append(now_s)
+
+        def tick(self, now_s, button_events=None):
+            self.tick_calls.append((now_s, button_events))
+
+    fake_app = FakeApp()
     called = {}
+    now_values = iter([12.5])
 
     monkeypatch.setattr(firmware_runtime, "build_runtime_app_from_path", lambda path: fake_app)
+    monkeypatch.setattr(firmware_runtime, "_now_s", lambda: next(now_values))
     monkeypatch.setattr(
         firmware_runtime,
         "run_loop",
@@ -485,3 +562,17 @@ def test_run_forever_builds_app_then_runs_loop(monkeypatch):
     firmware_runtime.run_forever(poll_interval_ms=75)
 
     assert called == {"app": fake_app, "poll_interval_ms": 75}
+    assert fake_app.prime_calls == [12.5]
+    assert fake_app.tick_calls == [(12.5, ())]
+
+
+def test_run_startup_tick_uses_prime_due_checks_when_available():
+    calls = []
+
+    class FakeApp:
+        def prime_due_checks(self, now_s):
+            calls.append(("prime", now_s))
+
+    firmware_runtime._run_startup_tick(FakeApp(), 12.5)
+
+    assert calls == [("prime", 12.5)]

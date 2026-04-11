@@ -1,19 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 
-
-@dataclass
 class RingBuffer:
-    capacity: int
-    _items: list[object | None] = field(init=False, repr=False)
-    _count: int = field(default=0, init=False, repr=False)
-    _next_index: int = field(default=0, init=False, repr=False)
-
-    def __post_init__(self):
+    def __init__(self, capacity: int):
+        self.capacity = int(capacity)
         if self.capacity < 1:
             raise ValueError("capacity must be positive")
-        self._items = [None] * self.capacity
+        self._items: list[object | None] = [None] * self.capacity
+        self._count = 0
+        self._next_index = 0
 
     def __len__(self) -> int:
         return self._count

@@ -6,23 +6,42 @@ from vivipi.core.display import infer_default_font, normalize_display_config, su
 from vivipi.core.models import AppState, DisplayMode
 from vivipi.core.render import render_frame
 
-from firmware.displays import SH1107Display, SSD1305Display, ST77xxDisplay, WaveshareEPaperMonoDisplay, create_display
-from firmware.displays.rendering import (
-    HorizontalMonochromeSurface,
-    MonochromeSurface,
-    RGB565Surface,
-    TriColorSurface,
-    _build_glyph_lookup,
-    _pin_number,
-    _sample_source_coordinates,
-    boot_logo_font_sizes,
-    render_boot_logo,
-    render_boot_logo_to_surface,
-    render_framebuffer,
-    render_to_surface,
-)
-from firmware.displays.waveshare_epaper import WaveshareEPaper213BV4Display as _WaveshareEPaper213BV4Display, WaveshareEPaper213BV4Surface
-from firmware.displays.waveshare_epaper_tricolor import WaveshareEPaperTriColorDisplay
+try:
+    from displays import SH1107Display, SSD1305Display, ST77xxDisplay, WaveshareEPaperMonoDisplay, create_display
+    from displays.rendering import (
+        HorizontalMonochromeSurface,
+        MonochromeSurface,
+        RGB565Surface,
+        TriColorSurface,
+        _build_glyph_lookup,
+        _pin_number,
+        _sample_source_coordinates,
+        boot_logo_font_sizes,
+        render_boot_logo,
+        render_boot_logo_to_surface,
+        render_framebuffer,
+        render_to_surface,
+    )
+    from displays.waveshare_epaper import WaveshareEPaper213BV4Display as _WaveshareEPaper213BV4Display, WaveshareEPaper213BV4Surface
+    from displays.waveshare_epaper_tricolor import WaveshareEPaperTriColorDisplay
+except ImportError:  # pragma: no cover - used by CPython tests
+    from firmware.displays import SH1107Display, SSD1305Display, ST77xxDisplay, WaveshareEPaperMonoDisplay, create_display
+    from firmware.displays.rendering import (
+        HorizontalMonochromeSurface,
+        MonochromeSurface,
+        RGB565Surface,
+        TriColorSurface,
+        _build_glyph_lookup,
+        _pin_number,
+        _sample_source_coordinates,
+        boot_logo_font_sizes,
+        render_boot_logo,
+        render_boot_logo_to_surface,
+        render_framebuffer,
+        render_to_surface,
+    )
+    from firmware.displays.waveshare_epaper import WaveshareEPaper213BV4Display as _WaveshareEPaper213BV4Display, WaveshareEPaper213BV4Surface
+    from firmware.displays.waveshare_epaper_tricolor import WaveshareEPaperTriColorDisplay
 
 
 WaveshareEPaper213BV4Display = _WaveshareEPaper213BV4Display

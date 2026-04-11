@@ -356,16 +356,40 @@ def _clamp_font(size):
     return max(BOOT_LOGO_MIN_FONT, min(BOOT_LOGO_MAX_FONT, size))
 
 
+def _boot_logo_padding(width):
+    return max(4, width // 16)
+
+
+def _boot_logo_letter_spacing(font_size):
+    return max(1, font_size // 8)
+
+
+def _boot_logo_text_width(text, font_size):
+    if not text:
+        return 0
+    spacing = _boot_logo_letter_spacing(font_size)
+    return (len(text) * font_size) + ((len(text) - 1) * spacing)
+
+
+def _fit_boot_logo_font(text, width, height_limit):
+    if not text:
+        return 0
+
+    padding = _boot_logo_padding(width)
+    width_limit = max(BOOT_LOGO_MIN_FONT, width - (padding * 2))
+    candidate = _clamp_font(min(width_limit // len(text), height_limit))
+    while candidate > BOOT_LOGO_MIN_FONT and _boot_logo_text_width(text, candidate) > width_limit:
+        candidate -= 1
+    return _clamp_font(candidate)
+
+
 def boot_logo_font_sizes(width, height, version):
-    title_len = len(BOOT_LOGO_TITLE)
-    title_font = _clamp_font(min(width // title_len, (height * 55) // 100))
+    title_font = _fit_boot_logo_font(BOOT_LOGO_TITLE, width, (height * 55) // 100)
 
     version_len = len(version) if version else 0
     if version_len > 0:
         remaining = height - title_font
-        version_font = _clamp_font(
-            min(width // version_len, (remaining * 60) // 100, (title_font * 2) // 3)
-        )
+        version_font = _fit_boot_logo_font(version, width, min((remaining * 60) // 100, (title_font * 2) // 3))
     else:
         version_font = 0
 
@@ -382,20 +406,24 @@ def render_boot_logo_to_surface(surface, version, glyph_builder=None):
     y_start = max(0, (surface.height - total_h) // 2)
 
     title_glyph = builder(title_font, title_font)
-    title_px = len(BOOT_LOGO_TITLE) * title_font
+    title_spacing = _boot_logo_letter_spacing(title_font)
+    title_px = _boot_logo_text_width(BOOT_LOGO_TITLE, title_font)
     title_x = max(0, (surface.width - title_px) // 2)
     for col_index, character in enumerate(BOOT_LOGO_TITLE):
         for delta_x, delta_y in title_glyph(character):
-            surface.set_pixel(title_x + col_index * title_font + delta_x, y_start + delta_y, surface.foreground_color)
+            cell_x = title_x + col_index * (title_font + title_spacing)
+            surface.set_pixel(cell_x + delta_x, y_start + delta_y, surface.foreground_color)
 
     if version:
         ver_glyph = builder(version_font, version_font)
-        ver_px = len(version) * version_font
+        ver_spacing = _boot_logo_letter_spacing(version_font)
+        ver_px = _boot_logo_text_width(version, version_font)
         ver_x = max(0, (surface.width - ver_px) // 2)
         ver_y = y_start + title_font + gap
         for col_index, character in enumerate(version):
             for delta_x, delta_y in ver_glyph(character):
-                surface.set_pixel(ver_x + col_index * version_font + delta_x, ver_y + delta_y, surface.foreground_color)
+                cell_x = ver_x + col_index * (version_font + ver_spacing)
+                surface.set_pixel(cell_x + delta_x, ver_y + delta_y, surface.foreground_color)
 
     return surface
 

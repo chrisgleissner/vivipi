@@ -115,6 +115,7 @@ def test_control_surface_runs_checks_resets_state_and_restores_log_level():
     assert calls == [("router", 5.0)]
     assert app.logger.level.name == "DEBUG"
     assert runtime_control.reconnect_network()["reconnect_count"] == 1
+    assert runtime_control.dump_logs(limit=1)
 
     runtime_control.set_debug_mode(False)
     reset_snapshot = runtime_control.reset_state()
@@ -197,6 +198,7 @@ def test_healthy_checks_emit_sampled_summary_logs_on_cadence_boundary():
 
     app = RuntimeApp(definitions=(definition,), executor=executor, display=FakeDisplay(), page_interval_s=0)
     app.configure_observability(config={"wifi": {"ssid": "Office"}}, now_provider=lambda: 1.0)
+    app.background_workers_enabled = False
 
     for index in range(10):
         app.last_started_at.clear()
@@ -226,6 +228,7 @@ def test_failed_health_checks_emit_extra_detail_logs_every_time():
 
     app = RuntimeApp(definitions=(definition,), executor=executor, display=FakeDisplay(), page_interval_s=0)
     app.configure_observability(config={"wifi": {"ssid": "Office"}}, now_provider=lambda: 1.0)
+    app.background_workers_enabled = False
 
     app.tick(0.0)
     app.last_started_at.clear()
@@ -305,3 +308,43 @@ def test_runtime_app_covers_current_time_log_level_error_limit_and_network_excep
 
     assert app.get_errors(limit=1)[0]["scope"] == "network"
     assert app.get_logs(limit=1)[0].startswith("[ERROR][ERR] exception")
+
+
+def test_runtime_app_reconnects_before_running_due_checks_when_network_is_down():
+    definition = make_definition("router")
+    connected = {"value": False}
+    reconnect_calls = []
+
+    def executor(check_definition, now_s):
+        return CheckExecutionResult(
+            source_identifier=check_definition.identifier,
+            observations=(
+                CheckObservation(
+                    identifier=check_definition.identifier,
+                    name=check_definition.name,
+                    status=Status.OK if connected["value"] else Status.FAIL,
+                    details="reachable" if connected["value"] else "timeout",
+                    observed_at_s=now_s,
+                ),
+            ),
+        )
+
+    app = RuntimeApp(definitions=(definition,), executor=executor, display=FakeDisplay(), page_interval_s=0)
+    app.configure_observability(
+        config={"wifi": {"ssid": "Office"}},
+        now_provider=lambda: 0.0,
+        wifi_reconnector=lambda config: reconnect_calls.append(config) or connected.__setitem__("value", True) or (),
+        network_state_reader=lambda config: {
+            "ssid": "Office",
+            "connected": connected["value"],
+            "active": True,
+            "ip_address": "192.0.2.20" if connected["value"] else None,
+        },
+    )
+    app.background_workers_enabled = False
+
+    app.tick(0.0)
+
+    assert len(reconnect_calls) == 1
+    assert app.get_network_state_snapshot()["connected"] is True
+    assert app.state.checks[0].status == Status.OK

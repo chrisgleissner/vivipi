@@ -1,6 +1,18 @@
 ELLIPSIS = "…"
 
 
+def _pad_right(value: str, width: int) -> str:
+    if width <= len(value):
+        return value[:width]
+    return value + (" " * (width - len(value)))
+
+
+def _pad_left(value: str, width: int) -> str:
+    if width <= len(value):
+        return value[-width:]
+    return (" " * (width - len(value))) + value
+
+
 def truncate_text(value: str, width: int) -> str:
     if width <= 0:
         return ""
@@ -65,7 +77,7 @@ def overview_row(name: str, status: str, total_width: int = 16, status_width: in
     if total_width <= 0:
         return ""
     display_status_width = min(status_width, total_width)
-    display_status = truncate_text(status, display_status_width).rjust(display_status_width)
+    display_status = _pad_left(truncate_text(status, display_status_width), display_status_width)
     name_width = max(total_width - display_status_width, 0)
-    display_name = truncate_text(name, name_width).ljust(name_width)
-    return (display_name + display_status).ljust(total_width)
+    display_name = _pad_right(truncate_text(name, name_width), name_width)
+    return _pad_right(display_name + display_status, total_width)

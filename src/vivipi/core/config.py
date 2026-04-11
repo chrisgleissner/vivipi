@@ -11,6 +11,7 @@ from vivipi.core.models import CheckDefinition, CheckType
 
 SLUG_PATTERN = re.compile(r"[^a-z0-9]+")
 PLACEHOLDER_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)\}")
+OPTIONAL_AUTH_PLACEHOLDER_KEYS = frozenset({"username", "password"})
 
 
 def slugify(value: str) -> str:
@@ -29,15 +30,19 @@ def build_service_check_id(prefix: str | None, check_name: str) -> str:
     return check_id
 
 
-def _resolve_placeholders(value: object, env: dict[str, str]) -> object:
+def _resolve_placeholders(value: object, env: dict[str, str], key: str | None = None) -> object:
     if isinstance(value, dict):
-        return {key: _resolve_placeholders(item, env) for key, item in value.items()}
+        return {item_key: _resolve_placeholders(item, env, item_key) for item_key, item in value.items()}
     if isinstance(value, list):
-        return [_resolve_placeholders(item, env) for item in value]
+        return [_resolve_placeholders(item, env, key) for item in value]
     if isinstance(value, str):
+        full_match = PLACEHOLDER_PATTERN.fullmatch(value)
+
         def replace_match(match: re.Match[str]) -> str:
             variable_name = match.group(1)
             if variable_name not in env:
+                if key in OPTIONAL_AUTH_PLACEHOLDER_KEYS and full_match is not None:
+                    return ""
                 raise KeyError(f"missing environment variable: {variable_name}")
             return env[variable_name]
 

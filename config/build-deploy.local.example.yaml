@@ -8,10 +8,16 @@ device:
     version: 1.25.0
     download_page: https://micropython.org/download/RPI_PICO2_W/
   buttons:
-    a: GP14
-    b: GP15
+    a: GP15
+    b: GP17
+  # Optional advanced form:
+  # buttons:
+  #   a: { pin: GP15, pull: auto }
+  #   b: { pin: GP17, pull: auto }
   display:
     type: waveshare-pico-oled-1.3
+    # Advanced override only. The Waveshare Pico OLED 1.3 infers SH1107 column_offset: 32.
+    # column_offset: 32
     mode: standard
     columns: 1
     column_separator: " "
@@ -25,5 +31,9 @@ service:
   # Leave base_url commented out if you do not want SERVICE checks in config.json.
   # base_url: http://192.168.1.10:8080/checks
   default_prefix: adb
+
+probe_schedule:
+  allow_concurrent_same_host: false
+  same_host_backoff_ms: 500
 
 checks_config: checks.yaml

@@ -1,5 +1,6 @@
 import pytest
 
+import vivipi.core.display as core_display
 from vivipi.core.display import get_display_definition, infer_default_font, infer_display_type, normalize_display_config, normalize_display_type, supported_display_types, supported_font_sizes
 
 
@@ -37,9 +38,39 @@ def test_normalize_display_config_defaults_to_inferred_oled_geometry_and_font():
     assert config["type"] == "waveshare-pico-oled-1.3"
     assert config["width_px"] == 128
     assert config["height_px"] == 64
+    assert config["column_offset"] == 32
     assert config["font"] == {"width_px": 8, "height_px": 8}
     assert config["page_interval_s"] == 15
+    assert config["boot_logo_duration_s"] == 6
     assert config["pins"]["dc"] == "GP8"
+
+
+def test_normalize_display_config_accepts_column_offset_override_for_subwindowed_oleds():
+    config = normalize_display_config({"type": "waveshare-pico-oled-1.3", "column_offset": 29})
+
+    assert config["column_offset"] == 29
+
+
+def test_normalize_display_config_accepts_boot_logo_duration_override():
+    config = normalize_display_config({"type": "waveshare-pico-oled-1.3", "boot_logo_duration": "7s"})
+
+    assert config["boot_logo_duration_s"] == 7
+
+
+def test_display_parser_helpers_cover_numeric_and_error_branches():
+    assert core_display._parse_positive_int(7.0, "device.display.width_px") == 7
+    assert core_display._parse_positive_int("8", "device.display.width_px") == 8
+    assert core_display._parse_non_negative_int(3.0, "device.display.column_offset", 0) == 3
+    assert core_display._parse_non_negative_int("4", "device.display.column_offset", 0) == 4
+
+    with pytest.raises(ValueError, match="positive integer"):
+        core_display._parse_positive_int(0, "device.display.width_px")
+
+    with pytest.raises(ValueError, match="non-negative integer"):
+        core_display._parse_non_negative_int(-1, "device.display.column_offset", 0)
+
+    with pytest.raises(ValueError, match="must be one of"):
+        core_display._parse_font_size_name("mega")
 
 
 def test_infer_default_font_uses_legacy_grid_fallback_without_diagonal():
@@ -158,6 +189,9 @@ def test_normalize_display_config_validates_inferred_string_and_numeric_fields()
     with pytest.raises(ValueError, match="device.display.page_interval"):
         normalize_display_config({"type": "waveshare-pico-lcd-1.3", "page_interval": object()})
 
+    with pytest.raises(ValueError, match="device.display.column_offset"):
+        normalize_display_config({"type": "waveshare-pico-oled-1.3", "column_offset": -1})
+
 
 def test_normalize_display_config_rejects_mismatched_inferred_values():
     with pytest.raises(ValueError, match="device.display.width_px"):
@@ -174,6 +208,7 @@ def test_get_display_definition_returns_json_friendly_metadata():
 
     assert definition["backend"] == "sh1107"
     assert definition["colors"] == ["white", "black"]
+    assert definition["default_column_offset"] == 32
 
 
 def test_get_display_definition_includes_screen_diagonal_for_readme_matrix_generation():

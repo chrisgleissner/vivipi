@@ -1,5 +1,7 @@
 # ViviPi
 
+See your device health at a glance.
+
 [![Build](https://github.com/chrisgleissner/vivipi/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/chrisgleissner/vivipi/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/chrisgleissner/vivipi/graph/badge.svg)](https://codecov.io/gh/chrisgleissner/vivipi)
 [![License: GPL v3](https://img.shields.io/badge/License-GPL%20v3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0.en.html)
@@ -8,16 +10,19 @@
 
 ViviPi (pronounced "VEE-vee-pie", from the Latin *viv-* in *vivere*, "to live") is a minimal, glanceable monitoring system for Raspberry Pi Pico display modules. The default target is a Pico 2W with a 128x64 SH1107 OLED, but the runtime and build pipeline also support Waveshare Pico OLED, LCD, and e-paper modules.
 
-The project is intentionally narrow:
-
-- deterministic fixed-width rendering across supported Pico OLED, LCD, and e-paper modules
-- deterministic scheduling and execution for `PING`, `HTTP`, `FTP`, `TELNET`, and `SERVICE`
-- one `./build` entrypoint for install, lint, test, coverage, packaging, deploy, and service hosting
-
-Behavioral requirements live in [docs/spec.md](docs/spec.md). Requirement-to-test coverage lives in [docs/spec-traceability.md](docs/spec-traceability.md).
-
 > [!NOTE]
 > This project is under active development. Some documented features may not yet be fully functional.
+
+## Features
+
+- Supports Pico OLED, LCD, and e-paper modules.
+- Supports `PING`, `HTTP`, `FTP`, `TELNET`, and `SERVICE` health checks.
+- Configurable back-off and scheduling policies to avoid overwhelming targets.
+- Easy build and deployment via a one-stop shop `build` command.
+
+![Boot Logo](./docs/img/vivipi_boot_logo.jpg)
+![Checks all OK](./docs/img/vivipi_checks_all_ok.png)
+![Checks partially OK](./docs/img/vivipi_checks_partially_ok.png)
 
 ## System Architecture
 
@@ -58,12 +63,6 @@ flowchart TB
 
 Direct probes run from the Pico itself. `SERVICE` is the extension point for any kind of check driven not by the Pico, but by another device.
 
-## Operational Safety
-
-- Missing or malformed device runtime config no longer aborts startup; the firmware boots with a bounded fallback config and surfaces diagnostics when a display path is available.
-- If a configured display backend fails to initialize, firmware falls back to the default SH1107 OLED path when possible. If no backend can be started, the runtime stays headless and remains inspectable from the REPL surfaces.
-- Direct transport probes classify transient failures as `timeout`, `dns`, `refused`, `network`, `reset`, or `io`, and use bounded retry with deterministic backoff before reporting failure.
-
 ### Probe Reference
 
 | Probe | Performs | Success condition | Failure condition or note |
@@ -81,6 +80,7 @@ Direct probes run from the Pico itself. `SERVICE` is the extension point for any
 - Display controller: SH1107
 - Character grid: 16 columns x 8 rows using 8x8 bitmap cells
 - Display interface: 4-wire SPI, mode 3
+- Native transport mapping: portrait-native 64x128 SH1107 page stream with inferred column offset 32 for the Waveshare Pico OLED 1.3
 
 ### Pin Mapping
 
@@ -91,8 +91,8 @@ Direct probes run from the Pico itself. `SERVICE` is the extension point for any
 | CS | GP9 |
 | DC | GP8 |
 | RST | GP12 |
-| BTN A | GP14 |
-| BTN B | GP15 |
+| BTN A | GP15 |
+| BTN B | GP17 |
 
 ## Quick Start
 
@@ -305,8 +305,8 @@ If `VIVIPI_SERVICE_BASE_URL` is omitted, build-time filtering drops `SERVICE` ch
 | `device.micropython_port` | `auto` or path-like string | `auto` | Default device selector for `./build deploy`; `auto` picks the first connected Pico |
 | `device.micropython.version` | string | `1.25.0` | Pinned MicroPython version reference |
 | `device.micropython.download_page` | absolute URL | Pico 2W download page | Included in the install manifest |
-| `device.buttons.a` | GPIO pin name | `GP14` | Left button pin |
-| `device.buttons.b` | GPIO pin name | `GP15` | Right button pin |
+| `device.buttons.a` | GPIO pin name | `GP15` | Left button pin |
+| `device.buttons.b` | GPIO pin name | `GP17` | Right button pin |
 | `device.display.type` | see display matrix below | `waveshare-pico-oled-1.3` | Selects the backend and infers controller, SPI mode, geometry, default pins, and default page interval |
 | `device.display.mode` | `standard`, `compact` | `standard` | Overview layout mode |
 | `device.display.columns` | integer `1` to `4` | `1` | Number of overview columns; values above `1` require `device.display.mode: compact` |
@@ -315,6 +315,7 @@ If `VIVIPI_SERVICE_BASE_URL` is omitted, build-time filtering drops `SERVICE` ch
 | `device.display.font.width_px` | integer `6` to `32` | inferred | Optional backward-compatible override |
 | `device.display.font.height_px` | integer `6` to `32` | inferred | Optional backward-compatible override |
 | `device.display.page_interval` | integer seconds or `Ns` | inferred by display | Use `0s` to disable automatic page cycling |
+| `device.display.column_offset` | non-negative integer | inferred by display | Advanced override for controller-native visible window alignment; the Waveshare Pico OLED 1.3 infers `32` |
 | `device.display.failure_color` | color name string | `red` | Used for failed-check accent rendering on color-capable displays |
 | `device.display.brightness` | `low`, `medium`, `high`, `max`, or `0` to `255` | `medium` on OLED/LCD | Unsupported on e-paper display types |
 | `wifi.ssid` | placeholder or string | none | Normally `${VIVIPI_WIFI_SSID}` |
@@ -353,7 +354,7 @@ Published specs below are based on current The Pi Hut Waveshare product listings
 
 | `device.display.type` | The Pi Hut | Waveshare | Published display spec | Notes |
 | --- | --- | --- | --- | --- |
-| `waveshare-pico-oled-1.3` | [Listing](https://thepihut.com/products/1-3-oled-display-module-for-raspberry-pi-pico-64x128) | [Developer page](https://www.waveshare.com/wiki/Pico-OLED-1.3) | `1.3"`, `64×128`, OLED, `SH1107`, SPI/I2C | The Pi Hut publishes this module as `64×128`; ViviPi renders it as `128×64` landscape |
+| `waveshare-pico-oled-1.3` | [Listing](https://thepihut.com/products/1-3-oled-display-module-for-raspberry-pi-pico-64x128) | [Developer page](https://www.waveshare.com/wiki/Pico-OLED-1.3) | `1.3"`, `64×128`, OLED, `SH1107`, SPI/I2C | The Pi Hut publishes this module as `64×128`; ViviPi renders it as `128×64` landscape and uses the validated SH1107 native column offset `32` |
 | `waveshare-pico-oled-2.23` | [Listing](https://thepihut.com/products/2-23-oled-display-module-for-raspberry-pi-pico) | [Developer page](https://www.waveshare.com/wiki/Pico-OLED-2.23) | `2.23"`, `128×32`, OLED, `SSD1305`, SPI/I2C | Matches the current Pi Hut listing |
 | `waveshare-pico-lcd-0.96` | [Listing](https://thepihut.com/products/0-96-lcd-display-module-for-raspberry-pi-pico-160x80) | [Developer page](https://www.waveshare.com/wiki/Pico-LCD-0.96) | `0.96"`, `160×80`, LCD | Matches the current Pi Hut listing |
 | `waveshare-pico-lcd-1.14` | [Listing](https://thepihut.com/products/1-14-ips-lcd-display-module-240x135) | [Developer page](https://www.waveshare.com/wiki/Pico-LCD-1.14) | `1.14"`, `240×135`, IPS LCD | Pi Hut does not split separate Pico `1.14` and `1.14-v2` retail listings; Waveshare uses a shared `Pico-LCD-1.14` page |

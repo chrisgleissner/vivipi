@@ -8,7 +8,7 @@ from vivipi.core.models import AppMode, AppState, CheckObservation, CheckRuntime
 
 
 def sort_checks(checks: tuple[CheckRuntime, ...]) -> tuple[CheckRuntime, ...]:
-    return tuple(sorted(checks, key=lambda check: check.name.casefold()))
+    return tuple(checks)
 
 
 def normalize_selection(
@@ -144,13 +144,13 @@ def integrate_observations(
     thresholds: TransitionThresholds | None = None,
     replace_source_identifier: str | None = None,
 ) -> AppState:
-    runtimes = {runtime.identifier: runtime for runtime in state.checks}
-    if replace_source_identifier is not None:
-        runtimes = {
-            identifier: runtime
-            for identifier, runtime in runtimes.items()
-            if runtime.source_identifier != replace_source_identifier
-        }
+    ordered_ids = []
+    runtimes = {}
+    for runtime in state.checks:
+        if replace_source_identifier is not None and runtime.source_identifier == replace_source_identifier:
+            continue
+        ordered_ids.append(runtime.identifier)
+        runtimes[runtime.identifier] = runtime
 
     for observation in observations:
         current = runtimes.get(
@@ -162,8 +162,10 @@ def integrate_observations(
             ),
         )
         runtimes[observation.identifier] = apply_observation(current, observation, thresholds)
+        if observation.identifier not in ordered_ids:
+            ordered_ids.append(observation.identifier)
 
-    return with_checks(state, tuple(runtimes.values()))
+    return with_checks(state, tuple(runtimes[identifier] for identifier in ordered_ids))
 
 
 def _sorted_selected_index(state: AppState) -> int | None:

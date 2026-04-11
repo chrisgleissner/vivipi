@@ -195,6 +195,33 @@ checks:
     assert definitions[1].password is None
 
 
+def test_load_checks_config_treats_missing_auth_placeholders_as_optional(tmp_path: Path):
+    config_path = tmp_path / "checks.yaml"
+    config_path.write_text(
+        """
+checks:
+  - name: NAS FTP
+    type: ftp
+    target: ftp://nas.example.local
+    username: ${VIVIPI_NETWORK_USERNAME}
+    password: ${VIVIPI_NETWORK_PASSWORD}
+  - name: Switch Console
+    type: telnet
+    target: telnet://switch.example.local:23
+    username: admin
+    password: ${VIVIPI_NETWORK_PASSWORD}
+""".strip(),
+        encoding="utf-8",
+    )
+
+    definitions = load_checks_config(config_path, env={})
+
+    assert definitions[0].username is None
+    assert definitions[0].password is None
+    assert definitions[1].username == "admin"
+    assert definitions[1].password is None
+
+
 def test_load_checks_config_substitutes_environment_placeholders(tmp_path: Path):
     config_path = tmp_path / "checks.yaml"
     config_path.write_text(

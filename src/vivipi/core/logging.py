@@ -62,7 +62,8 @@ def format_log_line(
     normalized_component = _hard_limit(component.upper(), DEFAULT_COMPONENT_LIMIT) or "CORE"
     normalized_message = bound_text(message, DEFAULT_MESSAGE_LIMIT) or "event"
 
-    parts = [f"[{normalized_level.name}][{normalized_component}] {normalized_message}"]
+    level_name = getattr(normalized_level, "_name_", str(normalized_level))
+    parts = [f"[{level_name}][{normalized_component}] {normalized_message}"]
     for field in fields[:field_limit]:
         if field:
             parts.append(bound_text(field, DEFAULT_FIELD_LIMIT))
@@ -80,13 +81,13 @@ class StructuredLogger:
         sink=None,
     ):
         self.level = parse_log_level(level)
-        self.buffer = buffer if buffer is not None else RingBuffer(DEFAULT_LOG_BUFFER_CAPACITY)
+        self.buffer = buffer if buffer is not None else RingBuffer(capacity=DEFAULT_LOG_BUFFER_CAPACITY)
         self.line_limit = line_limit
         self.field_limit = field_limit
         self.sink = sink
 
     def is_enabled(self, level: LogLevel | str | int) -> bool:
-        return parse_log_level(level) >= self.level
+        return int(parse_log_level(level)) >= int(self.level)
 
     def set_level(self, level: LogLevel | str | int) -> LogLevel:
         self.level = parse_log_level(level)

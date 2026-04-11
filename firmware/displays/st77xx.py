@@ -9,7 +9,10 @@ except ImportError:  # pragma: no cover - imported on-device
     Pin = None
     SPI = None
 
-from firmware.displays.rendering import RGB565Surface, _build_glyph_lookup, _pin_number, render_boot_logo_to_surface, render_to_surface
+try:
+    from displays.rendering import RGB565Surface, _build_glyph_lookup, _pin_number, render_boot_logo_to_surface, render_to_surface
+except ImportError:  # pragma: no cover - used by CPython tests
+    from firmware.displays.rendering import RGB565Surface, _build_glyph_lookup, _pin_number, render_boot_logo_to_surface, render_to_surface
 
 
 def _sequence(command, data=(), delay_ms=0):

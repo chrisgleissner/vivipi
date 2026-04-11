@@ -1,6 +1,6 @@
 # ViviPi Specification
 
-Version: 1.4
+Version: 1.5
 Status: Active
 
 A minimal, calm, glanceable monitoring system for supported Pico display modules while preserving deterministic fixed-width text rendering.
@@ -48,6 +48,7 @@ Default font behavior:
 Display configuration:
 
 - `device.display.type` selects the display backend and MUST infer controller, interface, SPI mode, pixel geometry, and default pins
+- Controller-native visible-window calibration such as SH1107 column origin MAY be inferred from `device.display.type` and MAY be overridden for advanced hardware tuning
 - `device.display.font` SHOULD use symbolic size presets at build time
 - Exact character cell width and height MAY still be overridden for backward-compatible advanced tuning and remain constrained to 6 to 32 pixels
 - Visible columns = `floor(display_width_px / cell_width)`
@@ -220,18 +221,15 @@ Checks are evaluated periodically.
 ### FTP
 
 - FTP control session
-- Optional username and password
-- Must log in successfully
-- Must list the top-level directory via passive mode
-- Failure = login failure, invalid listing, or timeout
+- Must emit a valid FTP greeting on connection
+- Failure = missing or invalid greeting, or timeout
 
 ### TELNET
 
 - Telnet session
-- Optional username and password
-- Must log in successfully when prompted
-- Must observe valid prompt or session output
-- Failure = login failure, invalid output, or timeout
+- Must accept a TCP session
+- May report banner/session output when available
+- Failure = connection failure, explicit login failure text, or timeout
 
 ### SERVICE
 
@@ -257,7 +255,7 @@ SERVICE endpoints MUST return:
       ]
     }
 
-  - Payloads MUST contain at most 64 checks.
+- Payloads MUST contain at most 64 checks.
 
 [VIVIPI-CHECK-SCHEMA-001]
 
@@ -330,11 +328,21 @@ Timeout is treated as FAIL.
 
 [VIVIPI-CHECK-TIME-001]
 
-Probe transport failures MUST use bounded retries with deterministic backoff and stable failure classification.
+Probe pacing against the same device MUST be configurable and deterministic.
 
-- Applies to direct HTTP, FTP, and TELNET transport failures and to Wi-Fi connection attempts.
+- Same-device identity is derived from the normalized target host name or IP address.
+- Checks against different devices MAY run concurrently.
+- Concurrent probes against the same device MUST default to disabled.
+- The minimum time between the end of one probe and the start of the next probe against the same device MUST default to 250ms.
+- Same-device concurrency and backoff MUST both be configurable from settings.
+
+[VIVIPI-CHECK-SCHED-001]
+
+Probe transport failures MUST use single-attempt classification with stable failure detail.
+
+- Applies to direct HTTP, FTP, and TELNET transport failures.
 - Failure details MUST distinguish at least `timeout`, `dns`, `refused`, `network`, `reset`, and generic `io` failures when those classes can be determined.
-- Retries MUST remain bounded and MUST preserve deterministic scheduling order.
+- Each scheduled probe attempt MUST run at most once; later retries are deferred to the next configured interval.
 
 [VIVIPI-NET-001]
 
@@ -505,7 +513,7 @@ System MUST include:
 
 ## 16. Boot Logo
 
-On device startup, the display MUST show a boot logo for at least 5 seconds.
+On device startup, the display MUST show a boot logo for at least 6 seconds by default.
 
 Layout:
 
@@ -525,7 +533,12 @@ Font sizing:
 - Version font ≤ 2/3 of title font
 - All sizes clamped to the valid font range (6–32 pixels)
 
-The boot logo is shown before WiFi connection and application initialization.
+The boot logo is shown before the first overview frame replaces it.
+
+- WiFi connection and initial probe scheduling MAY begin while the boot logo remains visible.
+- The first post-logo overview frame SHOULD include any completed initial probe results instead of an all-unknown placeholder view.
+
+Boot duration MUST be configurable from settings.
 
 [VIVIPI-BOOT-001]
 

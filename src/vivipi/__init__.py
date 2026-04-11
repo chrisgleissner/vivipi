@@ -2,7 +2,7 @@ __all__ = ["__version__"]
 
 try:
 	from importlib.metadata import PackageNotFoundError, version as _package_version
-except ImportError:
+except ImportError:  # pragma: no cover - stdlib metadata unavailable
 	__version__ = "0.0.0"
 else:
 	try:

@@ -1,10 +1,31 @@
 from __future__ import annotations
 
-from vivipi.core.config import build_service_check_id
+import re
+
 from vivipi.core.models import CheckObservation, Status
 
 
 MAX_SERVICE_CHECKS = 64
+SLUG_PATTERN = re.compile(r"[^a-z0-9]+")
+
+
+def _fold(value: str) -> str:
+    casefold = getattr(value, "casefold", None)
+    if callable(casefold):
+        return str(casefold())
+    return value.lower()
+
+
+def _slugify(value: str) -> str:
+    normalized = SLUG_PATTERN.sub("-", _fold(value)).strip("-")
+    return normalized or "check"
+
+
+def build_service_check_id(prefix: str | None, check_name: str) -> str:
+    check_id = _slugify(check_name)
+    if prefix:
+        return f"{_slugify(prefix)}:{check_id}"
+    return check_id
 
 
 def parse_service_payload(
@@ -39,7 +60,7 @@ def parse_service_payload(
             raise ValueError("service check status must be a string")
         if not isinstance(details, str):
             raise ValueError("service check details must be a string")
-        if not isinstance(latency_ms, int | float):
+        if not isinstance(latency_ms, (int, float)):
             raise ValueError("service check latency_ms must be numeric")
         if float(latency_ms) < 0:
             raise ValueError("service check latency_ms must be non-negative")

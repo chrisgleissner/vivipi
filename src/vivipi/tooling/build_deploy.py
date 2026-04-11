@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import grp
 import ipaddress
 import json
 import os
+import pwd
 import re
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -28,6 +31,7 @@ from vivipi.core.models import CheckDefinition, CheckType
 
 PLACEHOLDER_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)\}")
 OPTIONAL_PLACEHOLDERS = frozenset({"VIVIPI_SERVICE_BASE_URL"})
+OPTIONAL_AUTH_PLACEHOLDER_KEYS = frozenset({"username", "password"})
 DEFAULT_DEPLOY_PORT = "auto"
 PRERELEASE_VERSION_PATTERN = re.compile(r"^(\d+\.\d+\.\d+)-?(a|b|rc)(\d+)$")
 
@@ -56,18 +60,27 @@ def resolve_config_path(config_path: str | Path, prefer_local_config: bool = Fal
         return local_override_path
     return original_path
 
-def _resolve_placeholders(value: object, env: dict[str, str], optional_placeholders: frozenset[str] = frozenset()) -> object:
+def _resolve_placeholders(
+    value: object,
+    env: dict[str, str],
+    optional_placeholders: frozenset[str] = frozenset(),
+    optional_keys: frozenset[str] = frozenset(),
+    key: str | None = None,
+) -> object:
     if isinstance(value, dict):
-        return {key: _resolve_placeholders(item, env, optional_placeholders) for key, item in value.items()}
+        return {
+            item_key: _resolve_placeholders(item, env, optional_placeholders, optional_keys, item_key)
+            for item_key, item in value.items()
+        }
     if isinstance(value, list):
-        return [_resolve_placeholders(item, env, optional_placeholders) for item in value]
+        return [_resolve_placeholders(item, env, optional_placeholders, optional_keys, key) for item in value]
     if isinstance(value, str):
         full_match = PLACEHOLDER_PATTERN.fullmatch(value)
 
         def replace_match(match: re.Match[str]) -> str:
             variable_name = match.group(1)
             if variable_name not in env:
-                if variable_name in optional_placeholders and full_match is not None:
+                if full_match is not None and (variable_name in optional_placeholders or key in optional_keys):
                     return ""
                 raise KeyError(f"missing environment variable: {variable_name}")
             return env[variable_name]
@@ -88,6 +101,7 @@ def load_build_deploy_settings(path: str | Path, env: dict[str, str] | None = No
             service.pop("base_url", None)
 
     _normalize_device_display_settings(resolved)
+    _normalize_probe_schedule_settings(resolved)
 
     return resolved
 
@@ -98,6 +112,45 @@ def _normalize_device_display_settings(settings: dict[str, object]):
         return
 
     device["display"] = normalize_display_config(device.get("display"))
+
+
+def _parse_bool(value: object, context: str, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "1", "on"}:
+            return True
+        if normalized in {"false", "no", "0", "off"}:
+            return False
+    raise ValueError(f"{context} must be a boolean")
+
+
+def _normalize_probe_schedule_settings(settings: dict[str, object]):
+    raw = settings.get("probe_schedule")
+    if raw is None:
+        settings["probe_schedule"] = {
+            "allow_concurrent_same_host": False,
+            "same_host_backoff_ms": 250,
+        }
+        return
+    if not isinstance(raw, dict):
+        raise ValueError("probe_schedule must be a mapping")
+
+    same_host_backoff_ms = int(raw.get("same_host_backoff_ms", 250))
+    if same_host_backoff_ms < 0:
+        raise ValueError("probe_schedule.same_host_backoff_ms must not be negative")
+
+    settings["probe_schedule"] = {
+        "allow_concurrent_same_host": _parse_bool(
+            raw.get("allow_concurrent_same_host"),
+            "probe_schedule.allow_concurrent_same_host",
+            False,
+        ),
+        "same_host_backoff_ms": same_host_backoff_ms,
+    }
 
 
 def _check_to_dict(check: CheckDefinition) -> dict[str, object]:
@@ -117,19 +170,31 @@ def _check_to_dict(check: CheckDefinition) -> dict[str, object]:
 
 def render_device_runtime_config(settings: dict[str, object], checks: tuple[CheckDefinition, ...]) -> dict[str, object]:
     project = dict(settings.get("project", {})) if isinstance(settings.get("project"), dict) else {}
-    return {
+    runtime_config = {
         "project": project,
         "device": settings["device"],
         "wifi": settings["wifi"],
         "service": settings.get("service", {}),
         "checks": [_check_to_dict(check) for check in checks],
     }
+    check_state = settings.get("check_state")
+    if isinstance(check_state, dict):
+        runtime_config["check_state"] = dict(check_state)
+    probe_schedule = settings.get("probe_schedule")
+    if isinstance(probe_schedule, dict):
+        runtime_config["probe_schedule"] = dict(probe_schedule)
+    return runtime_config
 
 
 def load_runtime_checks(path: str | Path, env: dict[str, str] | None = None) -> tuple[CheckDefinition, ...]:
     checks_path = Path(path)
     raw = yaml.safe_load(checks_path.read_text(encoding="utf-8")) or {}
-    resolved = _resolve_placeholders(raw, env or dict(os.environ), optional_placeholders=OPTIONAL_PLACEHOLDERS)
+    resolved = _resolve_placeholders(
+        raw,
+        env or dict(os.environ),
+        optional_placeholders=OPTIONAL_PLACEHOLDERS,
+        optional_keys=OPTIONAL_AUTH_PLACEHOLDER_KEYS,
+    )
 
     checks = resolved.get("checks")
     if not isinstance(checks, list):
@@ -570,6 +635,29 @@ def _resolve_deploy_port(device: object, port: str | None) -> str:
     return DEFAULT_DEPLOY_PORT
 
 
+def _wrap_with_dialout(command: list[str]) -> list[str]:
+    if os.name != "posix":
+        return command
+    try:
+        dialout = grp.getgrnam("dialout")
+    except KeyError:
+        return command
+
+    current_groups = set(os.getgroups())
+    if dialout.gr_gid in current_groups:
+        return command
+
+    try:
+        username = pwd.getpwuid(os.getuid()).pw_name
+    except KeyError:
+        return command
+
+    if username not in set(dialout.gr_mem):
+        return command
+
+    return ["sg", "dialout", "-c", shlex.join(command)]
+
+
 def deploy_firmware(
     config_path: str | Path,
     output_dir: str | Path,
@@ -590,7 +678,8 @@ def deploy_firmware(
                 command.extend(["-r", str(item), ":"])
             else:
                 command.extend([str(item), f":{item.name}"])
-            run_command(command, check=True)
+            run_command(_wrap_with_dialout(command), check=True)
+        run_command(_wrap_with_dialout(["mpremote", "connect", resolved_port, "soft-reset"]), check=True)
     except FileNotFoundError as error:
         raise RuntimeError("mpremote is required for deploy") from error
 
