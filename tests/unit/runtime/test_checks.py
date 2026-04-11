@@ -512,6 +512,81 @@ def test_runtime_target_alias_resolution_rewrites_matching_hosts_only():
     assert runtime_checks._resolve_target_alias("router.local", {"router.local": "   "}) == "router.local"
 
 
+def test_network_helper_functions_cover_additional_fallback_paths(monkeypatch):
+    fake_time = SimpleNamespace(sleep_calls=[], sleep=lambda value_s: fake_time.sleep_calls.append(value_s))
+    monkeypatch.setattr(runtime_checks, "time", fake_time)
+
+    runtime_checks._sleep_ms(5)
+
+    assert fake_time.sleep_calls == [0.005]
+    assert _classify_network_error(OSError("weird failure")) == "io"
+    assert runtime_checks._resolve_target_alias("", {"router.local": "192.0.2.10"}) == ""
+    assert runtime_checks._resolve_target_alias("http://router.local/health", {"router.local": "   "}) == "http://router.local/health"
+
+
+def test_portable_http_runner_urllib_fallback_covers_plaintext_and_transport_errors(monkeypatch):
+    monkeypatch.delitem(sys.modules, "urequests", raising=False)
+
+    class FakePlainResponse:
+        def read(self):
+            return b"plain text"
+
+        def getcode(self):
+            return 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    import urllib.request
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda request, timeout: FakePlainResponse())
+    success = portable_http_runner("GET", "http://192.0.2.10:8080/checks", 10)
+
+    assert success.body == "plain text"
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda request, timeout: (_ for _ in ()).throw(OSError("network down")))
+    failure = portable_http_runner("GET", "http://192.0.2.10:8080/checks", 10)
+
+    assert failure.status_code is None
+    assert failure.details == "io: network down"
+
+
+def test_socket_and_telnet_helpers_cover_remaining_edge_cases(monkeypatch):
+    monkeypatch.setattr(runtime_checks.socket, "getaddrinfo", lambda host, port, family, socktype: [])
+
+    with pytest.raises(OSError, match="unable to open socket"):
+        _open_socket("router.local", 23, 10)
+
+    with pytest.raises(ValueError, match="target must include a host"):
+        _parse_socket_target("ftp://", 21, expected_scheme="ftp")
+
+    with pytest.raises(ValueError, match="invalid FTP response"):
+        _ftp_read_response(FakeSocket([b""]))
+
+    assert _telnet_strip_negotiation(FakeSocket([]), bytes([runtime_checks.TELNET_IAC])) == b""
+    assert _telnet_strip_negotiation(FakeSocket([]), bytes([runtime_checks.TELNET_IAC, runtime_checks.TELNET_DO])) == b""
+    assert runtime_checks._has_alnum_ascii("!!!") is False
+
+    class TimeoutSocket:
+        def recv(self, _size):
+            raise OSError("timed out")
+
+        def sendall(self, data):
+            return None
+
+    assert _read_until_markers(TimeoutSocket(), (b"login:",)) == b""
+
+    class BrokenSocket:
+        def recv(self, _size):
+            raise OSError("broken pipe")
+
+    with pytest.raises(OSError, match="broken pipe"):
+        runtime_checks._recv_telnet_chunk(BrokenSocket())
+
+
 def test_socket_target_and_protocol_helpers_cover_success_and_error_paths():
     assert _parse_socket_target("ftp://nas.example.local", 21, expected_scheme="ftp") == ("nas.example.local", 21)
     assert _parse_socket_target("telnet://switch.example.local:2323", 23, expected_scheme="telnet") == (

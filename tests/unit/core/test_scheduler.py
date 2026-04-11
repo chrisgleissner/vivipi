@@ -1,5 +1,6 @@
 import pytest
 
+import vivipi.core.scheduler as scheduler_module
 from vivipi.core.models import AppState, CheckDefinition, CheckType, ProbeSchedulingPolicy
 from vivipi.core.scheduler import due_checks, next_due_at, probe_backoff_remaining_s, probe_host_key, render_reason
 
@@ -87,3 +88,40 @@ def test_probe_backoff_remaining_s_respects_same_host_policy():
         now_s=10.1,
         policy=ProbeSchedulingPolicy(allow_concurrent_same_host=True, same_host_backoff_ms=250),
     ) == 0.0
+
+
+def test_scheduler_helpers_cover_casefold_fallback_and_zero_backoff_guards():
+    class LegacyText(str):
+        casefold = None
+
+    blank_target = CheckDefinition(
+        identifier="blank",
+        name="Blank",
+        check_type=CheckType.PING,
+        target="   ",
+        interval_s=15,
+        timeout_s=9,
+    )
+    socket_target = CheckDefinition(
+        identifier="socket",
+        name="Socket",
+        check_type=CheckType.TELNET,
+        target="Router.LOCAL:23",
+        interval_s=15,
+        timeout_s=9,
+    )
+    url_target = CheckDefinition(
+        identifier="url",
+        name="Url",
+        check_type=CheckType.HTTP,
+        target="http:///health",
+        interval_s=15,
+        timeout_s=9,
+    )
+    policy = ProbeSchedulingPolicy(allow_concurrent_same_host=False, same_host_backoff_ms=250)
+
+    assert scheduler_module._fold_case(LegacyText("HOST")) == "host"
+    assert probe_host_key(socket_target) == "router.local"
+    assert probe_host_key(url_target) is None
+    assert probe_backoff_remaining_s(blank_target, {}, now_s=1.0, policy=policy) == 0.0
+    assert probe_backoff_remaining_s(socket_target, {}, now_s=1.0, policy=policy) == 0.0

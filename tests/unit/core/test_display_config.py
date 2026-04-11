@@ -1,5 +1,6 @@
 import pytest
 
+import vivipi.core.display as core_display
 from vivipi.core.display import get_display_definition, infer_default_font, infer_display_type, normalize_display_config, normalize_display_type, supported_display_types, supported_font_sizes
 
 
@@ -54,6 +55,22 @@ def test_normalize_display_config_accepts_boot_logo_duration_override():
     config = normalize_display_config({"type": "waveshare-pico-oled-1.3", "boot_logo_duration": "7s"})
 
     assert config["boot_logo_duration_s"] == 7
+
+
+def test_display_parser_helpers_cover_numeric_and_error_branches():
+    assert core_display._parse_positive_int(7.0, "device.display.width_px") == 7
+    assert core_display._parse_positive_int("8", "device.display.width_px") == 8
+    assert core_display._parse_non_negative_int(3.0, "device.display.column_offset", 0) == 3
+    assert core_display._parse_non_negative_int("4", "device.display.column_offset", 0) == 4
+
+    with pytest.raises(ValueError, match="positive integer"):
+        core_display._parse_positive_int(0, "device.display.width_px")
+
+    with pytest.raises(ValueError, match="non-negative integer"):
+        core_display._parse_non_negative_int(-1, "device.display.column_offset", 0)
+
+    with pytest.raises(ValueError, match="must be one of"):
+        core_display._parse_font_size_name("mega")
 
 
 def test_infer_default_font_uses_legacy_grid_fallback_without_diagonal():

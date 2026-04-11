@@ -1256,3 +1256,29 @@ def test_load_build_deploy_settings_handles_missing_device_and_validates_probe_s
 
     with pytest.raises(ValueError, match="probe_schedule.same_host_backoff_ms|must be a boolean"):
         load_build_deploy_settings(config_path, env={})
+
+
+def test_load_build_deploy_settings_parses_false_probe_schedule_values(tmp_path: Path):
+    config_path = tmp_path / "build-deploy.yaml"
+    config_path.write_text(
+        "probe_schedule:\n  allow_concurrent_same_host: off\n  same_host_backoff_ms: 25\n",
+        encoding="utf-8",
+    )
+
+    settings = load_build_deploy_settings(config_path, env={})
+
+    assert settings["probe_schedule"] == {
+        "allow_concurrent_same_host": False,
+        "same_host_backoff_ms": 25,
+    }
+
+
+def test_build_deploy_main_rejects_monkeypatched_unknown_command(monkeypatch):
+    monkeypatch.setattr(
+        build_deploy.argparse.ArgumentParser,
+        "parse_args",
+        lambda self, argv=None: type("Args", (), {"command": "unknown"})(),
+    )
+
+    with pytest.raises(ValueError, match="unsupported command: unknown"):
+        build_deploy.main(["unknown"])
