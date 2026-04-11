@@ -94,6 +94,9 @@ def test_scheduler_helpers_cover_casefold_fallback_and_zero_backoff_guards():
     class LegacyText(str):
         casefold = None
 
+        def __str__(self):
+            return self
+
     blank_target = CheckDefinition(
         identifier="blank",
         name="Blank",

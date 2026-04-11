@@ -1,4 +1,5 @@
 import json
+import runpy
 import zipfile
 from pathlib import Path
 
@@ -1282,3 +1283,14 @@ def test_build_deploy_main_rejects_monkeypatched_unknown_command(monkeypatch):
 
     with pytest.raises(ValueError, match="unsupported command: unknown"):
         build_deploy.main(["unknown"])
+
+
+def test_build_deploy_module_entrypoint_executes_main(monkeypatch):
+    monkeypatch.setattr(
+        build_deploy.argparse.ArgumentParser,
+        "parse_args",
+        lambda self, argv=None: type("Args", (), {"command": "unknown"})(),
+    )
+
+    with pytest.raises(ValueError, match="unsupported command: unknown"):
+        runpy.run_module("vivipi.tooling.build_deploy", run_name="__main__")

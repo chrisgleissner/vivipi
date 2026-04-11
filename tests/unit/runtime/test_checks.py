@@ -587,6 +587,16 @@ def test_socket_and_telnet_helpers_cover_remaining_edge_cases(monkeypatch):
         runtime_checks._recv_telnet_chunk(BrokenSocket())
 
 
+def test_read_until_markers_covers_timeout_exception_and_marker_match(monkeypatch):
+    monkeypatch.setattr(runtime_checks, "_recv_telnet_chunk", lambda handle, size=4096: (_ for _ in ()).throw(OSError("timed out")))
+
+    assert _read_until_markers(object(), (b"login:",)) == b""
+
+    monkeypatch.setattr(runtime_checks, "_recv_telnet_chunk", lambda handle, size=4096: b"Login:")
+
+    assert _read_until_markers(FakeSocket([]), (b"login:",)) == b"Login:"
+
+
 def test_socket_target_and_protocol_helpers_cover_success_and_error_paths():
     assert _parse_socket_target("ftp://nas.example.local", 21, expected_scheme="ftp") == ("nas.example.local", 21)
     assert _parse_socket_target("telnet://switch.example.local:2323", 23, expected_scheme="telnet") == (
