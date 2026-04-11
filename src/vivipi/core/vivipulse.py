@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+import threading
 import time
 from typing import Callable
 
@@ -391,6 +392,7 @@ class HostProbeRunner:
         self.execution_path = (
             f"{self.executor.__module__}.{self.executor.__qualname__} -> {DEFAULT_EXECUTION_PATH}"
         )
+        self.state_lock = threading.Lock()
 
         self.last_started_at: dict[str, float] = {}
         self.last_completed_at_by_host: dict[str, float] = {}
@@ -406,19 +408,24 @@ class HostProbeRunner:
         self.aborted_reason: str | None = None
         self.recovery_count = 0
         self.total_sleep_s = 0.0
-        self.previous_host_key: str | None = None
+        self.sequence_counter = 0
         self.selected_definitions = apply_profile(self.definitions, self.profile)
 
     def _sleep_seconds(self, delay_s: float):
         if delay_s <= 0:
             return
-        self.total_sleep_s += delay_s
+        with self.state_lock:
+            self.total_sleep_s += delay_s
         self.sleep(delay_s)
 
     def _current_pass_index(self) -> int:
         if not self.selected_definitions:
             return 1
-        minimum_completed = min(self.completed_runs_by_check.get(definition.identifier, 0) for definition in self.selected_definitions)
+        with self.state_lock:
+            minimum_completed = min(
+                self.completed_runs_by_check.get(definition.identifier, 0)
+                for definition in self.selected_definitions
+            )
         return minimum_completed + 1
 
     def _summarize_result(
@@ -494,40 +501,97 @@ class HostProbeRunner:
         if boundary is None:
             return
         if self.stop_on_failure:
-            self.aborted = True
-            self.aborted_reason = (
-                f"stopped after first transport failure for {boundary.probe_host_key or boundary.target}"
-            )
+            with self.state_lock:
+                self.aborted = True
+                self.aborted_reason = (
+                    f"stopped after first transport failure for {boundary.probe_host_key or boundary.target}"
+                )
         if not self.interactive_recovery or self.recovery_callback is None:
             return
         resume = bool(self.recovery_callback(boundary))
         if resume and self.resume_after_recovery and boundary.probe_host_key:
-            self.blocked_host_keys.discard(boundary.probe_host_key)
-            self.boundary_recorded_for_host.discard(boundary.probe_host_key)
-            self.recovery_count += 1
+            with self.state_lock:
+                self.blocked_host_keys.discard(boundary.probe_host_key)
+                self.boundary_recorded_for_host.discard(boundary.probe_host_key)
+                self.recovery_count += 1
 
-    def _run_definition(self, definition: CheckDefinition, pass_index: int) -> TraceEvent:
+    def _host_groups(
+        self,
+        definitions: tuple[CheckDefinition, ...] | list[CheckDefinition],
+    ) -> tuple[tuple[str | None, tuple[CheckDefinition, ...]], ...]:
+        groups: dict[str | None, list[CheckDefinition]] = defaultdict(list)
+        host_order: list[str | None] = []
+        for definition in definitions:
+            host_key = probe_host_key(definition)
+            if host_key not in groups:
+                host_order.append(host_key)
+            groups[host_key].append(definition)
+        return tuple((host_key, tuple(groups[host_key])) for host_key in host_order)
+
+    def _reserve_execution_metadata(
+        self,
+        definition: CheckDefinition,
+        started_monotonic: float,
+    ) -> tuple[int, int]:
+        with self.state_lock:
+            self.last_started_at[definition.identifier] = started_monotonic
+            self.per_target_sequence[definition.target] += 1
+            target_sequence = self.per_target_sequence[definition.target]
+            self.sequence_counter += 1
+            sequence = self.sequence_counter
+        return sequence, target_sequence
+
+    def _record_event(
+        self,
+        definition: CheckDefinition,
+        event: TraceEvent,
+        completed_monotonic: float,
+    ):
         host_key = probe_host_key(definition)
-        if host_key and host_key in self.blocked_host_keys:
+        with self.state_lock:
+            if host_key is not None:
+                self.last_completed_at_by_host[host_key] = completed_monotonic
+            if event.failure_class == "success":
+                self.last_success_by_host[host_key or ""] = event
+            boundary = self._record_boundary(event)
+            self.trace_events.append(event)
+            self.recent_events.append(event)
+            self.completed_runs_by_check[definition.identifier] += 1
+        if self.trace_sink is not None:
+            self.trace_sink(event)
+        self._handle_recovery(boundary)
+
+    def _is_host_blocked(self, host_key: str | None) -> bool:
+        with self.state_lock:
+            return bool(self.aborted or (host_key is not None and host_key in self.blocked_host_keys))
+
+    def _run_definition(
+        self,
+        definition: CheckDefinition,
+        pass_index: int,
+        *,
+        previous_host_key: str | None = None,
+    ) -> TraceEvent:
+        host_key = probe_host_key(definition)
+        if self._is_host_blocked(host_key):
             raise RuntimeError("blocked hosts must be filtered before execution")
 
+        with self.state_lock:
+            completed_at_by_host = dict(self.last_completed_at_by_host)
         delay_s = probe_backoff_remaining_s(
             definition,
-            self.last_completed_at_by_host,
+            completed_at_by_host,
             self.monotonic_time_provider(),
             self.profile.probe_policy(),
         )
-        if host_key is not None and host_key == self.previous_host_key and self.profile.same_host_spacing_ms:
+        if host_key is not None and host_key == previous_host_key and self.profile.same_host_spacing_ms:
             delay_s = max(delay_s, float(self.profile.same_host_spacing_ms) / 1000.0)
         sleep_before_ms = max(0, int(round(delay_s * 1000.0)))
         self._sleep_seconds(delay_s)
 
         started_wall = float(self.wall_time_provider())
         started_monotonic = float(self.monotonic_time_provider())
-        self.last_started_at[definition.identifier] = started_monotonic
-
-        self.per_target_sequence[definition.target] += 1
-        sequence = len(self.trace_events) + 1
+        sequence, target_sequence = self._reserve_execution_metadata(definition, started_monotonic)
 
         result: CheckExecutionResult | None = None
         error: BaseException | None = None
@@ -537,9 +601,6 @@ class HostProbeRunner:
             error = caught_error
 
         completed_monotonic = float(self.monotonic_time_provider())
-        if host_key is not None:
-            self.last_completed_at_by_host[host_key] = completed_monotonic
-        self.previous_host_key = host_key
 
         status_text, failure_class, response_summary, raw_detail, latency_ms, diagnostics, exception_detail = self._summarize_result(
             definition,
@@ -554,7 +615,7 @@ class HostProbeRunner:
             wall_time=_isoformat_utc(started_wall),
             monotonic_s=started_monotonic,
             sequence=sequence,
-            target_sequence=self.per_target_sequence[definition.target],
+            target_sequence=target_sequence,
             mode=self.mode,
             pass_index=pass_index,
             check_id=definition.identifier,
@@ -574,47 +635,74 @@ class HostProbeRunner:
             exception_detail=exception_detail,
             sleep_before_ms=sleep_before_ms,
         )
-
-        if event.failure_class == "success":
-            self.last_success_by_host[host_key or ""] = event
-        boundary = self._record_boundary(event)
-        self.trace_events.append(event)
-        self.recent_events.append(event)
-        self.completed_runs_by_check[definition.identifier] += 1
-        if self.trace_sink is not None:
-            self.trace_sink(event)
-        self._handle_recovery(boundary)
+        self._record_event(definition, event, completed_monotonic)
         return event
 
-    def run_passes(self, passes: int) -> RunOutcome:
-        started_at = _isoformat_utc(float(self.wall_time_provider()))
-        ordered = ordered_definitions_for_pass(self.selected_definitions, self.profile)
-        for pass_index in range(1, passes + 1):
-            for definition in ordered:
-                host_key = probe_host_key(definition)
-                if host_key and host_key in self.blocked_host_keys:
-                    continue
-                self._run_definition(definition, pass_index)
+    def _run_host_group(self, definitions: tuple[CheckDefinition, ...], pass_index: int):
+        previous_host_key = None
+        for definition in definitions:
+            host_key = probe_host_key(definition)
+            if self._is_host_blocked(host_key):
+                break
+            self._run_definition(definition, pass_index, previous_host_key=previous_host_key)
+            previous_host_key = host_key
+            with self.state_lock:
                 if self.aborted:
                     break
-            if self.aborted:
-                break
-            if pass_index < passes and self.profile.pass_spacing_s:
-                self._sleep_seconds(self.profile.pass_spacing_s)
+
+    def _run_parallel_groups(
+        self,
+        host_groups: tuple[tuple[str | None, tuple[CheckDefinition, ...]], ...],
+        pass_index: int,
+    ):
+        threads = [
+            threading.Thread(target=self._run_host_group, args=(definitions, pass_index), daemon=True)
+            for _, definitions in host_groups
+            if definitions
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+    def _build_outcome(self, started_at: str) -> RunOutcome:
+        with self.state_lock:
+            trace_events = tuple(sorted(self.trace_events, key=lambda event: event.sequence))
+            failure_boundaries = tuple(self.failure_boundaries)
+            blocked_host_keys = tuple(sorted(self.blocked_host_keys))
+            aborted = self.aborted
+            aborted_reason = self.aborted_reason
+            recovery_count = self.recovery_count
+            total_sleep_s = self.total_sleep_s
         return RunOutcome(
             mode=self.mode,
             profile=self.profile,
             started_at=started_at,
             completed_at=_isoformat_utc(float(self.wall_time_provider())),
-            trace_events=tuple(self.trace_events),
-            failure_boundaries=tuple(self.failure_boundaries),
+            trace_events=trace_events,
+            failure_boundaries=failure_boundaries,
             selected_definition_ids=tuple(definition.identifier for definition in self.selected_definitions),
-            blocked_host_keys=tuple(sorted(self.blocked_host_keys)),
-            aborted=self.aborted,
-            aborted_reason=self.aborted_reason,
-            recovery_count=self.recovery_count,
-            total_sleep_s=self.total_sleep_s,
+            blocked_host_keys=blocked_host_keys,
+            aborted=aborted,
+            aborted_reason=aborted_reason,
+            recovery_count=recovery_count,
+            total_sleep_s=total_sleep_s,
         )
+
+    def run_passes(self, passes: int) -> RunOutcome:
+        started_at = _isoformat_utc(float(self.wall_time_provider()))
+        ordered = ordered_definitions_for_pass(self.selected_definitions, self.profile)
+        host_groups = self._host_groups(ordered)
+        for pass_index in range(1, passes + 1):
+            self._run_parallel_groups(host_groups, pass_index)
+            with self.state_lock:
+                if self.aborted:
+                    break
+            if pass_index >= passes:
+                break
+            if self.profile.pass_spacing_s:
+                self._sleep_seconds(self.profile.pass_spacing_s)
+        return self._build_outcome(started_at)
 
     def run_duration(self, duration_s: float) -> RunOutcome:
         started_wall = float(self.wall_time_provider())
@@ -622,35 +710,20 @@ class HostProbeRunner:
         started_at = _isoformat_utc(started_wall)
         while (self.monotonic_time_provider() - started_monotonic) < duration_s and not self.aborted:
             now_s = float(self.monotonic_time_provider())
+            with self.state_lock:
+                last_started_at = dict(self.last_started_at)
+                blocked_host_keys = set(self.blocked_host_keys)
             scheduled = [
                 item.definition
-                for item in due_checks(self.selected_definitions, self.last_started_at, now_s)
-                if not (probe_host_key(item.definition) in self.blocked_host_keys if probe_host_key(item.definition) else False)
+                for item in due_checks(self.selected_definitions, last_started_at, now_s)
+                if not (probe_host_key(item.definition) in blocked_host_keys if probe_host_key(item.definition) else False)
             ]
             if not scheduled:
                 remaining_s = duration_s - (self.monotonic_time_provider() - started_monotonic)
                 self._sleep_seconds(min(0.05, max(0.0, remaining_s)))
                 continue
-            for definition in scheduled:
-                self._run_definition(definition, self._current_pass_index())
-                if self.aborted:
-                    break
-                if (self.monotonic_time_provider() - started_monotonic) >= duration_s:
-                    break
-        return RunOutcome(
-            mode=self.mode,
-            profile=self.profile,
-            started_at=started_at,
-            completed_at=_isoformat_utc(float(self.wall_time_provider())),
-            trace_events=tuple(self.trace_events),
-            failure_boundaries=tuple(self.failure_boundaries),
-            selected_definition_ids=tuple(definition.identifier for definition in self.selected_definitions),
-            blocked_host_keys=tuple(sorted(self.blocked_host_keys)),
-            aborted=self.aborted,
-            aborted_reason=self.aborted_reason,
-            recovery_count=self.recovery_count,
-            total_sleep_s=self.total_sleep_s,
-        )
+            self._run_parallel_groups(self._host_groups(scheduled), self._current_pass_index())
+        return self._build_outcome(started_at)
 
 
 def _profile_cost(profile: VivipulseProfile, base: VivipulseProfile) -> tuple[float, int, int, int]:

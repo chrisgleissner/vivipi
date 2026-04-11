@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import threading
 
 import pytest
 
@@ -232,6 +233,31 @@ def test_host_probe_runner_run_passes_applies_pass_spacing_and_trace_sink():
     assert len(captured) == 2
     assert clock.sleeps == [0.5]
     assert outcome.total_sleep_s == 0.5
+
+
+def test_host_probe_runner_runs_distinct_hosts_in_parallel():
+    barrier = threading.Barrier(2)
+    definitions = (
+        make_definition("alpha", target="shared-a.local"),
+        make_definition("beta", target="shared-b.local"),
+    )
+
+    def executor(definition: CheckDefinition, observed_at_s: float):
+        barrier.wait(timeout=0.5)
+        return success_result(definition, observed_at_s)
+
+    runner = HostProbeRunner(
+        definitions,
+        executor,
+        "reproduce",
+        VivipulseProfile(same_host_backoff_ms=250),
+    )
+
+    outcome = runner.run_passes(1)
+
+    assert outcome.transport_failure_count == 0
+    assert [event.check_id for event in outcome.trace_events] == ["alpha", "beta"]
+    assert {event.probe_host_key for event in outcome.trace_events} == {"shared-a.local", "shared-b.local"}
 
 
 def test_host_probe_runner_stops_same_host_traffic_after_first_transport_failure_boundary():

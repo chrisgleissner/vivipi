@@ -593,7 +593,6 @@ def test_runtime_app_background_worker_queue_controls_and_reset_paths(monkeypatc
     assert app.completed_checks == []
     assert app.active_workers == set()
 
-
 def test_runtime_app_manual_control_overlay_feedback_and_propagation_paths():
     definition = make_definition("router")
     app = RuntimeApp(definitions=(definition,), executor=lambda definition, now_s: None, display=FakeDisplay(), page_interval_s=0, page_size=2)
