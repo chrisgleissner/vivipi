@@ -231,6 +231,20 @@ def test_render_returns_a_deterministic_buffer_for_compact_failed_columns():
     assert list(first[:9]) == [0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0x00, 0x00, 0x01]
 
 
+def test_render_defaults_to_standard_mode_when_omitted():
+    buffer = render(
+        (CheckRuntime(identifier="alpha", name="Alpha", status=Status.OK),),
+        {
+            "width_px": 8,
+            "height_px": 8,
+            "font": {"width_px": 1, "height_px": 8},
+        },
+        glyph_lookup=fake_glyph_lookup,
+    )
+
+    assert len(buffer) == 8
+
+
 def test_render_returns_epaper_planes_and_uses_red_for_failures_when_supported():
     checks = (CheckRuntime(identifier="bravo", name="Bravo", status=Status.FAIL),)
     config = {

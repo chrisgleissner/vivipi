@@ -284,6 +284,38 @@ def test_build_runtime_app_does_not_prime_initial_checks_during_boot():
     assert called["prime_now_s"] is None
 
 
+def test_build_runtime_app_honors_explicit_boot_logo_duration_from_config():
+    class FakeApp:
+        def __init__(self, **kwargs):
+            pass
+
+    app = firmware_runtime.build_runtime_app(
+        {
+            "project": {"version": "1.2.3"},
+            "device": {
+                "display": {
+                    "width_px": 128,
+                    "height_px": 64,
+                    "boot_logo_duration_s": 7,
+                    "font": {"width_px": 8, "height_px": 8},
+                },
+                "buttons": {"a": "GP15", "b": "GP17"},
+            },
+        },
+        input_controller_factory=lambda: object(),
+        display_factory=lambda config: SimpleNamespace(show_boot_logo=lambda version: None),
+        button_reader_factory=lambda config, input_controller: object(),
+        runtime_app_factory=FakeApp,
+        definitions_builder=lambda config: (),
+        executor_factory=lambda: object(),
+        wifi_connector=lambda config: (),
+        now_provider=lambda: 10.0,
+        sleep_ms=lambda ms: None,
+    )
+
+    assert app.boot_logo_until_s == 17.0
+
+
 def test_build_runtime_app_falls_back_to_default_display_when_primary_display_init_fails():
     called = {}
 

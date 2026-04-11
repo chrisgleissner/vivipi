@@ -29,7 +29,10 @@ def parse_adb_devices(output: str) -> tuple[AdbDevice, ...]:
 
 
 def _run_adb(command: list[str]) -> SimpleNamespace:
-    completed = subprocess.run(command, check=False, capture_output=True, text=True)
+    try:
+        completed = subprocess.run(command, check=False, capture_output=True, text=True)
+    except FileNotFoundError as error:
+        return SimpleNamespace(returncode=127, stdout="", stderr=str(error))
     return SimpleNamespace(returncode=completed.returncode, stdout=completed.stdout, stderr=completed.stderr)
 
 

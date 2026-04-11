@@ -71,7 +71,7 @@ def _render_display_config(config):
         "family": str(display_config.get("family", "oled")),
         "width_px": width,
         "height_px": height,
-        "mode": str(display_config.get("mode", str(DisplayMode.STANDARD))),
+        "mode": str(display_config.get("mode", DisplayMode.STANDARD.value)),
         "columns": int(display_config.get("columns", 1)),
         "column_separator": str(display_config.get("column_separator", " ")),
         "failure_color": str(display_config.get("failure_color", "red")),
@@ -90,7 +90,7 @@ def render_display_buffers(checks, config, selected_id=None, page_index=0, shift
     state = AppState(
         checks=tuple(checks),
         selected_id=selected_id,
-        display_mode=DisplayMode(str(display_config.get("mode", str(DisplayMode.STANDARD)))),
+        display_mode=DisplayMode(str(display_config.get("mode", DisplayMode.STANDARD.value))),
         overview_columns=int(display_config.get("columns", 1)),
         column_separator=str(display_config.get("column_separator", " ")),
         row_width=max(1, width // font_width),

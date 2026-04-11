@@ -289,7 +289,7 @@ class RuntimeApp:
             "boot",
             (
                 log_field("checks", len(self.definitions)),
-                log_field("mode", str(self.state.display_mode)),
+                log_field("mode", _enum_text(self.state.display_mode)),
             ),
         )
 

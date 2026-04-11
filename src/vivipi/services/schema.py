@@ -9,8 +9,15 @@ MAX_SERVICE_CHECKS = 64
 SLUG_PATTERN = re.compile(r"[^a-z0-9]+")
 
 
+def _fold(value: str) -> str:
+    casefold = getattr(value, "casefold", None)
+    if callable(casefold):
+        return str(casefold())
+    return value.lower()
+
+
 def _slugify(value: str) -> str:
-    normalized = SLUG_PATTERN.sub("-", value.lower()).strip("-")
+    normalized = SLUG_PATTERN.sub("-", _fold(value)).strip("-")
     return normalized or "check"
 
 

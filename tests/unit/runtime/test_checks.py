@@ -457,11 +457,26 @@ def test_portable_ping_runner_reports_unsupported_without_uping_or_subprocess(mo
 
 
 def test_network_helper_functions_cover_edge_cases(monkeypatch):
-    fake_time = SimpleNamespace(sleep_calls=[], sleep_ms=lambda value_ms: fake_time.sleep_calls.append(value_ms))
+    fake_time = SimpleNamespace(
+        now_ms=100,
+        perf_value=1.5,
+        sleep_calls=[],
+        sleep_ms=lambda value_ms: fake_time.sleep_calls.append(value_ms),
+        sleep=lambda value_s: fake_time.sleep_calls.append(value_s),
+        ticks_ms=lambda: fake_time.now_ms,
+        ticks_diff=lambda current, started: current - started,
+        perf_counter=lambda: fake_time.perf_value,
+    )
     monkeypatch.setattr(runtime_checks, "time", fake_time)
 
     _sleep_ms(0)
     _sleep_ms(5)
+
+    started_at, uses_ticks_ms = runtime_checks._start_timer()
+    fake_time.now_ms = 140
+
+    assert uses_ticks_ms is True
+    assert runtime_checks._elapsed_ms(started_at, uses_ticks_ms) == 40.0
 
     assert fake_time.sleep_calls == [5]
     assert _normalize_error_text(RuntimeError()) == "RuntimeError"
@@ -475,6 +490,26 @@ def test_network_helper_functions_cover_edge_cases(monkeypatch):
     assert _runtime_optional_auth("  admin  ") == "admin"
     assert _parse_socket_target("nas.example.local", 21) == ("nas.example.local", 21)
     assert _recv_all(FakeSocket([b"a", b"b", b""])) == b"ab"
+
+    monkeypatch.setattr(runtime_checks, "time", SimpleNamespace(perf_counter=lambda: 2.5, sleep=lambda value_s: None))
+
+    perf_started_at, uses_ticks_ms = runtime_checks._start_timer()
+
+    assert uses_ticks_ms is False
+    assert runtime_checks._elapsed_ms(perf_started_at, uses_ticks_ms) == 0.0
+
+
+def test_runtime_target_alias_resolution_rewrites_matching_hosts_only():
+    assert runtime_checks._resolve_target_alias("router.local", {"router.local": "192.0.2.10"}) == "192.0.2.10"
+    assert runtime_checks._resolve_target_alias(
+        "http://router.local/health",
+        {"router.local": "192.0.2.10"},
+    ) == "http://192.0.2.10/health"
+    assert runtime_checks._resolve_target_alias(
+        "http://router.local/health",
+        {"other.local": "192.0.2.20"},
+    ) == "http://router.local/health"
+    assert runtime_checks._resolve_target_alias("router.local", {"router.local": "   "}) == "router.local"
 
 
 def test_socket_target_and_protocol_helpers_cover_success_and_error_paths():

@@ -146,6 +146,7 @@ Status:
 - [x] Prove health-check transitions reach the OLED within 10 seconds.
 - [ ] Capture 3 true cold boots or equivalent physical power cycles.
 - [ ] Capture the final proof set and fully close the worklog.
+- [ ] Investigate why the ADB-backed Pixel 4 health check can stay FAIL after host suspend/resume even when `adb devices` shows the device as connected, and harden service restart/recovery if needed.
 
 ## Confirmed Findings
 

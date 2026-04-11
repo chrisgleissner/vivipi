@@ -1,6 +1,7 @@
 import pytest
 
 from vivipi.core.models import Status
+import vivipi.services.schema as schema_module
 from vivipi.services.schema import parse_service_payload
 
 
@@ -27,6 +28,30 @@ def test_parse_service_payload_validates_schema_and_builds_stable_ids():
     assert observations[0].status == Status.OK
     assert observations[0].observed_at_s == 123.0
     assert observations[0].source_identifier == "android-devices"
+
+
+def test_parse_service_payload_casefolds_non_ascii_service_ids_consistently():
+    payload = {
+        "checks": [
+            {
+                "name": "Straße",
+                "status": "OK",
+                "details": "Connected",
+                "latency_ms": 0,
+            }
+        ]
+    }
+
+    observations = parse_service_payload(payload, service_prefix="adb")
+
+    assert observations[0].identifier == "adb:strasse"
+
+
+def test_schema_slugify_falls_back_to_lower_when_casefold_is_not_callable():
+    class LegacyText(str):
+        casefold = None
+
+    assert schema_module._fold(LegacyText("PIXEL 4")) == "pixel 4"
 
 
 def test_parse_service_payload_accepts_unknown_status_display():

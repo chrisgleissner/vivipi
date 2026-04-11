@@ -115,6 +115,7 @@ def test_control_surface_runs_checks_resets_state_and_restores_log_level():
     assert calls == [("router", 5.0)]
     assert app.logger.level.name == "DEBUG"
     assert runtime_control.reconnect_network()["reconnect_count"] == 1
+    assert runtime_control.dump_logs(limit=1)
 
     runtime_control.set_debug_mode(False)
     reset_snapshot = runtime_control.reset_state()

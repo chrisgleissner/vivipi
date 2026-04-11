@@ -16,8 +16,10 @@ from vivipi.tooling.build_deploy import (
     _parse_display_mode,
     _parse_duration_s,
     _parse_font_size_px,
+    _release_version_from_wheel,
     _resolve_checks_path,
     _resolve_release_wheel,
+    _wrap_with_dialout,
     build_firmware_bundle,
     build_service_bundle,
     build_source_archives,
@@ -135,6 +137,16 @@ def test_resolve_config_path_prefers_existing_local_override_when_requested(tmp_
     assert resolve_config_path(config_path, prefer_local_config=True) == local_path.resolve()
 
 
+def test_resolve_config_path_handles_non_yaml_and_missing_local_override(tmp_path: Path):
+    text_path = tmp_path / "config.txt"
+    text_path.write_text("device:\n  board: pico2w\n", encoding="utf-8")
+    yaml_path = tmp_path / "build-deploy.yaml"
+    yaml_path.write_text("device:\n  board: pico2w\n", encoding="utf-8")
+
+    assert resolve_config_path(text_path, prefer_local_config=True) == text_path.resolve()
+    assert resolve_config_path(yaml_path, prefer_local_config=True) == yaml_path
+
+
 def test_write_runtime_config_embeds_wifi_and_checks(tmp_path: Path):
     config_path = write_fixture_files(tmp_path)
     output_path = tmp_path / "build" / "config.json"
@@ -186,6 +198,26 @@ def test_build_firmware_bundle_creates_a_releaseable_zip_archive(tmp_path: Path)
     assert not (tmp_path / "release" / "vivipi-device-filesystem.zip").exists()
 
 
+def test_build_firmware_bundle_uses_build_time_resolver_and_replaces_existing_staging_dir(tmp_path: Path):
+    config_path = write_fixture_files(tmp_path)
+    staging_dir = tmp_path / "release" / "vivipi-device-fs"
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    (staging_dir / "stale.txt").write_text("stale", encoding="utf-8")
+
+    archive_path = build_firmware_bundle(
+        config_path,
+        tmp_path / "release",
+        env=FIXTURE_ENV,
+        version_resolver=lambda: "0.2.1-rc0",
+        build_time_resolver=lambda: "2026-04-11T00:00Z",
+    )
+    rendered = json.loads((tmp_path / "release" / "vivipi-device-fs" / "config.json").read_text(encoding="utf-8"))
+
+    assert archive_path.exists()
+    assert not (staging_dir / "stale.txt").exists()
+    assert rendered["project"]["build_time"] == "2026-04-11T00:00Z"
+
+
 def test_build_service_bundle_packages_wheel_and_service_examples(tmp_path: Path):
     dist_dir = tmp_path / "dist"
     dist_dir.mkdir(parents=True)
@@ -230,6 +262,14 @@ def test_resolve_release_wheel_requires_exactly_one_match(tmp_path: Path):
 
     with pytest.raises(ValueError, match="exactly one built wheel"):
         _resolve_release_wheel(dist_dir)
+
+
+def test_release_version_from_wheel_validates_filename_shape(tmp_path: Path):
+    with pytest.raises(ValueError, match="vivipi wheel filename"):
+        _release_version_from_wheel(tmp_path / "other-0.2.1-py3-none-any.whl")
+
+    with pytest.raises(ValueError, match="standard wheel filename"):
+        _release_version_from_wheel(tmp_path / "vivipi-0.2.1.whl")
 
 
 def test_copy_release_tree_skips_python_cache_files(tmp_path: Path):
@@ -1168,3 +1208,51 @@ def test_deploy_firmware_reports_missing_mpremote(tmp_path: Path):
             port="/dev/ttyUSB0",
             run_command=lambda command, check: (_ for _ in ()).throw(FileNotFoundError("mpremote")),
         )
+
+
+def test_wrap_with_dialout_returns_original_command_for_non_posix_and_non_membership(monkeypatch):
+    command = ["mpremote", "connect", "auto"]
+
+    monkeypatch.setattr(build_deploy.os, "name", "nt")
+    assert _wrap_with_dialout(command) == command
+
+    monkeypatch.setattr(build_deploy.os, "name", "posix")
+    monkeypatch.setattr(build_deploy.grp, "getgrnam", lambda name: (_ for _ in ()).throw(KeyError("dialout")))
+    assert _wrap_with_dialout(command) == command
+
+    monkeypatch.setattr(build_deploy.grp, "getgrnam", lambda name: type("Group", (), {"gr_gid": 20, "gr_mem": ["chris"]})())
+    monkeypatch.setattr(build_deploy.os, "getgroups", lambda: [20])
+    assert _wrap_with_dialout(command) == command
+
+    monkeypatch.setattr(build_deploy.os, "getgroups", lambda: [1000])
+    monkeypatch.setattr(build_deploy.os, "getuid", lambda: 1000)
+    monkeypatch.setattr(build_deploy.pwd, "getpwuid", lambda uid: (_ for _ in ()).throw(KeyError("uid")))
+    assert _wrap_with_dialout(command) == command
+
+    monkeypatch.setattr(build_deploy.pwd, "getpwuid", lambda uid: type("User", (), {"pw_name": "alex"})())
+    assert _wrap_with_dialout(command) == command
+
+
+def test_load_build_deploy_settings_handles_missing_device_and_validates_probe_schedule(tmp_path: Path):
+    config_path = tmp_path / "build-deploy.yaml"
+    config_path.write_text("probe_schedule:\n  allow_concurrent_same_host: on\n  same_host_backoff_ms: 0\n", encoding="utf-8")
+
+    settings = load_build_deploy_settings(config_path, env={})
+
+    assert settings["probe_schedule"] == {
+        "allow_concurrent_same_host": True,
+        "same_host_backoff_ms": 0,
+    }
+
+    config_path.write_text("device: []\nprobe_schedule: []\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="probe_schedule must be a mapping"):
+        load_build_deploy_settings(config_path, env={})
+
+    config_path.write_text(
+        "probe_schedule:\n  allow_concurrent_same_host: maybe\n  same_host_backoff_ms: -1\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="probe_schedule.same_host_backoff_ms|must be a boolean"):
+        load_build_deploy_settings(config_path, env={})

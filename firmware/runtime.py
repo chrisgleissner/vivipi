@@ -324,6 +324,11 @@ def build_runtime_app(
     project = config.get("project", {}) if isinstance(config.get("project"), dict) else {}
     version = str(project.get("version", ""))
     build_time_value = str(project.get("build_time", ""))
+    explicit_boot_logo_duration = None
+    if isinstance(display_input, dict):
+        explicit_boot_logo_duration = display_input.get("boot_logo_duration")
+        if explicit_boot_logo_duration is None:
+            explicit_boot_logo_duration = display_input.get("boot_logo_duration_s")
 
     boot_start_s = now_provider()
     logo_diagnostics, logo_errors = _safe_show_boot_logo(display, version)
@@ -360,7 +365,10 @@ def build_runtime_app(
         version=version,
         build_time=build_time_value,
     )
-    app.boot_logo_until_s = boot_start_s + max(float(boot_logo_min_s), float(display_config.get("boot_logo_duration_s", boot_logo_min_s)))
+    boot_logo_duration_s = float(boot_logo_min_s)
+    if explicit_boot_logo_duration is not None:
+        boot_logo_duration_s = max(float(boot_logo_min_s), float(display_config.get("boot_logo_duration_s", boot_logo_min_s)))
+    app.boot_logo_until_s = boot_start_s + boot_logo_duration_s
     if hasattr(app, "logger"):
         app.logger.sink = print
     if button_reader is not None and hasattr(button_reader, "bind_logger") and hasattr(app, "logger"):
