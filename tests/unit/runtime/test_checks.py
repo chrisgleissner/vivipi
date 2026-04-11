@@ -699,6 +699,46 @@ def test_socket_helpers_cover_open_close_and_response_errors(monkeypatch):
         _ftp_parse_pasv("227 bad response")
 
 
+def test_open_socket_uses_deadline_aware_connect_and_trace(monkeypatch):
+    trace_events = []
+
+    class DeadlineSocket(FakeSocket):
+        def __init__(self):
+            super().__init__([])
+            self.blocking = []
+            self.connect_calls = 0
+
+        def setblocking(self, enabled):
+            self.blocking.append(enabled)
+
+        def connect(self, address):
+            self.connect_calls += 1
+            if self.connect_calls == 1:
+                raise OSError(115, "operation in progress")
+
+    socket_handle = DeadlineSocket()
+    monkeypatch.setattr(
+        runtime_checks.socket,
+        "getaddrinfo",
+        lambda host, port, *_: [(1, 1, 1, "", (host, port))],
+    )
+    monkeypatch.setattr(runtime_checks.socket, "socket", lambda *args: socket_handle)
+    monkeypatch.setattr(runtime_checks.select, "poll", lambda: SimpleNamespace(register=lambda handle, flags: None, poll=lambda timeout: [(0, runtime_checks.POLLOUT)]))
+
+    opened = _open_socket(
+        "nas.example.local",
+        21,
+        10,
+        deadline=runtime_checks._deadline_after_s(10),
+        trace=lambda event, **fields: trace_events.append((event, fields)),
+    )
+
+    assert opened is socket_handle
+    assert socket_handle.blocking == [False]
+    assert trace_events[0][0] == "socket-open"
+    assert trace_events[-1][0] == "socket-ready"
+
+
 def test_read_until_markers_returns_buffer_when_stream_ends():
     handle = FakeSocket([b"hello", b" world", b""])
 
@@ -722,6 +762,38 @@ def test_portable_ftp_runner_accepts_valid_greeting_and_quits_cleanly(monkeypatc
         b"QUIT\r\n",
     ]
     assert control_socket.closed is True
+
+
+def test_portable_http_runner_uses_manual_socket_deadline_path_on_micropython(monkeypatch):
+    class FakeMicroPythonTime:
+        def __init__(self):
+            self.now_ms = 0
+
+        def ticks_ms(self):
+            return self.now_ms
+
+        def ticks_add(self, value, delta):
+            return value + delta
+
+        def ticks_diff(self, left, right):
+            return left - right
+
+        def perf_counter(self):
+            return self.now_ms / 1000.0
+
+    handle = FakeSocket([b"HTTP/1.0 200 OK\r\nContent-Length: 12\r\n\r\n{\"ok\": true}", b""])
+    fake_time = FakeMicroPythonTime()
+
+    monkeypatch.setattr(runtime_checks, "time", fake_time)
+    monkeypatch.setattr(runtime_checks, "urlparse", lambda value: SimpleNamespace(scheme="http", hostname="nas.example.local", port=None))
+    monkeypatch.setitem(sys.modules, "urequests", SimpleNamespace(request=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("socket path expected"))))
+    monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s, **kwargs: handle)
+
+    result = portable_http_runner("GET", "http://nas.example.local/health?view=1", 8)
+
+    assert result.status_code == 200
+    assert result.body == {"ok": True}
+    assert handle.sent[0].startswith(b"GET /health?view=1 HTTP/1.0\r\n")
 
 
 def test_portable_ftp_runner_rejects_invalid_greeting(monkeypatch):

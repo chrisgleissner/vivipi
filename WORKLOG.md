@@ -214,3 +214,43 @@
   - initial pytest collection failed because both new test modules used the same basename; renamed the tooling-side module
   - initial repo lint failed on an unused `ProbeSchedulingPolicy` import in `firmware/runtime.py`; removed it
   - initial coverage gate failed because the new vivipulse modules were under-covered; added direct helper/edge-path tests until the repository-wide `>=96%` branch requirement was satisfied
+
+## 2026-04-11T11:18:34Z
+
+- Reverted the earlier Pico-side probe serialization change after confirming the desired target behavior is still:
+  - parallel checks across distinct devices
+  - sequential checks against the same device
+  - `same_host_backoff_ms = 250`
+- Changed `vivipulse` to match that Pico scheduling shape more closely:
+  - `HostProbeRunner.run_passes()` now groups checks by host and runs those groups in parallel threads
+  - checks within each host group remain sequential and still use `probe_backoff_remaining_s()` for the configured `250 ms` same-host gap
+  - `HostProbeRunner.run_duration()` now uses the same host-group parallelism for due checks
+- Added coverage proving the host runner now overlaps distinct hosts:
+  - `tests/unit/core/test_vivipulse.py` uses a `threading.Barrier` so the test fails under the old globally serial host runner and passes only when two hosts execute in parallel
+- Validation:
+  - `PYTHONPATH=src python3 -m pytest -o addopts='' tests/unit/core/test_vivipulse.py tests/unit/runtime/test_app.py tests/unit/firmware/test_runtime.py`
+  - `./build lint`
+- Validation results:
+  - focused unit slice passed with `57 passed`
+  - repository lint passed
+- Live repro, aligned Ultimate-only host run:
+  - command:
+    - `scripts/vivipulse --mode reproduce --duration 30s --stop-on-failure --check-id c64u-rest --check-id c64u-ftp --check-id c64u-telnet --check-id u64-rest --check-id u64-ftp --check-id u64-telnet --json`
+  - artifact:
+    - `artifacts/vivipulse/20260411T111550Z-reproduce`
+  - result:
+    - the trace now shows real host overlap across Ultimate devices, e.g. `c64u-ftp` and `u64-ftp` start within the same millisecond-scale burst while same-host follow-up probes still wait `250 ms`
+    - no U64 or C64U transport failures reproduced over the 30-second run
+- Live repro, aligned full active-check-set host run:
+  - command:
+    - `scripts/vivipulse --mode reproduce --duration 60s --stop-on-failure --json`
+  - artifact:
+    - `artifacts/vivipulse/20260411T111649Z-reproduce`
+  - result:
+    - reproduced transport failures on `pixel4-adb` only: `6` repeated `refused` failures at `192.168.1.185:8081`
+    - still did not reproduce any U64 or C64U transport failure in that 60-second window
+    - `u64-rest`, `u64-ftp`, `u64-telnet`, `c64u-rest`, `c64u-ftp`, and `c64u-telnet` all remained successful throughout the aligned host run
+- Current conclusion:
+  - host-side global serialization was one real difference and is now removed from `vivipulse`
+  - after removing that difference, the host still does not reproduce the Ultimate failures seen from the Pico in the same time window
+  - the remaining gap is therefore more likely in the Pico-side network stack or timing environment than in the shared direct probe definitions alone

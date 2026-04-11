@@ -128,6 +128,7 @@ def test_build_runtime_app_uses_injected_factories_and_defers_wifi_startup():
     called = {}
     wifi_calls = []
     sleep_calls = []
+    trace_sinks = []
 
     class FakeApp:
         def __init__(
@@ -212,7 +213,7 @@ def test_build_runtime_app_uses_injected_factories_and_defers_wifi_startup():
         button_reader_factory=lambda config, input_controller: button_reader,
         runtime_app_factory=FakeApp,
         definitions_builder=lambda config: definitions,
-        executor_factory=lambda: executor,
+        executor_factory=lambda trace_sink=None: trace_sinks.append(trace_sink) or executor,
         wifi_connector=lambda config: wifi_calls.append(config) or (DiagnosticEvent(code="WIFI", message="connected"),),
         now_provider=lambda: next(now_counter),
         sleep_ms=lambda ms: sleep_calls.append(ms),
@@ -220,7 +221,8 @@ def test_build_runtime_app_uses_injected_factories_and_defers_wifi_startup():
 
     assert isinstance(app, FakeApp)
     assert called["definitions"] == definitions
-    assert called["executor"] is executor
+    assert called["executor"] is None
+    assert app.executor is executor
     assert called["display"] is display
     assert called["button_reader"] is button_reader
     assert called["input_controller"] is input_controller
@@ -242,7 +244,24 @@ def test_build_runtime_app_uses_injected_factories_and_defers_wifi_startup():
     assert called["network_refreshes"] == [{}]
     assert wifi_calls == []
     assert sleep_calls == []
+    assert trace_sinks == [None]
     assert app.boot_logo_until_s == 2.0
+
+
+def test_build_executor_with_optional_trace_uses_trace_sink_when_runtime_app_exposes_it():
+    class FakeApp:
+        def emit_probe_trace(self, definition, event, fields):
+            return (definition, event, fields)
+
+    app = FakeApp()
+
+    built = firmware_runtime._build_executor_with_optional_trace(
+        lambda trace_sink=None: trace_sink,
+        getattr(app, "emit_probe_trace"),
+    )
+
+    assert built.__self__ is app
+    assert built.__func__ is FakeApp.emit_probe_trace
 
 
 def test_build_runtime_app_does_not_prime_initial_checks_during_boot():

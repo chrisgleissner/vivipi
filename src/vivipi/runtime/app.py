@@ -231,6 +231,21 @@ class RuntimeApp:
         self.network_operation_inflight = False
         self.network_operation_result: dict[str, object] | None = None
 
+    def emit_probe_trace(self, definition: CheckDefinition, event: str, fields: dict[str, object]):
+        level = LogLevel.WARN if event.endswith("timeout") or event.endswith("error") else LogLevel.INFO
+        trace_fields = [
+            log_field("id", definition.identifier),
+            log_field("evt", event),
+        ]
+        if "stage" in fields:
+            trace_fields.append(log_field("stage", fields["stage"]))
+        target = fields.get("target")
+        if target is not None:
+            trace_fields.append(log_field("target", target))
+        elif "remain_ms" in fields:
+            trace_fields.append(log_field("remain_ms", fields["remain_ms"]))
+        self.logger.emit(level, "PROBE", event, tuple(trace_fields))
+
     def render_once(self, now_s: float) -> str:
         boot_logo_until_s = getattr(self, "boot_logo_until_s", None)
         if self.last_rendered_state is None and boot_logo_until_s is not None and now_s < float(boot_logo_until_s):
@@ -762,9 +777,19 @@ class RuntimeApp:
 
         remaining_s = probe_backoff_remaining_s(definition, completed_at, self._probe_now_s(), self.probe_scheduling)
         if remaining_s <= 0:
-            return
+            return 0
         remaining_ms = max(1, int((remaining_s * 1000.0) + 0.999))
+        self.logger.info(
+            "CHECK",
+            "backoff",
+            (
+                log_field("id", definition.identifier),
+                log_field("host", probe_host_key(definition) or "-"),
+                log_field("wait_ms", remaining_ms),
+            ),
+        )
         self.sleep_ms(remaining_ms)
+        return remaining_ms
 
     def _mark_probe_complete(self, definition: CheckDefinition):
         host_key = probe_host_key(definition)
@@ -781,9 +806,20 @@ class RuntimeApp:
         self.last_completed_at_by_host[host_key] = self._probe_now_s()
 
     def _execute_check_once(self, definition: CheckDefinition, now_s: float, manual: bool = False) -> CompletedCheckRun:
-        self._wait_for_probe_slot(definition)
+        waited_ms = self._wait_for_probe_slot(definition)
+        host_key = probe_host_key(definition) or "-"
         started_now_s = now_s if manual else (self.current_time_s() or now_s)
         started_at, timer_kind = start_timer()
+        self.logger.info(
+            "CHECK",
+            "start",
+            (
+                log_field("id", definition.identifier),
+                log_field("host", host_key),
+                log_field("bg", self._background_enabled()),
+                log_field("wait_ms", waited_ms),
+            ),
+        )
         if self._background_enabled():
             lock_acquired = _lock_context(self.background_lock)
             try:
@@ -798,6 +834,16 @@ class RuntimeApp:
         except Exception as error:
             duration_ms = elapsed_ms(started_at, timer_kind)
             self._mark_probe_complete(definition)
+            self.logger.warn(
+                "CHECK",
+                "done",
+                (
+                    log_field("id", definition.identifier),
+                    log_field("host", host_key),
+                    log_field("dur_ms", f"{duration_ms:.1f}"),
+                    log_field("status", "EXC"),
+                ),
+            )
             return CompletedCheckRun(
                 definition=definition,
                 observed_at_s=started_now_s,
@@ -808,6 +854,19 @@ class RuntimeApp:
 
         duration_ms = elapsed_ms(started_at, timer_kind)
         self._mark_probe_complete(definition)
+        status = "?"
+        if result.observations:
+            status = _enum_text(result.observations[0].status)
+        self.logger.info(
+            "CHECK",
+            "done",
+            (
+                log_field("id", definition.identifier),
+                log_field("host", host_key),
+                log_field("dur_ms", f"{duration_ms:.1f}"),
+                log_field("status", status),
+            ),
+        )
         return CompletedCheckRun(
             definition=definition,
             observed_at_s=started_now_s,
@@ -902,6 +961,16 @@ class RuntimeApp:
                     self.background_lock.release()
 
     def _queue_check(self, definition: CheckDefinition, now_s: float, manual: bool = False):
+        self.logger.info(
+            "CHECK",
+            "queue",
+            (
+                log_field("id", definition.identifier),
+                log_field("host", probe_host_key(definition) or "-"),
+                log_field("bg", self._background_enabled()),
+                log_field("manual", manual),
+            ),
+        )
         if not self._background_enabled():
             self._run_check(definition, now_s, manual=manual)
             return

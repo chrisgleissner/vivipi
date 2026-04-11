@@ -162,6 +162,10 @@ Status:
     - button logging assumed enum members exposed `.value`
     - scheduler host normalization assumed `str.casefold()` existed
 - Button lead for the actual board is now deployed as `GP15` / `GP17`, but physical proof is still required.
+- Host/Pico probe-alignment finding:
+  - `vivipulse` now overlaps distinct hosts while keeping same-host probes sequential with `same_host_backoff_ms = 250`, matching the intended Pico scheduling model more closely.
+  - With that alignment in place, host-side live repro still does not trigger U64/C64U failures in the same short window that the Pico does.
+  - The remaining differential is therefore likely Pico-side transport/runtime behavior rather than the shared probe definitions by themselves.
 
 ## ViviPulse Host Stability Plan
 

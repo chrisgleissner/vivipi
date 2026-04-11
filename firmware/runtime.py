@@ -135,6 +135,17 @@ def _safe_build_definitions(definitions_builder, config):
         return (), (_boot_diagnostic("CONF", "checks bad"),), (("config", error),)
 
 
+def _build_executor_with_optional_trace(executor_factory, trace_sink=None):
+    if trace_sink is None:
+        return executor_factory()
+    try:
+        return executor_factory(trace_sink=trace_sink)
+    except TypeError as error:
+        if "trace_sink" not in str(error):
+            raise
+        return executor_factory()
+
+
 def _safe_build_button_reader(button_reader_factory, buttons_config, input_controller):
     try:
         return button_reader_factory(buttons_config, input_controller=input_controller), (), ()
@@ -330,7 +341,7 @@ def build_runtime_app(
 
     app = runtime_app_factory(
         definitions=definitions,
-        executor=executor_factory(),
+        executor=None,
         display=display,
         button_reader=button_reader,
         input_controller=input_controller,
@@ -347,6 +358,7 @@ def build_runtime_app(
         version=version,
         build_time=build_time_value,
     )
+    app.executor = _build_executor_with_optional_trace(executor_factory, getattr(app, "emit_probe_trace", None))
     boot_logo_duration_s = float(boot_logo_min_s)
     if explicit_boot_logo_duration is not None:
         boot_logo_duration_s = max(float(boot_logo_min_s), float(display_config.get("boot_logo_duration_s", boot_logo_min_s)))
