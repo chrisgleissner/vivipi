@@ -10,9 +10,10 @@ except ImportError:  # pragma: no cover - imported on-device
     time = None
 
 from vivipi.core.input import InputController
+from vivipi.core.config import parse_probe_schedule_config
 from vivipi.core.display import normalize_display_config
 from vivipi.core.logging import bound_text
-from vivipi.core.models import DiagnosticEvent, DisplayMode, ProbeSchedulingPolicy, TransitionThresholds
+from vivipi.core.models import DiagnosticEvent, DisplayMode, TransitionThresholds
 from vivipi.runtime import state as runtime_state
 from vivipi.runtime import RuntimeApp, build_executor, build_runtime_definitions
 
@@ -152,28 +153,9 @@ def _transition_thresholds_from_config(config):
     )
 
 
-def _bool_from_config(value: object, default: bool) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"true", "yes", "1", "on"}:
-            return True
-        if normalized in {"false", "no", "0", "off"}:
-            return False
-    raise ValueError("probe_schedule.allow_concurrent_same_host must be a boolean")
-
-
 def _probe_scheduling_from_config(config):
     raw = config.get("probe_schedule") if isinstance(config, dict) else None
-    if not isinstance(raw, dict):
-        return ProbeSchedulingPolicy()
-    return ProbeSchedulingPolicy(
-        allow_concurrent_same_host=_bool_from_config(raw.get("allow_concurrent_same_host"), False),
-        same_host_backoff_ms=int(raw.get("same_host_backoff_ms", 250)),
-    )
+    return parse_probe_schedule_config(raw)
 
 
 def _safe_connect_wifi(wifi_connector, config):

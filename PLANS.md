@@ -162,3 +162,49 @@ Status:
     - button logging assumed enum members exposed `.value`
     - scheduler host normalization assumed `str.casefold()` existed
 - Button lead for the actual board is now deployed as `GP15` / `GP17`, but physical proof is still required.
+
+## ViviPulse Host Stability Plan
+
+Objective:
+- Build `scripts/vivipulse` as the public host-side entrypoint.
+- Reuse the existing shared probe-execution seam already exercised by the Pico runtime.
+- Produce deterministic host-side traces, failure-boundary evidence, firmware-backed mitigation hypotheses, stabilization search results, and soak summaries under `artifacts/vivipulse/`.
+
+Phases:
+- Phase A: prove the exact reuse seam from `firmware/main.py` through `firmware/runtime.py`, then document the intentionally excluded Pico-only layers.
+- Phase B: inspect the local Ultimate firmware checkout and extract evidence about lwIP, HTTP, FTP, telnet, and connection/task limits that should shape the first mitigation candidates.
+- Phase C: add a CPython-testable host orchestration layer in `src/vivipi/core` that reuses `build_runtime_definitions()`, `build_executor()`, `execute_check()`, `due_checks()`, `probe_host_key()`, and `probe_backoff_remaining_s()`.
+- Phase D: add the thin CLI and artifact adapters in `src/vivipi/tooling`, plus the `scripts/vivipulse` wrapper.
+- Phase E: validate `plan`, `reproduce`, `search`, and `soak` modes with request-level JSONL traces, failure-boundary reporting, and interactive recovery behavior.
+- Phase F: update `README.md` and keep `WORKLOG.md` current with commands, validations, and experiment outcomes.
+
+Checkpoints:
+- The host tool executes the shared runtime definition builder unchanged for supported input shapes.
+- The host tool executes the shared executor unchanged and captures its raw observation details without introducing retries.
+- Same-host serialization and backoff match `ProbeSchedulingPolicy` defaults unless explicitly overridden.
+- Search mode evaluates mitigation candidates in the documented order and records why a candidate was chosen or rejected.
+- Soak mode can run for a wall-clock duration while preserving deterministic, reconstructable traces.
+
+Risks:
+- Runtime-config parsing for `probe_schedule` currently lives in firmware glue, so any host-side reuse gap must stay minimal and explicit.
+- The Ultimate checkout is not at the default sibling path here; the implementation must support `--ultimate-repo` and fail fast when research-backed modes need it.
+- Coverage is already tight, so the vivipulse code needs high-signal unit coverage from the start rather than a cleanup pass later.
+
+Validation steps:
+- Add focused unit tests for orchestration, failure classification, failure-boundary detection, interactive recovery, search candidate ordering, and soak scheduling.
+- Add tooling tests for CLI input-shape resolution, wrapper forwarding, JSON output, and artifact generation.
+- Run targeted pytest slices during implementation, then `./build test` and `./build lint` before handoff.
+
+Intervention points:
+- If a target becomes transport-unresponsive after a last known success, stop further same-host traffic, flush artifacts, and gate resume behind explicit confirmation when recovery mode is enabled.
+- If the Ultimate checkout is unavailable, allow `plan` mode and pure input validation to proceed, but fail fast for firmware-research-dependent search flows.
+
+Termination criteria:
+- `scripts/vivipulse` exists and dispatches to the repository module.
+- `plan`, `reproduce`, `search`, and `soak` all exist and are covered by tests.
+- The exact reuse map, firmware research summary, search summary, and soak summary are emitted into `artifacts/vivipulse/`.
+- Remaining uncertainty is documented explicitly rather than implied away.
+
+Status:
+- Completed in repository code and tests.
+- Remaining real-world uncertainty is operational rather than architectural: actual long-duration target behavior still depends on running `reproduce`, `search`, and `soak` against the intended hardware and firmware checkout.

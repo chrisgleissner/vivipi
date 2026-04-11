@@ -2,7 +2,14 @@ from pathlib import Path
 
 import pytest
 
-from vivipi.core.config import build_direct_check_id, build_service_check_id, load_checks_config, parse_checks_config, slugify
+from vivipi.core.config import (
+    build_direct_check_id,
+    build_service_check_id,
+    load_checks_config,
+    parse_checks_config,
+    parse_probe_schedule_config,
+    slugify,
+)
 from vivipi.core.models import CheckType
 
 
@@ -262,6 +269,21 @@ def test_parse_checks_config_rejects_non_string_auth_fields():
                 ]
             }
         )
+
+
+def test_parse_probe_schedule_config_defaults_and_validates_boolean_strings():
+    defaults = parse_probe_schedule_config(None)
+    assert defaults.allow_concurrent_same_host is False
+    assert defaults.same_host_backoff_ms == 250
+
+    custom = parse_probe_schedule_config(
+        {
+            "allow_concurrent_same_host": "true",
+            "same_host_backoff_ms": 750,
+        }
+    )
+    assert custom.allow_concurrent_same_host is True
+    assert custom.same_host_backoff_ms == 750
 
     with pytest.raises(ValueError, match="password must be a string"):
         parse_checks_config(

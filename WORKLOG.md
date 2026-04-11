@@ -145,3 +145,72 @@
   - `checks loaded count=7`
   - live executions started for `u64-rest`, `u64-ftp`, `u64-telnet`, `c64u-rest`, `c64u-ftp`, and `c64u-telnet`
 - The captured window shows the Pico executing the new probe bundle on-device; the individual device checks were failing at transport level in that capture window rather than crashing the Pico runtime.
+
+## 2026-04-11T09:53:48Z
+
+- Began the `vivipulse` implementation pass.
+- Inspected and confirmed the current shared probe-execution seam used by the Pico runtime:
+  - `firmware/main.py -> firmware.runtime.run_forever()`
+  - `firmware.runtime.build_runtime_app()` uses `vivipi.runtime.checks.build_runtime_definitions()`
+  - `firmware.runtime.build_runtime_app()` uses `vivipi.runtime.checks.build_executor()`
+  - the built executor delegates to `vivipi.core.execution.execute_check()`
+  - `vivipi.runtime.RuntimeApp` uses `vivipi.core.scheduler.due_checks()`, `probe_host_key()`, and `probe_backoff_remaining_s()`
+- Confirmed the intended non-reuse boundary for `vivipulse`:
+  - no reuse of `RuntimeApp`
+  - no display rendering
+  - no button handling
+  - no Wi-Fi bootstrap
+  - no firmware display backends
+- Located the local Ultimate firmware checkout at `/home/chris/dev/c64/1541ultimate` after the default sibling path `../1541ultimate` was absent.
+- Inspected the Ultimate firmware sources relevant to stabilization hypotheses:
+  - build files point to lwIP libraries under `target/libs/*/lwip` and `target/u2/microblaze/mb_lwip`
+  - telnet server in `software/network/socket_gui.cc` binds port `23`, listens with backlog `2`, sets a `200 ms` receive timeout, and spawns a task per accepted connection
+  - FTP daemon in `software/network/ftpd.cc` binds port `21`, listens with backlog `2`, sets a `100 ms` receive timeout, spawns a task per accepted control connection, and opens passive data ports from a rotating `51000-60999` range
+  - HTTP daemon in `software/network/httpd.cc` runs the MicroHTTPServer loop, while `software/httpd/c-version/lib/server.c` tracks a bounded `MAX_HTTP_CLIENT` pool and closes sockets after request completion
+  - shared listener/task patterns also appear in `software/io/acia/listener_socket.cc`
+- Updated `PLANS.md` with a dedicated `vivipulse` execution plan before starting code changes.
+- Commands run during inspection:
+  - `rg --files ...`
+  - `rg -n "build_runtime_definitions|build_executor|due_checks|probe_backoff_remaining_s|probe_host_key|run_forever\\(" firmware src tests`
+  - `find /home/chris -maxdepth 4 -type d \\( -iname '*1541ultimate*' -o -iname '1541u*' -o -iname 'ultimate*' \\)`
+  - targeted `sed -n` reads across `firmware/runtime.py`, `src/vivipi/runtime/checks.py`, `src/vivipi/core/execution.py`, `src/vivipi/core/scheduler.py`, `src/vivipi/tooling/build_deploy.py`, and the Ultimate firmware sources above
+- Next step:
+  - add the host-side orchestration, CLI, wrapper script, artifacts, tests, and README updates end to end
+
+## 2026-04-11T10:12:59Z
+
+- Implemented the host-side `vivipulse` stack:
+  - added `src/vivipi/core/vivipulse.py` for reusable host orchestration, deterministic pass/duration runners, failure-boundary tracking, search candidate generation, and soak handling
+  - added `src/vivipi/tooling/vivipulse.py` for CLI parsing, config-shape adapters, artifact writing, firmware-research summaries, and interactive recovery prompts
+  - added the public wrapper `scripts/vivipulse`
+  - added the secondary console entrypoint `vivipi-vivipulse` and shipped `scripts/` in `pyproject.toml`
+- Tightened shared parsing reuse instead of duplicating probe-schedule normalization:
+  - added `vivipi.core.config.parse_probe_schedule_config()`
+  - switched `firmware/runtime.py` to use that helper
+- Updated `README.md` with a focused `vivipulse` section covering:
+  - purpose
+  - canonical and alternate input shapes
+  - `plan`, `reproduce`, `search`, and `soak` mode examples
+  - artifact layout
+  - recovery flow
+  - exact shared-layer reuse boundary and intentional non-reuse
+- Added behavioral coverage for the new tooling:
+  - `tests/unit/core/test_vivipulse.py`
+  - `tests/unit/tooling/test_vivipulse_cli.py`
+  - `tests/unit/tooling/test_vivipulse_entrypoint.py`
+  - extended `tests/unit/core/test_config.py` for the shared probe-schedule parser
+- Validations run:
+  - `PYTHONPATH=src python3 -m pytest -o addopts='' tests/unit/core/test_vivipulse.py tests/unit/tooling/test_vivipulse_cli.py tests/unit/tooling/test_vivipulse_entrypoint.py tests/unit/core/test_config.py`
+  - `scripts/vivipulse --mode plan --runtime-config /tmp/vivipulse-runtime.json --artifacts-dir /tmp/vivipulse-artifacts --json`
+  - `./build lint`
+  - `./build test`
+- Validation results:
+  - focused vivipulse/config test slice passed
+  - wrapper smoke test passed and wrote `/tmp/vivipulse-artifacts/20260411T100858Z-plan`
+  - `./build lint` passed
+  - `./build test` passed with `408 passed`
+  - coverage gate passed at `96.89%`
+- Blockers encountered and resolved:
+  - initial pytest collection failed because both new test modules used the same basename; renamed the tooling-side module
+  - initial repo lint failed on an unused `ProbeSchedulingPolicy` import in `firmware/runtime.py`; removed it
+  - initial coverage gate failed because the new vivipulse modules were under-covered; added direct helper/edge-path tests until the repository-wide `>=96%` branch requirement was satisfied

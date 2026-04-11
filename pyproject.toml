@@ -23,6 +23,7 @@ dev = [
 [project.scripts]
 vivipi-adb-service = "vivipi.services.adb_service:main"
 vivipi-build-deploy = "vivipi.tooling.build_deploy:main"
+vivipi-vivipulse = "vivipi.tooling.vivipulse:main"
 
 [tool.hatch.build.targets.sdist]
 include = [
@@ -40,6 +41,7 @@ include = [
   "PLANS.md",
   "pyproject.toml",
   "README.md",
+  "scripts",
   "src/vivipi",
   "tests",
   "WORKLOG.md",
