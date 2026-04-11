@@ -1285,6 +1285,15 @@ def test_build_deploy_main_rejects_monkeypatched_unknown_command(monkeypatch):
         build_deploy.main(["unknown"])
 
 
+def test_parse_bool_covers_default_and_string_branches():
+    assert build_deploy._parse_bool(None, "flag", True) is True
+    assert build_deploy._parse_bool(" yes ", "flag", False) is True
+    assert build_deploy._parse_bool(" off ", "flag", True) is False
+
+    with pytest.raises(ValueError, match="flag must be a boolean"):
+        build_deploy._parse_bool("maybe", "flag", False)
+
+
 def test_build_deploy_module_entrypoint_executes_main(monkeypatch):
     monkeypatch.setattr(
         build_deploy.argparse.ArgumentParser,
@@ -1292,5 +1301,6 @@ def test_build_deploy_module_entrypoint_executes_main(monkeypatch):
         lambda self, argv=None: type("Args", (), {"command": "unknown"})(),
     )
 
-    with pytest.raises(ValueError, match="unsupported command: unknown"):
-        runpy.run_module("vivipi.tooling.build_deploy", run_name="__main__")
+    with pytest.warns(RuntimeWarning, match="found in sys.modules"):
+        with pytest.raises(ValueError, match="unsupported command: unknown"):
+            runpy.run_module("vivipi.tooling.build_deploy", run_name="__main__")

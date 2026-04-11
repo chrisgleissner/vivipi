@@ -597,6 +597,13 @@ def test_read_until_markers_covers_timeout_exception_and_marker_match(monkeypatc
     assert _read_until_markers(FakeSocket([]), (b"login:",)) == b"Login:"
 
 
+def test_read_until_markers_reraises_non_timeout_socket_errors(monkeypatch):
+    monkeypatch.setattr(runtime_checks, "_recv_telnet_chunk", lambda handle, size=4096: (_ for _ in ()).throw(OSError("broken pipe")))
+
+    with pytest.raises(OSError, match="broken pipe"):
+        _read_until_markers(object(), (b"login:",))
+
+
 def test_socket_target_and_protocol_helpers_cover_success_and_error_paths():
     assert _parse_socket_target("ftp://nas.example.local", 21, expected_scheme="ftp") == ("nas.example.local", 21)
     assert _parse_socket_target("telnet://switch.example.local:2323", 23, expected_scheme="telnet") == (
