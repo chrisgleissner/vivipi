@@ -70,6 +70,17 @@ def test_success_recovers_from_fail_and_unknown():
     assert discovered.status == Status.OK
 
 
+def test_apply_observation_coerces_string_status_values():
+    runtime = make_check("Router", status=Status.UNKNOWN)
+
+    updated = apply_observation(
+        runtime,
+        CheckObservation(identifier="router", name="Router", status="OK"),
+    )
+
+    assert updated.status == Status.OK
+
+
 def test_integrate_observations_recovers_fail_to_ok_without_retaining_stale_status():
     state = AppState(
         checks=(

@@ -76,6 +76,32 @@ def test_runtime_app_executes_due_checks_and_updates_state():
     assert display.frames[-1].rows[0].startswith("Router")
 
 
+def test_runtime_app_accepts_string_status_values_from_executor():
+    display = FakeDisplay()
+    definition = make_definition("router")
+
+    def executor(check_definition, now_s):
+        return CheckExecutionResult(
+            source_identifier=check_definition.identifier,
+            observations=(
+                CheckObservation(
+                    identifier=check_definition.identifier,
+                    name=check_definition.name,
+                    status="OK",
+                    details="reachable",
+                    observed_at_s=now_s,
+                ),
+            ),
+        )
+
+    app = RuntimeApp(definitions=(definition,), executor=executor, display=display)
+
+    app.tick(0.0)
+
+    assert app.state.checks[0].status == Status.OK
+    assert app.get_registered_checks()[0]["status"] == "OK"
+
+
 def test_runtime_app_executor_exception_replaces_previous_ok_state_on_display():
     display = FakeDisplay()
     definition = make_definition("router", check_type=CheckType.HTTP)
