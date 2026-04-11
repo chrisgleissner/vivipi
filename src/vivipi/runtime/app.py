@@ -172,6 +172,7 @@ class RuntimeApp:
         self.inflight_check_ids: set[str] = set()
         self.completed_checks: list[CompletedCheckRun] = []
         self.pending_probe_traces: list[tuple[CheckDefinition, str, dict[str, object]]] = []
+        self.probe_trace_sink = None
         self.state = AppState(
             checks=tuple(
                 CheckRuntime(
@@ -247,6 +248,8 @@ class RuntimeApp:
         self.network_operation_result: dict[str, object] | None = None
 
     def emit_probe_trace(self, definition: CheckDefinition, event: str, fields: dict[str, object]):
+        if self.probe_trace_sink is not None:
+            self.probe_trace_sink(definition, event, dict(fields))
         if self._background_enabled():
             lock_acquired = _lock_context(self.background_lock)
             try:

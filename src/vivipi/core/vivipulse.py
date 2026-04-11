@@ -149,6 +149,7 @@ class VivipulseProfile:
 class FirmwareResearchHints:
     repo_path: str
     recommended_same_host_backoff_ms: int = 250
+    recommended_allow_concurrent_same_host: bool = False
     recommended_check_order: str = "network-light-first"
     notes: tuple[str, ...] = field(default_factory=tuple)
 
@@ -642,6 +643,23 @@ class HostProbeRunner:
         return event
 
     def _run_host_group(self, definitions: tuple[CheckDefinition, ...], pass_index: int):
+        if self.profile.allow_concurrent_same_host:
+            runnable = [
+                definition
+                for definition in definitions
+                if not self._is_host_blocked(probe_host_key(definition))
+            ]
+            if not runnable:
+                return
+            threads = [
+                threading.Thread(target=self._run_definition, args=(definition, pass_index), daemon=True)
+                for definition in runnable
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            return
         previous_host_key = None
         for definition in definitions:
             host_key = probe_host_key(definition)
@@ -784,6 +802,13 @@ def generate_candidate_profiles(
         candidates.append(candidate)
 
     recommended_backoff = max(base_profile.same_host_backoff_ms, research.recommended_same_host_backoff_ms)
+    add_candidate(
+        replace(
+            base_profile,
+            allow_concurrent_same_host=research.recommended_allow_concurrent_same_host,
+            same_host_backoff_ms=recommended_backoff,
+        )
+    )
     for backoff_ms in (
         recommended_backoff,
         max(recommended_backoff, base_profile.same_host_backoff_ms + 250),

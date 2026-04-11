@@ -10,6 +10,13 @@ from textwrap import dedent
 
 from vivipi.core.config import load_checks_config, parse_probe_schedule_config
 from vivipi.core.models import CheckDefinition, ProbeSchedulingPolicy
+from vivipi.core.probe_trace import (
+    ProbeTraceCollector,
+    ProbeTraceJsonlWriter,
+    compare_probe_traces,
+    load_probe_trace_records,
+    render_parity_summary,
+)
 from vivipi.core.vivipulse import (
     FirmwareResearchHints,
     HostProbeRunner,
@@ -76,6 +83,17 @@ class JsonlTraceWriter:
         self.handle.close()
 
 
+def _build_executor_with_optional_trace(trace_sink=None):
+    if trace_sink is None:
+        return build_executor()
+    try:
+        return build_executor(trace_sink=trace_sink)
+    except TypeError as error:
+        if "trace_sink" not in str(error):
+            raise
+        return build_executor()
+
+
 def repository_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
@@ -103,6 +121,19 @@ def _profile_from_policy(policy: ProbeSchedulingPolicy) -> VivipulseProfile:
 def _profile_from_runtime_config(runtime_config: dict[str, object]) -> VivipulseProfile:
     policy = parse_probe_schedule_config(runtime_config.get("probe_schedule"))
     return _profile_from_policy(policy)
+
+
+def _parity_profile(profile: VivipulseProfile) -> VivipulseProfile:
+    return VivipulseProfile(
+        allow_concurrent_hosts=profile.allow_concurrent_hosts,
+        allow_concurrent_same_host=profile.allow_concurrent_same_host,
+        same_host_backoff_ms=profile.same_host_backoff_ms,
+        pass_spacing_s=0.0,
+        same_host_spacing_ms=0,
+        check_order="network-light-first",
+        interval_scale_by_check_id={},
+        disabled_check_ids=(),
+    )
 
 
 def _runtime_config_from_runtime_json(path: Path) -> dict[str, object]:
@@ -212,31 +243,44 @@ def inspect_ultimate_repo(path: Path) -> FirmwareResearchReport:
     telnet_path = repo_path / "software/network/socket_gui.cc"
     httpd_path = repo_path / "software/network/httpd.cc"
     http_server_path = repo_path / "software/httpd/c-version/lib/server.c"
+    http_server_header_path = repo_path / "software/httpd/c-version/lib/server.h"
+    lwipopts_path = repo_path / "software/network/config/lwipopts.h"
     network_config_path = repo_path / "software/network/network_config.cc"
-    makefile_path = repo_path / "target/u64/nios2/ultimate/Makefile"
+    makefile_candidates = (
+        repo_path / "target/u64/nios2/ultimate/Makefile",
+        repo_path / "target/u64/riscv/ultimate/Makefile",
+    )
+    makefile_path = next((candidate for candidate in makefile_candidates if candidate.exists()), makefile_candidates[0])
 
     confirmed_facts = (
         f"lwIP is a core dependency for this firmware build; `{makefile_path.relative_to(repo_path)}` links `liblwip.a` and includes `ftpd.cc`, `httpd.cc`, `socket_stream.cc`, and `listener_socket.cc`.",
-        f"`{ftpd_path.relative_to(repo_path)}` binds FTP on port 21, listens with backlog 2, sets a 100 ms receive timeout per accepted socket, spawns a task per control connection, and allocates passive data ports from 51000 upward.",
-        f"`{telnet_path.relative_to(repo_path)}` binds telnet on port 23, listens with backlog 2, sets a 200 ms receive timeout, and spawns a task per accepted socket.",
-        f"`{httpd_path.relative_to(repo_path)}` starts the MicroHTTPServer loop, while `{http_server_path.relative_to(repo_path)}` tracks a bounded `MAX_HTTP_CLIENT` connection pool and closes sockets after request completion.",
+        f"`{lwipopts_path.relative_to(repo_path)}` caps the shared TCP/socket budget at `MEMP_NUM_NETCONN = 16` and `MEMP_NUM_TCP_PCB = 30`, while `TCP_LISTEN_BACKLOG = 0` disables lwIP backlog handling behind the service listeners.",
+        f"`{ftpd_path.relative_to(repo_path)}` binds FTP on port 21, listens with backlog 2, sets a 100 ms receive timeout per accepted control socket, spawns a task per control connection, and its passive `FTP Data` accept task ends in `vTaskSuspend(NULL)` instead of deleting itself.",
+        f"`{telnet_path.relative_to(repo_path)}` binds telnet on port 23, listens with backlog 2, sets a 200 ms receive timeout, spawns a task per accepted socket, and that session task also ends in `vTaskSuspend(NULL)` after disconnect or failed authentication instead of deleting itself.",
+        f"`{httpd_path.relative_to(repo_path)}` starts one MicroHTTPServer loop, while `{http_server_header_path.relative_to(repo_path)}` and `{http_server_path.relative_to(repo_path)}` bound HTTP to `MAX_HTTP_CLIENT = 4` and stop accepting when that small pool is full.",
         f"`{network_config_path.relative_to(repo_path)}` exposes shared network password and service toggles for telnet, FTP, and HTTP.",
     )
     strong_inferences = (
-        "FTP is the heaviest direct probe because passive-mode listing opens an extra data socket and an extra server-side task, so it should run later than lightweight probes when the same host is already stressed.",
-        "The telnet path uses a minimal VT100-oriented parser with per-character reads and tight receive timeouts, so unsolicited probe bytes are more likely to perturb it than a connect-and-observe probe.",
-        "HTTP is likely bounded by a small client pool, so aggressive same-host concurrency or rapid back-to-back retries can starve later requests even when individual requests are short.",
+        "A same-host burst can collapse all three services without a single protocol crash: the two-deep listener queues are shallow, lwIP only has 16 netconns globally, and HTTP has a four-client pool, so brief concurrency spikes can starve accepts across the whole box.",
+        "Telnet is state-leaking under probe load because every completed or failed session leaves a suspended FreeRTOS task behind; repeated telnet checks consume task/heap capacity until later accepts or task spawns fail.",
+        "PASV/LIST FTP probing is also state-leaking because every passive data accept spawns an `FTP Data` task that suspends instead of deleting itself, so directory-style FTP health checks accelerate the same exhaustion path.",
+        "To avoid full collapse, keep same-host concurrency off for 1541ultimate targets, keep FTP probes control-channel only, and run telnet sparingly instead of as part of an aggressive burst/search profile.",
     )
     open_questions = (
-        "The exact runtime value of `MAX_HTTP_CLIENT` depends on the bundled MicroHTTPServer headers for the active target and is not surfaced in the ViviPi repo.",
-        "The active production target may differ between U64, U2+, and other variants, so listener/task behavior is confirmed from shared sources but exact stack sizes are target-dependent.",
+        "The current sources do not expose task-create failure telemetry, so the exact point where `xTaskCreate` starts failing under burst load still has to be measured on hardware.",
+        "The active production target may differ between U64, U2+, and other variants, but the listener/task patterns and lwIP limits inspected here are shared across the relevant U64 network sources.",
     )
 
     hints = FirmwareResearchHints(
         repo_path=str(repo_path),
         recommended_same_host_backoff_ms=1000,
+        recommended_allow_concurrent_same_host=False,
         recommended_check_order="network-light-first",
-        notes=tuple(confirmed_facts[:3]),
+        notes=(
+            confirmed_facts[1],
+            confirmed_facts[2],
+            confirmed_facts[3],
+        ),
     )
     return FirmwareResearchReport(
         hints=hints,
@@ -392,6 +436,14 @@ def render_soak_summary(outcome: RunOutcome | None, duration_s: float | None) ->
     )
 
 
+def render_parity_mode_summary(enabled: bool, firmware_trace: str | None) -> str:
+    if not enabled:
+        return "Parity mode was not enabled for this invocation.\n"
+    if firmware_trace is None:
+        return "Parity mode was enabled without a firmware trace for comparison.\n"
+    return f"Parity mode was enabled using firmware trace: {firmware_trace}\n"
+
+
 def _ensure_artifact_dir(root: Path, mode: str) -> Path:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_dir = root / f"{timestamp}-{mode}"
@@ -438,6 +490,8 @@ def _summary_payload(
     plan: PlanView | None = None,
     outcome: RunOutcome | None = None,
     search: SearchOutcome | None = None,
+    parity_mode: bool = False,
+    parity_comparison=None,
 ) -> dict[str, object]:
     payload = {
         "mode": mode,
@@ -445,6 +499,7 @@ def _summary_payload(
         "input_kind": resolved.input_kind,
         "input_path": str(resolved.input_path),
         "selected_check_ids": [definition.identifier for definition in resolved.definitions],
+        "parity_mode": parity_mode,
     }
     if plan is not None:
         payload["plan"] = {
@@ -474,6 +529,8 @@ def _summary_payload(
             "selected_profile": asdict(search.selected.profile),
             "baseline_transport_failures": search.baseline.outcome.transport_failure_count,
         }
+    if parity_comparison is not None:
+        payload["parity"] = parity_comparison.to_dict()
     return payload
 
 
@@ -497,6 +554,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ultimate-repo")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--parity-mode", action="store_true")
+    parser.add_argument("--firmware-trace")
     return parser
 
 
@@ -506,12 +565,27 @@ def main(argv: list[str] | None = None, *, prompt=input, output_stream=None) -> 
     output_stream = output_stream or sys.stdout
 
     resolved = resolve_input(args)
+    if args.parity_mode:
+        resolved = ResolvedInput(
+            definitions=resolved.definitions,
+            profile=_parity_profile(_profile_from_runtime_config(resolved.runtime_config)),
+            runtime_config=resolved.runtime_config,
+            input_kind=resolved.input_kind,
+            input_path=resolved.input_path,
+            parser_reuse=resolved.parser_reuse,
+        )
     artifacts_root = Path(args.artifacts_dir).resolve()
     run_dir = _ensure_artifact_dir(artifacts_root, args.mode)
     trace_writer = JsonlTraceWriter(run_dir / "trace.jsonl")
+    transport_trace_writer = ProbeTraceJsonlWriter(run_dir / "transport-trace.jsonl")
 
     plan = build_plan_view(resolved.definitions, resolved.profile)
-    executor = build_executor()
+    transport_collector = ProbeTraceCollector(
+        transport_trace_writer.write,
+        source="host",
+        mode=args.mode,
+    )
+    executor = _build_executor_with_optional_trace(transport_collector.emit)
 
     research_report = None
     if args.ultimate_repo is not None:
@@ -528,6 +602,7 @@ def main(argv: list[str] | None = None, *, prompt=input, output_stream=None) -> 
 
     outcome = None
     search_result = None
+    parity_comparison = None
     duration_s = parse_duration(args.duration) if args.duration is not None else None
     passes = args.passes or (1 if args.mode != "soak" else None)
 
@@ -579,6 +654,14 @@ def main(argv: list[str] | None = None, *, prompt=input, output_stream=None) -> 
     _write_text(run_dir / "failure-boundary.txt", render_failure_boundary_summary(outcome) if outcome else "No run executed.\n")
     _write_text(run_dir / "search-summary.txt", render_search_summary(search_result))
     _write_text(run_dir / "soak-summary.txt", render_soak_summary(outcome if args.mode == "soak" else None, duration_s if args.mode == "soak" else None))
+    _write_text(run_dir / "parity-mode.txt", render_parity_mode_summary(args.parity_mode, args.firmware_trace))
+
+    if args.firmware_trace is not None:
+        parity_comparison = compare_probe_traces(
+            load_probe_trace_records(args.firmware_trace),
+            tuple(transport_collector.records),
+        )
+    _write_text(run_dir / "parity-summary.txt", render_parity_summary(parity_comparison))
 
     if args.mode == "plan":
         summary_text = render_plan_summary(plan, resolved)
@@ -586,6 +669,7 @@ def main(argv: list[str] | None = None, *, prompt=input, output_stream=None) -> 
         summary_text = render_run_summary(outcome)
     _write_text(run_dir / "run-summary.txt", summary_text)
     trace_writer.close()
+    transport_trace_writer.close()
 
     payload = _summary_payload(
         mode=args.mode,
@@ -594,6 +678,8 @@ def main(argv: list[str] | None = None, *, prompt=input, output_stream=None) -> 
         plan=plan if args.mode == "plan" else None,
         outcome=outcome,
         search=search_result,
+        parity_mode=args.parity_mode,
+        parity_comparison=parity_comparison,
     )
     if args.json:
         output_stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")

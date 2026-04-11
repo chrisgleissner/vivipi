@@ -298,6 +298,67 @@ def test_host_probe_runner_can_run_distinct_hosts_in_parallel_when_enabled():
     assert [event.check_id for event in outcome.trace_events] == ["alpha", "beta"]
 
 
+def test_host_probe_runner_can_run_same_host_checks_in_parallel_when_enabled():
+    barrier = threading.Barrier(2)
+    definitions = (
+        make_definition("alpha", target="shared.local"),
+        make_definition("beta", check_type=CheckType.HTTP, target="http://shared.local/health"),
+    )
+
+    def executor(definition: CheckDefinition, observed_at_s: float):
+        barrier.wait(timeout=0.5)
+        return success_result(definition, observed_at_s)
+
+    runner = HostProbeRunner(
+        definitions,
+        executor,
+        "reproduce",
+        VivipulseProfile(allow_concurrent_same_host=True, same_host_backoff_ms=0),
+    )
+
+    outcome = runner.run_passes(1)
+
+    assert outcome.transport_failure_count == 0
+    assert sorted(event.check_id for event in outcome.trace_events) == ["alpha", "beta"]
+    assert all(event.sleep_before_ms == 0 for event in outcome.trace_events)
+
+
+def test_host_probe_runner_keeps_distinct_hosts_serial_when_only_same_host_concurrency_is_enabled():
+    lock = threading.Lock()
+    active = 0
+    max_active = 0
+    barrier = threading.Barrier(2)
+    definitions = (
+        make_definition("alpha", target="shared-a.local"),
+        make_definition("beta", target="shared-b.local"),
+    )
+
+    def executor(definition: CheckDefinition, observed_at_s: float):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        try:
+            with pytest.raises(threading.BrokenBarrierError):
+                barrier.wait(timeout=0.05)
+        finally:
+            with lock:
+                active -= 1
+        return success_result(definition, observed_at_s)
+
+    runner = HostProbeRunner(
+        definitions,
+        executor,
+        "reproduce",
+        VivipulseProfile(allow_concurrent_same_host=True, same_host_backoff_ms=0),
+    )
+
+    outcome = runner.run_passes(1)
+
+    assert outcome.transport_failure_count == 0
+    assert max_active == 1
+
+
 def test_host_probe_runner_stops_same_host_traffic_after_first_transport_failure_boundary():
     clock = FakeClock()
     definitions = (
@@ -461,11 +522,11 @@ def test_host_probe_runner_internal_helpers_cover_recovery_and_boundaries():
 
 def test_run_search_prefers_the_first_stable_candidate():
     definitions = (make_definition("alpha"),)
-    base_profile = VivipulseProfile(same_host_backoff_ms=250)
+    base_profile = VivipulseProfile(allow_concurrent_same_host=True, same_host_backoff_ms=250)
     research = FirmwareResearchHints(repo_path="/tmp/1541ultimate", recommended_same_host_backoff_ms=1000)
 
     def make_outcome(profile: VivipulseProfile) -> RunOutcome:
-        transport_failures = 0 if profile.same_host_backoff_ms >= 1000 else 1
+        transport_failures = 0 if (not profile.allow_concurrent_same_host and profile.same_host_backoff_ms >= 1000) else 1
         trace_events = (
             TraceEvent(
                 wall_time="2026-04-11T00:00:00.000000Z",
@@ -519,6 +580,7 @@ def test_run_search_prefers_the_first_stable_candidate():
     )
 
     assert result.selected.profile.same_host_backoff_ms == 1000
+    assert result.selected.profile.allow_concurrent_same_host is False
     assert result.selected.label == "candidate-1"
 
 
@@ -550,12 +612,13 @@ def test_generate_candidate_profiles_and_run_search_cover_boundary_and_stable_ba
         ),
     )
     candidates = vivipulse_core.generate_candidate_profiles(
-        VivipulseProfile(),
+        VivipulseProfile(allow_concurrent_same_host=True),
         FirmwareResearchHints(repo_path="/tmp/1541ultimate"),
         (make_definition("alpha"),),
         boundary,
         max_candidates=20,
     )
+    assert any(candidate.allow_concurrent_same_host is False for candidate in candidates)
     assert any(candidate.interval_scale_by_check_id for candidate in candidates)
     assert any(candidate.disabled_check_ids for candidate in candidates)
 

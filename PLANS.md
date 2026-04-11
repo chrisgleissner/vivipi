@@ -224,6 +224,42 @@ Status:
 - Completed in repository code and tests.
 - Remaining real-world uncertainty is operational rather than architectural: actual long-duration target behavior still depends on running `reproduce`, `search`, and `soak` against the intended hardware and firmware checkout.
 
+## Plan Extension — 2026-04-11T19:22:00Z
+
+Objective:
+- Close the unfinished vivipulse/Pico parity and failure-analysis loop with machine-verifiable transport traces and automated stress entrypoints.
+
+Phases:
+- Phase 1: parity instrumentation
+  - [x] Add a shared transport-trace schema that records per-probe start/end, DNS resolution, socket open/ready/close, bytes sent/received, and timeouts.
+  - [x] Wire that schema into the shared probe runners used by both vivipulse and the Pico runtime.
+  - [ ] Capture a fresh Pico JSONL transport trace from the current hardware using `service.probe_trace_jsonl: true` or equivalent runtime config.
+- Phase 2: forced parity mode
+  - [x] Add `scripts/vivipulse --parity-mode` so host-side runs discard host-only search knobs and use the Pico runtime schedule as the ground truth profile.
+  - [x] Emit host-side `transport-trace.jsonl` plus parity summary artifacts for every vivipulse run.
+  - [ ] Compare a fresh Pico trace against a parity-mode host trace and prove ordering/lifecycle/timing deltas are within the stated tolerance.
+- Phase 3: deterministic reproduction
+  - [ ] Reproduce the U64/C64U failure on vivipulse parity mode for 3 consecutive runs with the same trigger sequence.
+  - [ ] Reproduce the same triggering sequence on the Pico.
+- Phase 4: root cause
+  - [ ] Identify a single root cause with >= 90% confidence using transport traces and controlled protocol/timing isolation.
+- Phase 5: fix and validation
+  - [ ] Implement the smallest shared fix that preserves HTTP, FTP, TELNET, and PING coverage.
+  - [ ] Run a 30-minute parity-mode soak with zero failures on host.
+  - [ ] Run a 30-minute real-Pico soak with zero failures and captured JSONL transport traces.
+- Phase 6: regression guard
+  - [x] Add `scripts/vivipulse_stress_test.sh` as the deterministic host-side stress entrypoint.
+  - [ ] Extend the script or a companion runner to capture Pico serial JSONL traces automatically.
+
+Current evidence snapshot:
+- Host parity-mode implementation is now instrumented and test-covered.
+- Live host parity-mode runs against `config/build-deploy.local.yaml` on 2026-04-11 produced:
+  - `20260411T191725Z-local`: 7/7 successes, 0 transport failures.
+  - `20260411T191747Z-reproduce`: 21/21 successes, 0 transport failures.
+  - `20260411T191843Z-reproduce`: 21/21 successes, 0 transport failures.
+  - `20260411T191914Z-reproduce`: one U64 FTP timeout after prior U64 success on REST and TELNET; host blocked `192.168.1.13` after the first transport failure boundary.
+- Deterministic crash reproduction remains open because the current live environment is intermittently healthy rather than consistently failing, and no fresh Pico JSONL transport trace has been captured yet.
+
 ## Plan Extension — 2026-04-11T18:06:40Z
 
 - Re-ran the Pico-OLED-1.3 button-recovery ladder against the connected board with live serial access but without physical button actuation or OLED observation from this shell.

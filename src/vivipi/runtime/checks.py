@@ -92,6 +92,15 @@ def _emit_probe_trace(trace, event: str, **fields):
     trace(event, **fields)
 
 
+def _format_socket_address(address) -> str:
+    try:
+        host = address[0]
+        port = address[1]
+        return f"{host}:{port}"
+    except Exception:
+        return str(address)
+
+
 def _normalize_error_text(error: BaseException) -> str:
     return " ".join(str(error).split()).strip() or type(error).__name__
 
@@ -481,7 +490,19 @@ def _recv_telnet_chunk_compat(handle, size: int, deadline=None, trace=None) -> b
 
 
 def _open_socket(host: str, port: int, timeout_s: int, *, deadline=None, trace=None):
-    addresses = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
+    _emit_probe_trace(trace, "dns-start", host=host, port=port)
+    try:
+        addresses = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
+    except Exception as error:
+        _emit_probe_trace(trace, "dns-error", host=host, port=port, detail=_format_network_error(error))
+        raise
+    _emit_probe_trace(
+        trace,
+        "dns-result",
+        host=host,
+        port=port,
+        addresses=tuple(_format_socket_address(address) for _, _, _, _, address in addresses),
+    )
     last_error: OSError | None = None
     deadline = _deadline_after_s(timeout_s) if deadline is None else deadline
     for family, socktype, proto, _, address in addresses:
@@ -491,18 +512,20 @@ def _open_socket(host: str, port: int, timeout_s: int, *, deadline=None, trace=N
             _emit_probe_trace(trace, "socket-ready", stage="connect", target=f"{address[0]}:{address[1]}", remain_ms=_deadline_remaining_ms(deadline))
             return handle
         except (OSError, TimeoutError) as error:
+            _emit_probe_trace(trace, "socket-error", stage="connect", target=f"{address[0]}:{address[1]}", detail=_format_network_error(error))
             last_error = error
             handle.close()
     raise last_error or OSError("unable to open socket")
 
 
-def _close_socket(handle):
+def _close_socket(handle, trace=None, *, target=None):
     if handle is None:
         return
     try:
         handle.close()
     except OSError:
         return
+    _emit_probe_trace(trace, "socket-close", stage="close", target=target)
 
 
 def _socket_sendall(handle, payload: bytes, deadline, trace=None, stage: str = "send"):
@@ -523,6 +546,7 @@ def _socket_sendall(handle, payload: bytes, deadline, trace=None, stage: str = "
                 return
             if sent <= 0:
                 raise OSError("send failed")
+            _emit_probe_trace(trace, "socket-send", stage=stage, bytes_sent=sent)
             view = view[sent:]
         return
 
@@ -530,6 +554,7 @@ def _socket_sendall(handle, payload: bytes, deadline, trace=None, stage: str = "
         _socket_wait(handle, deadline, writable=True, trace=trace, stage=stage)
         try:
             handle.sendall(payload)
+            _emit_probe_trace(trace, "socket-send", stage=stage, bytes_sent=len(payload))
             return
         except OSError as error:
             if _is_would_block(error):
@@ -541,7 +566,9 @@ def _socket_recv(handle, size: int, deadline, trace=None, stage: str = "recv") -
     while True:
         _socket_wait(handle, deadline, writable=False, trace=trace, stage=stage)
         try:
-            return handle.recv(size)
+            chunk = handle.recv(size)
+            _emit_probe_trace(trace, "socket-recv", stage=stage, bytes_received=len(chunk))
+            return chunk
         except OSError as error:
             if _classify_network_error(error) == "timeout":
                 _emit_probe_trace(trace, "socket-timeout", stage=stage, remain_ms=_deadline_remaining_ms(deadline))
@@ -628,7 +655,7 @@ def portable_ftp_runner(target: str, timeout_s: int, username: str | None = None
     except (OSError, TimeoutError, ValueError) as error:
         return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details=_format_network_error(error))
     finally:
-        _close_socket(control_socket)
+        _close_socket(control_socket, trace=trace, target=f"{host}:{port}")
 
 
 def _telnet_strip_negotiation(handle, chunk: bytes) -> bytes:
@@ -736,7 +763,7 @@ def portable_telnet_runner(target: str, timeout_s: int, username: str | None = N
     except (OSError, TimeoutError, ValueError) as error:
         return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details=_format_network_error(error))
     finally:
-        _close_socket(handle)
+        _close_socket(handle, trace=trace, target=f"{host}:{port}")
 
 
 def _parse_http_target(target: str) -> tuple[str, str, int, str]:
@@ -823,7 +850,7 @@ def _portable_http_runner_socket(method: str, target: str, timeout_s: int, heade
             details=_format_network_error(error),
         )
     finally:
-        _close_socket(handle)
+        _close_socket(handle, trace=trace, target=f"{host}:{port}")
 
 
 def build_executor(ping_runner=None, http_runner=None, ftp_runner=None, telnet_runner=None, trace_sink=None):
@@ -862,32 +889,50 @@ def build_executor(ping_runner=None, http_runner=None, ftp_runner=None, telnet_r
         if trace_sink is not None:
             def trace(event, **fields):
                 return trace_sink(definition, event, fields)
-        return execute_check(
-            definition,
-            now_s,
-            lambda target, timeout_s: ping(target, timeout_s, trace=trace),
-            lambda method, target, timeout_s, username=None, password=None: http(
-                method,
-                target,
-                timeout_s,
-                username,
-                password,
-                trace=trace,
-            ),
-            lambda target, timeout_s, username=None, password=None: ftp(
-                target,
-                timeout_s,
-                username=username,
-                password=password,
-                trace=trace,
-            ),
-            lambda target, timeout_s, username=None, password=None: telnet(
-                target,
-                timeout_s,
-                username=username,
-                password=password,
-                trace=trace,
-            ),
-        )
+        if trace is not None:
+            trace("probe-start", timeout_s=definition.timeout_s)
+        try:
+            result = execute_check(
+                definition,
+                now_s,
+                lambda target, timeout_s: ping(target, timeout_s, trace=trace),
+                lambda method, target, timeout_s, username=None, password=None: http(
+                    method,
+                    target,
+                    timeout_s,
+                    username,
+                    password,
+                    trace=trace,
+                ),
+                lambda target, timeout_s, username=None, password=None: ftp(
+                    target,
+                    timeout_s,
+                    username=username,
+                    password=password,
+                    trace=trace,
+                ),
+                lambda target, timeout_s, username=None, password=None: telnet(
+                    target,
+                    timeout_s,
+                    username=username,
+                    password=password,
+                    trace=trace,
+                ),
+            )
+        except Exception as error:
+            if trace is not None:
+                trace("probe-error", detail=_normalize_error_text(error))
+            raise
+        if trace is not None:
+            observation = result.observations[0] if result.observations else None
+            trace(
+                "probe-end",
+                status=getattr(getattr(observation, "status", None), "value", getattr(observation, "status", "?")),
+                detail=getattr(observation, "details", "") if observation is not None else "",
+                latency_ms=getattr(observation, "latency_ms", None) if observation is not None else None,
+                observations=len(result.observations),
+                replace_source=result.replace_source,
+            )
+        return result
 
     return executor

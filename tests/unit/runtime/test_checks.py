@@ -198,6 +198,36 @@ def test_build_executor_uses_supplied_runners():
     assert result.observations[0].status == Status.OK
 
 
+def test_build_executor_trace_sink_emits_probe_lifecycle_events():
+    definition = build_runtime_definitions(
+        {
+            "checks": [
+                {
+                    "id": "router",
+                    "name": "Router",
+                    "type": "PING",
+                    "target": "192.168.1.1",
+                    "interval_s": 15,
+                    "timeout_s": 10,
+                }
+            ]
+        }
+    )[0]
+    captured = []
+
+    executor = build_executor(
+        ping_runner=lambda target, timeout_s: PingProbeResult(ok=True, latency_ms=12.0, details="reachable"),
+        trace_sink=lambda definition, event, fields: captured.append((definition.identifier, event, dict(fields))),
+    )
+
+    executor(definition, 10.0)
+
+    assert captured[0] == ("router", "probe-start", {"timeout_s": 10})
+    assert captured[-1][0] == "router"
+    assert captured[-1][1] == "probe-end"
+    assert captured[-1][2]["status"] == "OK"
+
+
 def test_build_executor_uses_supplied_ftp_and_telnet_runners():
     ftp_definition = build_runtime_definitions(
         {
@@ -735,7 +765,8 @@ def test_open_socket_uses_deadline_aware_connect_and_trace(monkeypatch):
 
     assert opened is socket_handle
     assert socket_handle.blocking == [False]
-    assert trace_events[0][0] == "socket-open"
+    assert trace_events[0][0] == "dns-start"
+    assert any(event == "socket-open" for event, _ in trace_events)
     assert trace_events[-1][0] == "socket-ready"
 
 

@@ -248,12 +248,91 @@
     - `artifacts/vivipulse/20260411T111649Z-reproduce`
   - result:
     - reproduced transport failures on `pixel4-adb` only: `6` repeated `refused` failures at `192.168.1.185:8081`
+
+## 2026-04-11T19:22:00Z
+
+- Extended the shared probe execution seam with machine-parseable transport tracing.
+  - Added `src/vivipi/core/probe_trace.py` with:
+    - `ProbeTraceCollector`
+    - `ProbeTraceJsonlWriter`
+    - JSONL loading helpers
+    - parity comparison helpers for request ordering, lifecycle pattern, and relative timing deltas
+- Updated `src/vivipi/runtime/checks.py` so shared probe runners now emit:
+  - `probe-start` / `probe-end`
+  - `dns-start` / `dns-result` / `dns-error`
+  - `socket-open` / `socket-ready` / `socket-close` / `socket-error`
+  - `socket-send` / `socket-recv` / `socket-timeout`
+- Updated `src/vivipi/runtime/app.py` and `firmware/runtime.py` so the Pico runtime can forward the same low-level events to a JSONL serial sink when `service.probe_trace_jsonl: true` or `observability.probe_trace_jsonl: true` is present in the runtime config.
+- Updated `src/vivipi/tooling/vivipulse.py`:
+  - added `--parity-mode`
+  - added `--firmware-trace PATH`
+  - writes `transport-trace.jsonl`, `parity-mode.txt`, and `parity-summary.txt` artifacts per run
+  - includes parity data in JSON output when a firmware trace is supplied
+- Added `scripts/vivipulse_stress_test.sh` as the deterministic host-side parity soak entrypoint.
+- Added focused tests for the new functionality:
+  - `tests/unit/core/test_probe_trace.py`
+  - extended `tests/unit/runtime/test_checks.py`
+  - extended `tests/unit/tooling/test_vivipulse_cli.py`
+- Validation:
+  - `pytest -o addopts='' tests/unit/core/test_probe_trace.py tests/unit/runtime/test_checks.py tests/unit/tooling/test_vivipulse_cli.py tests/unit/core/test_vivipulse.py`
+  - result: `79 passed`
+- Live parity-mode evidence gathered from the current network:
+  - `scripts/vivipulse --build-config config/build-deploy.local.yaml --mode local --parity-mode --json`
+    - artifact: `artifacts/vivipulse/20260411T191725Z-local`
+    - result: `7` requests, `0` transport failures
+  - `scripts/vivipulse --build-config config/build-deploy.local.yaml --mode reproduce --duration 30s --parity-mode --json`
+    - artifact: `artifacts/vivipulse/20260411T191747Z-reproduce`
+    - result: `21` requests, `0` transport failures
+  - `scripts/vivipulse --build-config config/build-deploy.local.yaml --mode reproduce --duration 30s --parity-mode --json`
+    - artifact: `artifacts/vivipulse/20260411T191843Z-reproduce`
+    - result: `21` requests, `0` transport failures
+  - `scripts/vivipulse --build-config config/build-deploy.local.yaml --mode reproduce --duration 30s --parity-mode --json`
+    - artifact: `artifacts/vivipulse/20260411T191914Z-reproduce`
+    - result: `16` requests, `1` transport failure, blocked host `192.168.1.13`
+- Failure-boundary evidence from `artifacts/vivipulse/20260411T191914Z-reproduce`:
+  - last U64 success before failure: `u64-rest` then `u64-telnet`
+  - first transport failure: `u64-ftp`
+  - host transport trace shows DNS success and `socket-open` for `192.168.1.13:21`, followed by an `8 s` connect timeout rather than immediate refusal or route failure
+- Current blocker state:
+  - the host-side failure is intermittent rather than deterministic, so Phase 3 is still open
+  - a fresh Pico JSONL transport trace has not yet been captured, so parity proof against the real firmware remains open
+  - the new wrapper script was validated end to end with `DURATION=10s bash scripts/vivipulse_stress_test.sh`; it exited `FAIL` with artifact `artifacts/vivipulse/20260411T192506Z-soak` after `3` transport failures, proving the script’s machine-verifiable fail gate is live and that the current environment is still unstable under short soak conditions
     - still did not reproduce any U64 or C64U transport failure in that 60-second window
     - `u64-rest`, `u64-ftp`, `u64-telnet`, `c64u-rest`, `c64u-ftp`, and `c64u-telnet` all remained successful throughout the aligned host run
 - Current conclusion:
   - host-side global serialization was one real difference and is now removed from `vivipulse`
   - after removing that difference, the host still does not reproduce the Ultimate failures seen from the Pico in the same time window
   - the remaining gap is therefore more likely in the Pico-side network stack or timing environment than in the shared direct probe definitions alone
+
+## 2026-04-11T23:11:03Z
+
+- Investigated the symlinked `1541ultimate` checkout directly to explain the full REST/FTP/TELNET collapse seen under aggressive same-host bursts.
+- Confirmed the relevant target-side constraints from source:
+  - `1541ultimate/software/network/socket_gui.cc`
+    - telnet listens with backlog `2`
+    - each accepted session spawns a FreeRTOS task
+    - completed and failed telnet sessions end in `vTaskSuspend(NULL)` instead of deleting the task
+    - the telnet listener returns on `accept()` error, so a transient accept failure can stop the service entirely until reboot
+  - `1541ultimate/software/network/ftpd.cc`
+    - FTP control listens with backlog `2`
+    - each control connection spawns a task
+    - passive-mode data sockets spawn an additional `FTP Data` task
+    - that passive accept task also ends in `vTaskSuspend(NULL)` instead of deleting itself
+  - `1541ultimate/software/network/config/lwipopts.h`
+    - `MEMP_NUM_NETCONN = 16`
+    - `MEMP_NUM_TCP_PCB = 30`
+    - `TCP_LISTEN_BACKLOG = 0`
+  - `1541ultimate/software/httpd/c-version/lib/server.h`
+    - `MAX_HTTP_CLIENT = 4`
+- Conclusion from source inspection:
+  - the full three-protocol collapse during a burst is best explained by shared TCP/task resource exhaustion rather than three independent application-level parser failures
+  - repeated telnet probes leak suspended tasks even when the client disconnects cleanly
+  - passive FTP probes leak suspended tasks as well
+  - once the shared pool is stressed, REST/FTP/TELNET can all fail together because they share the same lwIP/socket budget
+- Action taken in the ViviPi repo:
+  - updated `src/vivipi/tooling/vivipulse.py` research output so future `--ultimate-repo` summaries report the actual task-leak and lwIP-limit risks
+  - updated `src/vivipi/core/vivipulse.py` search-candidate generation so the safety candidate now explicitly disables same-host concurrency for 1541ultimate-style targets
+  - updated `docs/research/network/root-cause.md` to record the burst-collapse explanation and avoidance guidance
 
 ## 2026-04-11T15:10:00Z
 
@@ -315,7 +394,7 @@
   - `./build test` now passes functionally with `418 passed`
   - the repository still fails the global coverage gate at `94.66%` versus the required `96%`; that remaining gap is broader than the specific ADB/button/local-run fixes in this turn
 
-## 2026-04-11T18:06:40Z
+## 2026-04-11T18:31:00Z
 
 - Task: `fix-buttons phase-a ladder + step-1 assert`
 - Action:

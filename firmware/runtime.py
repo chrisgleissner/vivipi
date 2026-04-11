@@ -14,6 +14,7 @@ from vivipi.core.config import parse_probe_schedule_config
 from vivipi.core.display import normalize_display_config
 from vivipi.core.logging import bound_text
 from vivipi.core.models import DiagnosticEvent, DisplayMode, TransitionThresholds
+from vivipi.core.probe_trace import ProbeTraceCollector
 from vivipi.core.render import Frame
 from vivipi.runtime import state as runtime_state
 from vivipi.runtime import RuntimeApp, build_executor, build_runtime_definitions
@@ -160,6 +161,40 @@ def _safe_build_button_reader(button_reader_factory, buttons_config, input_contr
         return button_reader_factory(buttons_config, input_controller=input_controller), (), ()
     except Exception as error:
         return None, (_boot_diagnostic("BTN", "init failed"),), (("buttons", error),)
+
+
+class _SerialProbeTraceWriter:
+    def __init__(self):
+        self._lock = None
+        if hasattr(_thread, "allocate_lock"):
+            self._lock = _thread.allocate_lock()
+
+    def write(self, record):
+        if self._lock is not None:
+            self._lock.acquire()
+        try:
+            print(json.dumps(record.to_dict(), sort_keys=True))
+        finally:
+            if self._lock is not None:
+                self._lock.release()
+
+
+def _probe_trace_jsonl_enabled(config) -> bool:
+    if not isinstance(config, dict):
+        return False
+    for section_name in ("service", "observability"):
+        section = config.get(section_name)
+        if isinstance(section, dict) and section.get("probe_trace_jsonl") is True:
+            return True
+    return False
+
+
+def _build_probe_trace_sink(config):
+    if not _probe_trace_jsonl_enabled(config):
+        return None
+    writer = _SerialProbeTraceWriter()
+    collector = ProbeTraceCollector(writer.write, source="firmware", mode="runtime")
+    return collector.emit
 
 
 def _transition_thresholds_from_config(config):
@@ -491,9 +526,8 @@ def build_runtime_app(
         build_time=build_time_value,
     )
     trace_sink = getattr(app, "emit_probe_trace", None)
-    if getattr(app, "background_workers_enabled", False):
-        trace_sink = None
     app.executor = _build_executor_with_optional_trace(executor_factory, trace_sink)
+    app.probe_trace_sink = _build_probe_trace_sink(config)
     boot_logo_duration_s = float(boot_logo_min_s)
     if explicit_boot_logo_duration is not None:
         boot_logo_duration_s = max(float(boot_logo_min_s), float(display_config.get("boot_logo_duration_s", boot_logo_min_s)))

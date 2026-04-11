@@ -9,6 +9,7 @@ import pytest
 
 from vivipi.core.execution import CheckExecutionResult
 from vivipi.core.models import CheckDefinition, CheckObservation, CheckType, Status
+from vivipi.core.probe_trace import ProbeTraceCollector, ProbeTraceJsonlWriter
 from vivipi.tooling import vivipulse as tooling_vivipulse
 
 
@@ -75,6 +76,8 @@ def make_args(**overrides):
         "ultimate_repo": None,
         "debug": False,
         "json": False,
+        "parity_mode": False,
+        "firmware_trace": None,
     }
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
@@ -195,6 +198,8 @@ def test_inspect_ultimate_repo_and_summary_render(tmp_path):
         "software/network/socket_gui.cc",
         "software/network/httpd.cc",
         "software/httpd/c-version/lib/server.c",
+        "software/httpd/c-version/lib/server.h",
+        "software/network/config/lwipopts.h",
         "software/network/network_config.cc",
         "target/u64/nios2/ultimate/Makefile",
     ):
@@ -206,8 +211,11 @@ def test_inspect_ultimate_repo_and_summary_render(tmp_path):
     summary = tooling_vivipulse.render_firmware_research_summary(report)
 
     assert report.hints.recommended_same_host_backoff_ms == 1000
+    assert report.hints.recommended_allow_concurrent_same_host is False
     assert "Confirmed Facts:" in summary
     assert "Strong Inferences:" in summary
+    assert "MEMP_NUM_NETCONN = 16" in summary
+    assert "suspended FreeRTOS task" in summary
 
 
 def test_inspect_ultimate_repo_rejects_missing_path(tmp_path):
@@ -250,6 +258,7 @@ checks:
     assert payload["mode"] == "plan"
     assert artifact_dir.is_dir()
     assert (artifact_dir / "trace.jsonl").read_text(encoding="utf-8") == ""
+    assert (artifact_dir / "transport-trace.jsonl").read_text(encoding="utf-8") == ""
     assert "firmware.main.main -> firmware.runtime.run_forever" in (artifact_dir / "reuse-map.txt").read_text(encoding="utf-8")
 
 
@@ -295,6 +304,87 @@ def test_main_local_mode_runs_one_pass_without_extra_flags(tmp_path, monkeypatch
     assert payload["mode"] == "local"
     assert payload["outcome"]["request_count"] == 1
     assert artifact_dir.is_dir()
+
+
+def test_parity_profile_resets_search_knobs():
+    profile = tooling_vivipulse._parity_profile(
+        tooling_vivipulse.VivipulseProfile(
+            allow_concurrent_hosts=False,
+            allow_concurrent_same_host=False,
+            same_host_backoff_ms=1000,
+            pass_spacing_s=1.0,
+            same_host_spacing_ms=250,
+            check_order="network-heavy-first",
+            interval_scale_by_check_id={"alpha": 2.0},
+            disabled_check_ids=("beta",),
+        )
+    )
+
+    assert profile.same_host_backoff_ms == 1000
+    assert profile.pass_spacing_s == 0.0
+    assert profile.same_host_spacing_ms == 0
+    assert profile.check_order == "network-light-first"
+    assert profile.interval_scale_by_check_id == {}
+    assert profile.disabled_check_ids == ()
+
+
+def test_main_local_mode_writes_parity_summary_when_firmware_trace_is_provided(tmp_path, monkeypatch):
+    runtime_path = tmp_path / "config.json"
+    runtime_path.write_text(
+        json.dumps(
+            {
+                "checks": [
+                    {"id": "alpha", "name": "Alpha", "type": "PING", "target": "shared.local"},
+                ],
+                "probe_schedule": {"allow_concurrent_same_host": False, "same_host_backoff_ms": 250},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    firmware_trace_path = tmp_path / "firmware-trace.jsonl"
+    firmware_writer = ProbeTraceJsonlWriter(firmware_trace_path)
+    firmware_collector = ProbeTraceCollector(firmware_writer.write, source="firmware", mode="runtime")
+    definition = make_definition("alpha")
+    firmware_collector.emit(definition, "probe-start", {"timeout_s": 10})
+    firmware_collector.emit(definition, "probe-end", {"status": "OK", "detail": "reachable", "latency_ms": 10.0})
+    firmware_writer.close()
+
+    def fake_build_executor(trace_sink=None):
+        def executor(definition: CheckDefinition, observed_at_s: float):
+            if trace_sink is not None:
+                trace_sink(definition, "probe-start", {"timeout_s": definition.timeout_s})
+            result = success_result(definition, observed_at_s)
+            if trace_sink is not None:
+                trace_sink(definition, "probe-end", {"status": "OK", "detail": "reachable", "latency_ms": 10.0})
+            return result
+
+        return executor
+
+    monkeypatch.setattr(tooling_vivipulse, "build_executor", fake_build_executor)
+    output = io.StringIO()
+
+    exit_code = tooling_vivipulse.main(
+        [
+            "--runtime-config",
+            str(runtime_path),
+            "--mode",
+            "local",
+            "--artifacts-dir",
+            str(tmp_path / "artifacts"),
+            "--parity-mode",
+            "--firmware-trace",
+            str(firmware_trace_path),
+            "--json",
+        ],
+        output_stream=output,
+    )
+
+    payload = json.loads(output.getvalue())
+    artifact_dir = Path(payload["artifacts_dir"])
+
+    assert exit_code == 0
+    assert "Ordering match: True" in (artifact_dir / "parity-summary.txt").read_text(encoding="utf-8")
 
 
 def test_render_helpers_cover_empty_branches(tmp_path):
