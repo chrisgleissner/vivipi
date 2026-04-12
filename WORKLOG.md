@@ -249,6 +249,71 @@
   - result:
     - reproduced transport failures on `pixel4-adb` only: `6` repeated `refused` failures at `192.168.1.185:8081`
 
+## 2026-04-12T10:54:00Z
+
+- Replaced `PLANS.md` with a task-specific execution plan for the U64/C64U protocol health-check audit and fix pass.
+- Began Phase 1 and Phase 2 source inspection for the shared health-check runners used by both firmware and vivipulse.
+- Files inspected for current client behavior:
+  - `src/vivipi/runtime/checks.py`
+  - `src/vivipi/core/execution.py`
+  - `config/checks.local.yaml`
+- Files inspected for target-side server behavior:
+  - `1541ultimate/software/network/ftpd.cc`
+  - `1541ultimate/software/network/socket_gui.cc`
+  - `1541ultimate/software/httpd/c-version/lib/server.c`
+- Audit findings with file and line references:
+  - HTTP probe behavior is currently protocol-correct in both host and device paths. `portable_http_runner()` explicitly sets `Connection: close` at `src/vivipi/runtime/checks.py:288`, the device socket path sends `HTTP/1.0` plus `Connection: close` at `src/vivipi/runtime/checks.py:822-825`, reads the full response until EOF at `src/vivipi/runtime/checks.py:842`, and always closes the socket in `finally` via `_close_socket()` at `src/vivipi/runtime/checks.py:521-529` and `src/vivipi/runtime/checks.py:854`.
+  - The 1541ultimate HTTP server uses a small fixed client pool and explicitly closes sockets after each request. Evidence: `MAX_HTTP_CLIENT` pool usage and accept gating at `1541ultimate/software/httpd/c-version/lib/server.c:26`, `:74`, `:98-100`, and explicit `shutdown()` plus `close()` at `:204-206`.
+  - Telnet probe behavior is currently short-lived and explicitly closes its socket. `portable_telnet_runner()` opens one socket, reads the initial transcript, responds to IAC DO/DONT/WILL/WONT negotiation in `_telnet_strip_negotiation()` at `src/vivipi/runtime/checks.py:661-688`, and always closes the socket in `finally` at `src/vivipi/runtime/checks.py:764-765`.
+  - The 1541ultimate telnet server listens with backlog `2`, uses a `200 ms` receive timeout, prompts for a password when configured, and closes plus deletes the stream on disconnect. Evidence: `listen(sockfd, 2)` at `1541ultimate/software/network/socket_gui.cc:204`, `SO_RCVTIMEO` at `:218`, password prompt plus `IAC WILL ECHO` at `:55-56`, `str->close()` at `:123` and `:163`, and task teardown via `vTaskDelete(NULL)` at `:174`.
+  - FTP probe behavior is not protocol-correct enough for this task. `portable_ftp_runner()` currently accepts the `220` greeting and then sends `QUIT` immediately at `src/vivipi/runtime/checks.py:644-650`, ignoring provided `username` and `password` entirely even though the local U64/C64U checks configure them in `config/checks.local.yaml:9-24` and `:33-48`.
+  - The 1541ultimate FTP server only allows `USER`, `PASS`, and `QUIT` before authentication and returns `530 Not logged in` for commands like `PWD` until login succeeds. Evidence: `ftpd_last_unauthenticated_command_index = 2` at `1541ultimate/software/network/ftpd.cc:759`, unauthenticated command table entries at `:763-765`, authenticated-only `PWD` at `:771-772`, and `530` enforcement at `:818-819`.
+  - The 1541ultimate FTP server listens with backlog `2` and applies a `100 ms` receive timeout per accepted control socket. Evidence: `listen(sockfd, 2)` at `1541ultimate/software/network/ftpd.cc:187` and `SO_RCVTIMEO` at `:201`.
+  - Current defect ranking:
+    - High likelihood: FTP probe does not execute a valid login sequence despite configured credentials, so it is not exercising the authenticated control-channel path that the real server expects.
+    - Medium likelihood: because the FTP probe can disconnect before authentication, it provides weaker coverage and may interact differently with the server's task/auth state than a real minimal client.
+    - Low likelihood: HTTP and Telnet currently appear cleanup-correct from source inspection; no missing socket close was found in the shared client code.
+- Next step: implement the minimal FTP fix, add tests that prove `USER`/`PASS` or anonymous login plus `PWD` plus `QUIT`, and then validate against the real targets with vivipulse.
+
+## 2026-04-12T11:02:46Z
+
+- Replaced the first Bash repro draft with a trimmed U64-only script named `scripts/u64_connection_test.sh`.
+- Removed the extra host/port/url timeout knobs and the telnet fallback branch so the script now keeps only the requested essentials:
+  - `HOST`
+  - `FTP_USER`
+  - `FTP_PASS`
+  - `INTER_CALL_DELAY_MS`
+  - `INTER_ITERATION_DELAY_MS`
+- Kept the required protocol behavior intact:
+  - HTTP uses `curl` with `HTTP/1.0` and `Connection: close`
+  - Telnet uses `nc` for connect-and-disconnect
+  - FTP uses `curl --ftp-pasv` for login plus passive root listing
+
+## 2026-04-12T11:03:22Z
+
+- Made `scripts/u64_connection_test.sh` executable and validated its shell syntax with `bash -n`.
+- Ran a bounded live smoke test against `HOST=192.168.1.13`.
+- Observed repeated successful protocol lines from the trimmed script:
+  - HTTP `OK` with `HTTP 200`
+  - Telnet `OK` with `connected`
+  - FTP `OK` with `directory listed`
+
+## 2026-04-12T11:05:54Z
+
+- Updated `scripts/u64_connection_test.sh` to accept a minimal positional argument set:
+  - `HOST`
+  - `INTER_CALL_DELAY_MS`
+  - `INTER_ITERATION_DELAY_MS`
+- Added `-h` and `--help` usage output while keeping the existing environment-variable defaults intact.
+
+## 2026-04-12T11:06:37Z
+
+- Updated `scripts/u64_connection_test.sh` to log an iteration-start line before each loop pass.
+- The new line includes:
+  - iteration count
+  - elapsed runtime in seconds
+  - active host name
+
 ## 2026-04-11T19:22:00Z
 
 - Extended the shared probe execution seam with machine-parseable transport tracing.
@@ -353,6 +418,135 @@
     - preserved compatibility with plain-string button IDs when present
   - `src/vivipi/core/render.py`
     - restored visible overview selection highlighting via `inverted_row` for standard overview
+
+## 2026-04-12T11:29:13Z
+
+- Completed the protocol-check audit/fix pass for the shared runtime FTP probe and the standalone repro tools.
+- Shared runtime findings and fix status:
+  - the shared FTP probe in `src/vivipi/runtime/checks.py` now performs `USER` / `PASS`, passive-mode directory listing, transfer completion handling, and explicit `QUIT`
+  - focused runtime coverage for the corrected lifecycle remains in `tests/unit/runtime/test_checks.py`
+- Standalone tool outcome:
+  - replaced the earlier mixed implementation with a short pure Bash tool at `scripts/u64_connection_test.sh`
+  - added a short pure Python equivalent at `scripts/u64_connection_test.py`
+  - kept the interface aligned across both tools: positional `HOST`, `INTER_CALL_DELAY_MS`, `INTER_ITERATION_DELAY_MS`, plus environment-variable defaults and `-h` / `--help`
+- Final Bash FTP correction:
+  - identified a live mismatch where curl completed the listing with `226 Closing data connection` but the script still required `221 Goodbye`
+  - confirmed against the live U64 that curl supports explicit post-transfer teardown via `-Q '-QUIT'`
+  - updated the Bash FTP path to send `QUIT` explicitly so the Bash and Python implementations validate the same lifecycle on the real target
+- Validation completed:
+  - `bash -n scripts/u64_connection_test.sh` passed
+  - `python3 -m py_compile scripts/u64_connection_test.py` passed
+  - live U64 smoke test for `scripts/u64_connection_test.sh` at `HOST=192.168.1.13` produced repeated `OK` results for HTTP, Telnet, and FTP
+  - live U64 smoke test for `scripts/u64_connection_test.py` at `HOST=192.168.1.13` produced repeated `OK` results for HTTP, Telnet, and FTP
+  - post-smoke socket inspection with `ss -tan state established '( dst 192.168.1.13 )'` showed no lingering established sockets
+- Additional validation context:
+  - local mock good/bad services were used during development to exercise success and failure paths for the compact scripts
+  - the compact Bash FTP path depends on curl's built-in FTP control flow, which includes `PWD` before `NLST`; the minimal mock FTP server used during development does not implement that full command set, so the authoritative FTP validation was the live U64 itself
+- Remaining validation step in progress:
+  - started an isolated 10-minute live soak of `scripts/u64_connection_test.sh` against `192.168.1.13` in a dedicated terminal to confirm repeated checks do not render the U64 unresponsive
+
+## 2026-04-12T11:37:03Z
+
+- Updated both standalone U64 connection testers to reduce default pacing and quiet the normal success logs:
+  - `scripts/u64_connection_test.sh`
+  - `scripts/u64_connection_test.py`
+- Behavior change:
+  - default `INTER_CALL_DELAY_MS` is now `1`
+  - default `INTER_ITERATION_DELAY_MS` is now `1`
+  - quiet mode now logs only every `50th` iteration by default while still logging every `FAIL` immediately
+  - the success-log sampling interval is configurable through `LOG_EVERY_N_ITERATIONS`
+  - both scripts now accept `-v` / `--verbose` to restore per-iteration success logging
+- Validation:
+  - `bash -n scripts/u64_connection_test.sh` passed
+  - `python3 -m py_compile scripts/u64_connection_test.py` passed
+  - default quiet-mode failure checks against local bad mocks still emitted all HTTP, Telnet, and FTP failures immediately
+  - verbose mode against local good mocks produced per-iteration success output for both scripts
+  - quiet mode with `LOG_EVERY_N_ITERATIONS=5` against the live U64 emitted only the `5th` iteration success bundle for both scripts
+
+## 2026-04-12T11:44:35Z
+
+- Extended both standalone U64 connection testers with an explicit ICMP reachability step:
+  - `scripts/u64_connection_test.sh`
+  - `scripts/u64_connection_test.py`
+- Sequence change:
+  - the loop order is now `ping`, `http`, `ftp`, `telnet`
+- Implementation detail:
+  - the Bash script uses `ping -n -c 1 -W 2`
+  - the Python script uses `subprocess.run([... "ping", "-n", "-c", "1", "-W", "2", HOST])`
+- Validation:
+  - `bash -n scripts/u64_connection_test.sh` passed
+  - `python3 -m py_compile scripts/u64_connection_test.py` passed
+  - live verbose smoke against `192.168.1.13` showed the requested order for both scripts with successful `ping`, `http`, `ftp`, and `telnet` results
+
+## 2026-04-12T11:46:54Z
+
+- Reworked both standalone U64 connection testers to use flag-based Linux-style CLIs instead of positional arguments:
+  - `scripts/u64_connection_test.sh`
+  - `scripts/u64_connection_test.py`
+- New common option shape:
+  - `-H` / `--host`
+  - `-d` / `--delay-ms`
+  - `-n` / `--log-every`
+  - `-u` / `--ftp-user`
+  - `-P` / `--ftp-pass`
+  - `-v` / `--verbose`
+  - long options for `--http-path`, `--http-port`, `--ftp-port`, and `--telnet-port`
+- Validation:
+  - `bash -n scripts/u64_connection_test.sh` passed
+  - `python3 -m py_compile scripts/u64_connection_test.py` passed
+  - help output for both scripts now advertises only flagged options
+  - live flagged runs against `192.168.1.13` succeeded for both scripts using `--host 192.168.1.13 --delay-ms 1 -v`
+  - old positional forms are now rejected by both scripts
+
+## 2026-04-12T11:49:43Z
+
+- Added running average latency reporting to both standalone U64 connection testers:
+  - `scripts/u64_connection_test.sh`
+  - `scripts/u64_connection_test.py`
+- Behavior change:
+  - each emitted check result line now appends `avg_ms=<value>` for that protocol
+  - averages are maintained independently for `ping`, `http`, `ftp`, and `telnet`
+  - the average updates across iterations and appears whenever that check result line is emitted under the existing logging rules
+- Validation:
+  - `bash -n scripts/u64_connection_test.sh` passed
+  - `python3 -m py_compile scripts/u64_connection_test.py` passed
+  - live verbose runs against `192.168.1.13` showed `avg_ms=...` on the emitted `ping`, `http`, `ftp`, and `telnet` result lines for both scripts
+
+## 2026-04-12T11:51:59Z
+
+- Replaced the earlier running-average latency output in both standalone U64 connection testers with percentile tracking across the full test run:
+  - `scripts/u64_connection_test.sh`
+  - `scripts/u64_connection_test.py`
+- Behavior change:
+  - each check keeps a continuous latency sample history for `ping`, `http`, `ftp`, and `telnet`
+  - iteration summary lines now report cumulative `median`, `p90`, and `p99` latencies for each protocol
+  - verbose check lines now report only the single-check `latency_ms=<value>`
+  - failure lines also include `latency_ms=<value>` so error timing stays visible outside verbose mode
+  - the iteration summary line is emitted after the four checks so it reflects the current cumulative sample set
+- Validation:
+  - `bash -n scripts/u64_connection_test.sh` passed
+  - `python3 -m py_compile scripts/u64_connection_test.py` passed
+  - live verbose runs against `192.168.1.13` showed concise check lines with `latency_ms=...` and iteration lines with cumulative `*_median_ms`, `*_p90_ms`, and `*_p99_ms` fields for both scripts
+
+## 2026-04-12T11:59:12Z
+
+- Investigated and optimized the standalone telnet checks after observing persistent `~2.07 s` telnet latencies in the live iteration summaries.
+- Root cause findings from live measurement and target-side source inspection:
+  - the earlier clients kept reading until a `2 s` local socket timeout even after the U64 had already produced a usable telnet response
+  - direct live probing showed the U64 sends visible telnet data quickly, with the first response chunk arriving in roughly `30-40 ms`
+  - the server then emits a short burst with an internal gap of about `245 ms`, after which the earlier clients waited an unnecessary extra `2 s` for more data
+  - `1541ultimate/software/network/socket_gui.cc` confirms the telnet service itself uses a `200 ms` receive timeout on accepted sockets, which matches the interactive feel more closely than the earlier client-side `2 s` wait
+- Implementation changes:
+  - `scripts/u64_connection_test.sh`
+    - switched the telnet probe to `nc -n -t` so netcat answers telnet negotiation bytes correctly
+    - replaced the old long `nc -w 2` read with a bounded `0.20 s` idle window using `timeout`, which captures the initial responsive burst and then closes promptly
+  - `scripts/u64_connection_test.py`
+    - added explicit handling for telnet `IAC DO/DONT/WILL/WONT` negotiation bytes
+    - replaced the old `2 s` read timeout loop with a `0.20 s` idle cutoff after connection while preserving clean socket shutdown
+- Validation:
+  - live verbose run for the Bash script against `192.168.1.13` showed telnet success at `latency_ms=218`
+  - live verbose run for the Python script against `192.168.1.13` showed telnet success at `latency_ms=280`
+  - post-run socket inspection showed no lingering established client-side telnet sockets to `192.168.1.13:23`
     - added selected-cell inversion spans for compact overview
 - Updated focused behavioral coverage and traceability:
   - `tests/unit/firmware/test_firmware_input.py`
@@ -456,3 +650,12 @@
 - Result:
   - required documentation updates are in place and the remaining uncertainty is explicit: the code, tests, lint, firmware build, and deploy are complete; the only unresolved proof requires a human to press KEY0 / KEY1 and observe the OLED on the real board
 - Next step: operator reruns phases 1–4 on hardware and appends the resulting serial / OLED evidence
+
+## 2026-04-12T12:02:48Z
+
+- Updated `scripts/u64_connection_test.py` so `Ctrl-C` is treated as normal termination.
+- Implementation change:
+  - wrapped the top-level `main()` invocation in a `KeyboardInterrupt` handler that exits with status `0`
+- Validation:
+  - `python3 -m py_compile scripts/u64_connection_test.py` passed
+  - a supervised `SIGINT` test against `python3 scripts/u64_connection_test.py --host 192.168.1.13` exited with status `0` and emitted no traceback

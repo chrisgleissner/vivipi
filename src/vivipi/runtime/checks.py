@@ -639,22 +639,69 @@ def portable_ftp_runner(target: str, timeout_s: int, username: str | None = None
     deadline = _deadline_after_s(timeout_s)
 
     control_socket = None
+    data_socket = None
+    quit_sent = False
+    session_started = False
     try:
         control_socket = _open_socket_compat(host, port, timeout_s, deadline, trace=trace)
         code, response = _ftp_read_response(control_socket, deadline=deadline, trace=trace)
         if code != 220:
             return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details=response or "ftp unavailable")
+        session_started = True
+
+        login_username = username or "anonymous"
+        login_password = password or ""
+
+        _ftp_command_with_deadline(control_socket, f"USER {login_username}", deadline, trace=trace)
+        code, response = _ftp_read_response(control_socket, deadline=deadline, trace=trace)
+        if code == 331:
+            _ftp_command_with_deadline(control_socket, f"PASS {login_password}", deadline, trace=trace)
+            code, response = _ftp_read_response(control_socket, deadline=deadline, trace=trace)
+        if code != 230:
+            return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details=response or "login failed")
+
+        _ftp_command_with_deadline(control_socket, "PASV", deadline, trace=trace)
+        code, response = _ftp_read_response(control_socket, deadline=deadline, trace=trace)
+        if code != 227:
+            return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details=response or "passive mode failed")
+
+        data_host, data_port = _ftp_parse_pasv(response)
+        data_socket = _open_socket_compat(data_host, data_port, timeout_s, deadline, trace=trace)
+
+        _ftp_command_with_deadline(control_socket, "LIST /", deadline, trace=trace)
+        code, response = _ftp_read_response(control_socket, deadline=deadline, trace=trace)
+        if code not in {125, 150}:
+            return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details=response or "listing failed")
+
+        listing_payload = _recv_until_closed(data_socket, deadline, trace=trace, stage="ftp-data-recv")
+        listing_text = listing_payload.decode("utf-8", "replace").strip()
+        if listing_text and not _looks_like_ftp_listing(listing_text):
+            return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details="invalid directory listing")
+        _close_socket(data_socket, trace=trace, target=f"{data_host}:{data_port}")
+        data_socket = None
+
+        code, response = _ftp_read_response(control_socket, deadline=deadline, trace=trace)
+        if code not in {226, 250}:
+            return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details=response or "listing failed")
 
         _ftp_command_with_deadline(control_socket, "QUIT", deadline, trace=trace)
+        quit_sent = True
         _ftp_read_response(control_socket, deadline=deadline, trace=trace)
         return PingProbeResult(
             ok=True,
             latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
-            details="ftp greeting ready",
+            details="directory listed",
         )
     except (OSError, TimeoutError, ValueError) as error:
         return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details=_format_network_error(error))
     finally:
+        _close_socket(data_socket, trace=trace, target=None)
+        if control_socket is not None and session_started and not quit_sent and _deadline_remaining_ms(deadline) > 0:
+            try:
+                _ftp_command_with_deadline(control_socket, "QUIT", deadline, trace=trace)
+                _ftp_read_response(control_socket, deadline=deadline, trace=trace)
+            except (OSError, TimeoutError, ValueError):
+                pass
         _close_socket(control_socket, trace=trace, target=f"{host}:{port}")
 
 

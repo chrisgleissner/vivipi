@@ -1,3 +1,83 @@
+# Protocol Health Check Execution Plan
+
+Authoritative plan for auditing and fixing the U64/C64U health checks that can render the target permanently unresponsive.
+
+## Objective
+
+Prove whether the current HTTP, Telnet, and FTP health checks behave as well-formed protocol clients, fix any protocol or cleanup defects with minimal changes, validate sustained repeated execution against the real targets, and provide a standalone Linux Bash repro tool.
+
+## Rules
+
+- Keep changes minimal and protocol-correct.
+- Reuse the shared probe runner path used by both firmware and vivipulse.
+- Do not reduce protocol coverage.
+- Back every conclusion with source inspection, protocol behavior, and observable validation.
+- Keep this file current as the authoritative execution plan.
+
+## Phase 1: Code Audit
+
+Status: DONE
+Depends on: none
+
+Tasks:
+- [DONE] Locate the shared HTTP, FTP, and Telnet probe implementations used by firmware and vivipulse.
+- [DONE] Locate the real U64/C64U check definitions currently exercised in local config.
+- [DONE] Inspect current connection lifecycle behavior for HTTP, FTP, and Telnet in the shared runners.
+- [DONE] Inspect the 1541ultimate HTTP, FTP, and Telnet server implementations that the probes talk to.
+- [DONE] Record file-and-line findings in WORKLOG.md.
+
+## Phase 2: Defect Identification
+
+Status: DONE
+Depends on: Phase 1
+
+Tasks:
+- [DONE] Classify HTTP behavior as protocol-correct or defective.
+- [DONE] Classify Telnet behavior as protocol-correct or defective.
+- [DONE] Identify FTP protocol violations and cleanup gaps.
+- [DONE] Rank each defect by likelihood of contributing to target lockup.
+
+## Phase 3: Minimal Fix Implementation
+
+Status: DONE
+Depends on: Phase 2
+
+Tasks:
+- [DONE] Update the FTP probe to perform a real login sequence and explicit QUIT teardown.
+- [DONE] Ensure cleanup paths close sockets in all normal and exceptional flows.
+- [DONE] Add focused unit coverage for the corrected lifecycle behavior.
+
+## Phase 4: Validation
+
+Status: IN_PROGRESS
+Depends on: Phase 3
+
+Tasks:
+- [DONE] Run focused unit tests covering protocol lifecycle behavior.
+- [TODO] Re-run vivipulse against the real U64/C64U targets.
+- [IN_PROGRESS] Run a sustained repeated-check validation for at least 10 minutes and confirm the targets remain responsive.
+- [IN_PROGRESS] Record validation results and any remaining blockers in WORKLOG.md.
+
+## Phase 5: External Repro Tool
+
+Status: DONE
+Depends on: Phase 3
+
+Tasks:
+- [DONE] Create scripts/u64_connection_test.sh as a pure Bash repro loop using curl and nc.
+- [DONE] Add a feature-equivalent standalone Python version at scripts/u64_connection_test.py.
+- [DONE] Keep configuration centralized at the top of the script.
+- [DONE] Ensure each protocol interaction opens, performs a minimal valid exchange, and closes cleanly.
+- [DONE] Run the script in a bounded validation window and record the result in WORKLOG.md.
+
+## Exit Criteria
+
+- [ ] All shared protocol runners are classified with evidence.
+- [x] All identified defects are fixed.
+- [ ] Real repeated-check validation shows no target lockup for at least 10 minutes.
+- [x] scripts/u64_connection_test.sh exists and works with standard Linux tools.
+- [x] scripts/u64_connection_test.py exists and works with the Python standard library.
+- [x] WORKLOG.md contains the audit, fixes, and validation trail.
 # ViviPi Hardware Recovery Plan
 
 Authoritative execution plan for fixing the real Pico failure in `/home/chris/dev/vivipi`.

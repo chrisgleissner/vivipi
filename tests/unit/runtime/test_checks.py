@@ -776,23 +776,42 @@ def test_read_until_markers_returns_buffer_when_stream_ends():
     assert _read_until_markers(handle, (b"missing",)) == b"hello world"
 
 
-def test_portable_ftp_runner_accepts_valid_greeting_and_quits_cleanly(monkeypatch):
+def test_portable_ftp_runner_logs_in_uses_passive_listing_and_quits_cleanly(monkeypatch):
     control_socket = FakeSocket(
         [
             b"220 Ready\r\n",
+            b"331 Password required\r\n",
+            b"230 Logged in\r\n",
+            b"227 Entering Passive Mode (192,0,2,10,4,1)\r\n",
+            b"150 Opening data connection\r\n",
+            b"226 Closing data connection\r\n",
             b"221 Goodbye\r\n",
         ]
     )
-    monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: control_socket)
+    data_socket = FakeSocket([b"-rw-r--r-- 1 user ftp 0 Jan 1 file.txt\r\n", b""])
+
+    def fake_open_socket(host, port, timeout_s, **kwargs):
+        if port == 21:
+            return control_socket
+        if (host, port) == ("192.0.2.10", 1025):
+            return data_socket
+        raise AssertionError((host, port))
+
+    monkeypatch.setattr("vivipi.runtime.checks._open_socket", fake_open_socket)
 
     result = portable_ftp_runner("ftp://nas.example.local", 10, username="admin", password="secret")
 
     assert result.ok is True
-    assert result.details == "ftp greeting ready"
+    assert result.details == "directory listed"
     assert control_socket.sent == [
+        b"USER admin\r\n",
+        b"PASS secret\r\n",
+        b"PASV\r\n",
+        b"LIST /\r\n",
         b"QUIT\r\n",
     ]
     assert control_socket.closed is True
+    assert data_socket.closed is True
 
 
 def test_portable_http_runner_uses_manual_socket_deadline_path_on_micropython(monkeypatch):
@@ -847,6 +866,29 @@ def test_portable_ftp_runner_reports_greeting_failures(monkeypatch):
     greeting_failure = run_case([b"421 Down\r\n"], "421 Down")
 
     assert greeting_failure.details == "421 Down"
+
+
+def test_portable_ftp_runner_reports_login_failures(monkeypatch):
+    control_socket = FakeSocket(
+        [
+            b"220 Ready\r\n",
+            b"331 Password required\r\n",
+            b"530 Not logged in\r\n",
+            b"221 Goodbye\r\n",
+        ]
+    )
+    monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: control_socket)
+
+    result = portable_ftp_runner("ftp://nas.example.local", 10, username="admin", password="secret")
+
+    assert result.ok is False
+    assert result.details == "530 Not logged in"
+    assert control_socket.sent == [
+        b"USER admin\r\n",
+        b"PASS secret\r\n",
+        b"QUIT\r\n",
+    ]
+    assert control_socket.closed is True
 
 
 def test_portable_ftp_runner_reports_socket_errors(monkeypatch):
