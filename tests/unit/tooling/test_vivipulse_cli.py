@@ -10,6 +10,7 @@ import pytest
 from vivipi.core.execution import CheckExecutionResult
 from vivipi.core.models import CheckDefinition, CheckObservation, CheckType, Status
 from vivipi.core.probe_trace import ProbeTraceCollector, ProbeTraceJsonlWriter
+from vivipi.core.vivipulse import FailureBoundary, TraceEvent
 from vivipi.tooling import vivipulse as tooling_vivipulse
 
 
@@ -499,6 +500,86 @@ def test_render_helpers_cover_search_soak_and_parity_variants(tmp_path):
     assert tooling_vivipulse.render_parity_mode_summary(True, "trace.jsonl") == "Parity mode was enabled using firmware trace: trace.jsonl\n"
 
 
+def test_recovery_callback_and_summary_payload_cover_remaining_paths(tmp_path):
+    output = io.StringIO()
+    args = make_args(resume_after_recovery=True)
+    callback = tooling_vivipulse._recovery_callback_factory(args, lambda prompt: "resume", output)
+    boundary = FailureBoundary(
+        target="switch.local",
+        probe_host_key="switch.local",
+        last_success=TraceEvent(
+            wall_time="start",
+            monotonic_s=1.0,
+            sequence=1,
+            target_sequence=1,
+            mode="reproduce",
+            pass_index=1,
+            check_id="alpha",
+            check_name="ALPHA",
+            check_type="PING",
+            target="switch.local",
+            probe_host_key="switch.local",
+            timeout_s=10,
+            same_host_backoff_ms=250,
+            called_function_path="path",
+            latency_ms=1.0,
+            observation_status="OK",
+            failure_class="success",
+            response_summary="reachable",
+            raw_detail="reachable",
+        ),
+        first_failure=TraceEvent(
+            wall_time="end",
+            monotonic_s=2.0,
+            sequence=2,
+            target_sequence=2,
+            mode="reproduce",
+            pass_index=1,
+            check_id="alpha",
+            check_name="ALPHA",
+            check_type="PING",
+            target="switch.local",
+            probe_host_key="switch.local",
+            timeout_s=10,
+            same_host_backoff_ms=250,
+            called_function_path="path",
+            latency_ms=2.0,
+            observation_status="FAIL",
+            failure_class="refused",
+            response_summary="refused",
+            raw_detail="refused",
+        ),
+    )
+
+    assert callback(boundary) is True
+    assert "restart the affected service or power-cycle the device" in output.getvalue()
+
+    plan = tooling_vivipulse.build_plan_view((make_definition("alpha"),), tooling_vivipulse.VivipulseProfile())
+    outcome = tooling_vivipulse.RunOutcome(
+        mode="plan",
+        profile=tooling_vivipulse.VivipulseProfile(),
+        started_at="start",
+        completed_at="end",
+        trace_events=(),
+        failure_boundaries=(),
+        selected_definition_ids=("alpha",),
+        blocked_host_keys=("device.local",),
+    )
+    resolved = tooling_vivipulse.ResolvedInput(
+        definitions=(make_definition("alpha"),),
+        profile=tooling_vivipulse.VivipulseProfile(),
+        runtime_config={},
+        input_kind="runtime-config",
+        input_path=tmp_path / "config.json",
+        parser_reuse=("json.loads",),
+    )
+
+    payload = tooling_vivipulse._summary_payload(mode="plan", artifacts_dir=tmp_path, resolved=resolved, plan=plan, outcome=outcome)
+
+    assert payload["plan"]["probe_schedule"]["allow_concurrent_hosts"] is False
+    assert payload["outcome"]["blocked_host_keys"] == ["device.local"]
+
+
 def test_summary_payload_includes_search_and_parity_data(tmp_path):
     resolved = tooling_vivipulse.ResolvedInput(
         definitions=(make_definition("alpha"),),
@@ -826,3 +907,70 @@ def test_main_soak_mode_runs_duration(tmp_path, monkeypatch):
 
     assert exit_code == 0
     assert "Requested duration seconds: 15.0" in (next((tmp_path / "artifacts").iterdir()) / "soak-summary.txt").read_text(encoding="utf-8")
+
+
+def test_main_reproduce_mode_runs_duration_and_parity_trace(tmp_path, monkeypatch):
+    runtime_path = tmp_path / "config.json"
+    runtime_path.write_text(
+        json.dumps({"checks": [{"id": "alpha", "name": "Alpha", "type": "PING", "target": "device.local"}]}),
+        encoding="utf-8",
+    )
+    firmware_trace = tmp_path / "firmware.jsonl"
+    firmware_trace.write_text("{}\n", encoding="utf-8")
+    outcome = tooling_vivipulse.RunOutcome(
+        mode="reproduce",
+        profile=tooling_vivipulse.VivipulseProfile(),
+        started_at="start",
+        completed_at="end",
+        trace_events=(),
+        failure_boundaries=(),
+        selected_definition_ids=("alpha",),
+        blocked_host_keys=(),
+    )
+
+    class FakeRunner:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def run_duration(self, duration_s):
+            assert duration_s == 5.0
+            return outcome
+
+        def run_passes(self, passes):
+            raise AssertionError("run_passes should not be used")
+
+    monkeypatch.setattr(tooling_vivipulse, "HostProbeRunner", FakeRunner)
+    monkeypatch.setattr(tooling_vivipulse, "load_probe_trace_records", lambda path: ())
+    monkeypatch.setattr(
+        tooling_vivipulse,
+        "compare_probe_traces",
+        lambda reference, candidate: SimpleNamespace(
+            request_count_match=True,
+            ordering_match=True,
+            lifecycle_match=True,
+            timing_within_tolerance=True,
+            timing_tolerance_ratio=0.05,
+            max_timing_delta_ratio=0.0,
+            lifecycle_differences=(),
+            to_dict=lambda: {"ordering_match": True},
+        ),
+    )
+
+    exit_code = tooling_vivipulse.main(
+        [
+            "--runtime-config",
+            str(runtime_path),
+            "--mode",
+            "reproduce",
+            "--duration",
+            "5s",
+            "--firmware-trace",
+            str(firmware_trace),
+            "--json",
+            "--artifacts-dir",
+            str(tmp_path / "artifacts"),
+        ],
+        output_stream=io.StringIO(),
+    )
+
+    assert exit_code == 0

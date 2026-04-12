@@ -716,6 +716,41 @@ def test_host_probe_runner_internal_paths_cover_blocked_spacing_and_parallel_gua
     assert parallel_calls == [(("alpha",), 3)]
 
 
+def test_vivipulse_profile_and_runner_cover_remaining_validation_and_spacing_paths():
+    with pytest.raises(ValueError, match="must be one of"):
+        VivipulseProfile(check_order="unknown")
+    with pytest.raises(ValueError, match="non-empty strings"):
+        VivipulseProfile(interval_scale_by_check_id={" ": 2.0})
+    with pytest.raises(ValueError, match="at least 1.0"):
+        VivipulseProfile(interval_scale_by_check_id={"alpha": 0.5})
+
+    unrelated_result = CheckExecutionResult(
+        source_identifier="alpha",
+        observations=(
+            CheckObservation(identifier="beta", name="BETA", status=Status.OK, details="ok"),
+            CheckObservation(identifier="gamma", name="GAMMA", status=Status.OK, details="ok"),
+        ),
+    )
+    assert vivipulse_core._source_observation(make_definition("alpha"), unrelated_result) is None
+
+    clock = FakeClock()
+    definition = make_definition("alpha", target="shared.local")
+    runner = HostProbeRunner(
+        (definition,),
+        lambda check, observed_at_s: success_result(check, observed_at_s),
+        "reproduce",
+        VivipulseProfile(pass_spacing_s=0.25),
+        wall_time_provider=clock.wall,
+        monotonic_time_provider=clock.monotonic,
+        sleep=clock.sleep,
+    )
+
+    outcome = runner.run_passes(2)
+
+    assert len(outcome.trace_events) == 2
+    assert clock.sleeps == [0.25]
+
+
 def test_run_search_prefers_the_first_stable_candidate():
     definitions = (make_definition("alpha"),)
     base_profile = VivipulseProfile(allow_concurrent_same_host=True, same_host_backoff_ms=250)

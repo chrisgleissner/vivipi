@@ -244,3 +244,122 @@ def test_probe_trace_compare_detects_lifecycle_and_timing_differences():
     assert comparison.timing_within_tolerance is False
     assert comparison.lifecycle_differences
     assert "Lifecycle differences:" in summary
+
+
+def test_probe_trace_thread_and_sequence_helpers_cover_remaining_paths(monkeypatch, tmp_path):
+    class FakeLock:
+        def __init__(self):
+            self.acquired = 0
+            self.released = 0
+
+        def acquire(self):
+            self.acquired += 1
+
+        def release(self):
+            self.released += 1
+
+    fake_lock = FakeLock()
+
+    class FakeThreadModule:
+        @staticmethod
+        def allocate_lock():
+            return fake_lock
+
+        @staticmethod
+        def get_ident():
+            raise RuntimeError("broken thread id")
+
+    class FakeThreading:
+        @staticmethod
+        def get_ident():
+            return 77
+
+    monkeypatch.setattr(probe_trace, "threading", None)
+    monkeypatch.setattr(probe_trace, "_thread", FakeThreadModule)
+    assert probe_trace._allocate_lock() is fake_lock
+    assert probe_trace._lock_context(fake_lock) is True
+    assert fake_lock.acquired == 1
+
+    monkeypatch.setattr(probe_trace, "threading", FakeThreading)
+    assert probe_trace._current_thread_id() == "77"
+    assert probe_trace._jsonable([b"abc", {1: "x"}]) == ["abc", {"1": "x"}]
+    monkeypatch.setattr(probe_trace, "threading", None)
+
+    definition = make_definition("alpha")
+    records = []
+    collector = ProbeTraceCollector(
+        records.append,
+        source="host",
+        mode="local",
+        wall_time_provider=lambda: 1.0,
+        monotonic_time_provider=lambda: 10.0,
+    )
+    collector.lock = fake_lock
+
+    collector.emit(definition, "probe-start", {"timeout_s": 10})
+    collector.emit(definition, "socket-send", {"stage": "http-send", "bytes_sent": 10})
+    collector.emit(definition, "probe-error", {"detail": "boom"})
+
+    assert probe_trace._sequence_for(tuple(records), "socket-send") == ("alpha",)
+    assert collector.request_context_by_thread == {}
+    assert fake_lock.released >= 2
+
+    path = tmp_path / "trace.jsonl"
+    path.write_text(
+        "\n".join(
+            [
+                json.dumps({"trace_kind": "probe_transport", "request_id": "", "check_id": "alpha", "event": "probe-error", "raw_fields": []}),
+                "{invalid}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    loaded = load_probe_trace_records(path)
+    assert loaded[0].raw_fields == {}
+    assert probe_trace._request_traces(()) == ()
+
+
+def test_probe_trace_compare_skips_timing_when_probe_start_is_missing():
+    reference = (
+        probe_trace.ProbeTraceRecord(
+            source="firmware",
+            mode="runtime",
+            wall_time="2026-01-01T00:00:00.000000Z",
+            monotonic_s=1.0,
+            sequence=1,
+            request_index=1,
+            request_id="alpha:1",
+            thread_id="main",
+            check_id="alpha",
+            check_name="ALPHA",
+            check_type="HTTP",
+            target="http://a",
+            probe_host_key="a",
+            event="probe-error",
+        ),
+    )
+    candidate = (
+        probe_trace.ProbeTraceRecord(
+            source="host",
+            mode="local",
+            wall_time="2026-01-01T00:00:00.000000Z",
+            monotonic_s=2.0,
+            sequence=1,
+            request_index=1,
+            request_id="alpha:1",
+            thread_id="main",
+            check_id="alpha",
+            check_name="ALPHA",
+            check_type="HTTP",
+            target="http://a",
+            probe_host_key="a",
+            event="probe-error",
+        ),
+    )
+
+    comparison = compare_probe_traces(reference, candidate)
+
+    assert comparison.request_count_match is True
+    assert comparison.max_timing_delta_ratio is None
+    assert comparison.timing_within_tolerance is True

@@ -259,6 +259,26 @@ def test_parse_checks_config_rejects_non_mapping_root():
         parse_checks_config([])
 
 
+def test_parse_probe_schedule_config_validates_mapping_and_boolean_values():
+    policy = parse_probe_schedule_config(
+        {
+            "allow_concurrent_hosts": "false",
+            "allow_concurrent_same_host": "yes",
+            "same_host_backoff_ms": 900,
+        }
+    )
+
+    assert policy.allow_concurrent_hosts is False
+    assert policy.allow_concurrent_same_host is True
+    assert policy.same_host_backoff_ms == 900
+
+    with pytest.raises(ValueError, match="probe_schedule must be a mapping"):
+        parse_probe_schedule_config([])
+
+    with pytest.raises(ValueError, match="probe_schedule.allow_concurrent_hosts must be a boolean"):
+        parse_probe_schedule_config({"allow_concurrent_hosts": object()})
+
+
 def test_parse_checks_config_rejects_non_string_auth_fields():
     with pytest.raises(ValueError, match="username must be a string"):
         parse_checks_config(

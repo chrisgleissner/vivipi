@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import runpy
+import subprocess
 import sys
 import zipfile
 from pathlib import Path
@@ -12,6 +13,7 @@ from vivipi.tooling import build_deploy
 from vivipi.tooling.build_deploy import (
     _clear_generated_release_assets,
     _copy_release_tree,
+    _invoke_run_command,
     _is_loopback_host,
     _parse_brightness,
     _parse_column_separator,
@@ -22,6 +24,7 @@ from vivipi.tooling.build_deploy import (
     _release_version_from_wheel,
     _resolve_checks_path,
     _resolve_release_wheel,
+    _run_mpremote_command,
     _wrap_with_dialout,
     build_firmware_bundle,
     build_service_bundle,
@@ -405,6 +408,67 @@ def test_load_build_deploy_settings_allows_missing_service_base_url(tmp_path: Pa
 
     assert settings["wifi"]["ssid"] == "TestWifi"
     assert settings["service"] == {}
+
+
+def test_invoke_run_command_and_mpremote_recovery_cover_fallback_paths(monkeypatch):
+    calls = []
+
+    def fake_run_command(command, check, timeout=None):
+        calls.append((tuple(command), check, timeout))
+        if timeout is not None:
+            raise TypeError("timeout unsupported")
+        return "ok"
+
+    assert _invoke_run_command(fake_run_command, ["mpremote", "fs", "ls"], check=True, timeout=5) == "ok"
+    assert calls == [(("mpremote", "fs", "ls"), True, 5), (("mpremote", "fs", "ls"), True, None)]
+
+    with pytest.raises(TypeError, match="other failure"):
+        _invoke_run_command(lambda command, check, timeout=None: (_ for _ in ()).throw(TypeError("other failure")), ["cmd"], check=True, timeout=1)
+
+    sleep_calls = []
+    monkeypatch.setattr(build_deploy.time, "sleep", lambda value: sleep_calls.append(value))
+    attempt_log = []
+
+    def flaky_run_command(command, check, timeout=None):
+        attempt_log.append((tuple(command), check, timeout))
+        if "soft-reset" in command:
+            raise subprocess.TimeoutExpired(command, timeout)
+        if len([entry for entry in attempt_log if entry[1] is True]) == 1:
+            raise subprocess.CalledProcessError(1, command)
+        return "recovered"
+
+    assert _run_mpremote_command(["mpremote", "fs", "ls"], run_command=flaky_run_command, recovery_port="auto", attempts=1) == "recovered"
+    assert sleep_calls == [1.0]
+
+    def always_fail(command, check, timeout=None):
+        raise subprocess.CalledProcessError(1, command)
+
+    with pytest.raises(subprocess.CalledProcessError):
+        _run_mpremote_command(["mpremote", "fs", "ls"], run_command=always_fail, recovery_port="auto", attempts=0)
+
+
+def test_normalize_probe_schedule_settings_validates_non_mapping(tmp_path: Path):
+    config_path = tmp_path / "build-deploy.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "device:",
+                "  board: pico2w",
+                "  display:",
+                "    type: waveshare-pico-oled-1.3",
+                "wifi:",
+                "  ssid: ${VIVIPI_WIFI_SSID}",
+                "  password: ${VIVIPI_WIFI_PASSWORD}",
+                "probe_schedule: invalid",
+                "checks_config: checks.yaml",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "checks.yaml").write_text("checks: []\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="probe_schedule must be a mapping"):
+        load_build_deploy_settings(config_path, env=FIXTURE_ENV)
 
 
 def test_load_build_deploy_settings_validates_display_limits(tmp_path: Path):
