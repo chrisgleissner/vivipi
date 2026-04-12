@@ -752,6 +752,51 @@ def test_runtime_app_queues_probe_traces_from_background_workers_and_drains_them
     assert app.pending_probe_traces == []
     assert any(line.startswith("[INFO][PROBE] socket-open") and "id=router" in line for line in app.get_logs())
 
+
+def test_runtime_app_probe_trace_overlay_and_button_edge_paths_cover_remaining_branches():
+    definition = make_definition("router", check_type=CheckType.HTTP)
+    trace_calls = []
+    app = RuntimeApp(
+        definitions=(definition,),
+        executor=lambda definition, now_s: CheckExecutionResult(source_identifier=definition.identifier, observations=()),
+        display=FakeDisplay(),
+        page_interval_s=0,
+    )
+    app.probe_trace_sink = lambda definition, event, fields: trace_calls.append((definition.identifier, event, dict(fields)))
+    app.background_workers_enabled = False
+
+    app.emit_probe_trace(definition, "socket-wait", {"remain_ms": 120})
+
+    assert trace_calls == [("router", "socket-wait", {"remain_ms": 120})]
+    assert any("remain_ms=120" in line for line in app.get_logs())
+
+    app.tick(0.0)
+    app._set_feedback("HELLO", 1.0, duration_s=1.0)
+
+    assert app.render_once(1.1) == "overlay"
+
+    app.debug_mode = True
+    app._assert_debug_invariants()
+
+    seen_buttons = []
+    app.now_provider = lambda: 1.2
+    app.input_controller = SimpleNamespace(apply=lambda state, button, held_ms: seen_buttons.append(button) or state)
+    app._apply_button_events((ButtonEvent(button="not-a-button", held_ms=20),))
+
+    assert seen_buttons == ["not-a-button"]
+
+
+def test_runtime_app_queue_check_ignores_duplicate_inflight_background_work():
+    definition = make_definition("router")
+    app = RuntimeApp(definitions=(definition,), executor=lambda definition, now_s: None, display=FakeDisplay(), page_interval_s=0)
+    app.background_workers_enabled = True
+    app.background_lock = runtime_app_module._allocate_lock()
+    app.inflight_check_ids.add(definition.identifier)
+
+    app._queue_check(definition, 1.0, manual=True)
+
+    assert app.pending_checks_by_worker == {}
+
 def test_runtime_app_manual_control_overlay_feedback_and_propagation_paths():
     definition = make_definition("router")
     app = RuntimeApp(definitions=(definition,), executor=lambda definition, now_s: None, display=FakeDisplay(), page_interval_s=0, page_size=2)

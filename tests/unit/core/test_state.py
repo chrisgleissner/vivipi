@@ -1,5 +1,6 @@
 from vivipi.core.models import AppState, CheckObservation, CheckRuntime, DiagnosticEvent, DisplayMode, Status, TransitionThresholds
 from vivipi.core.state import (
+    _sorted_selected_index,
     apply_observation,
     integrate_observations,
     move_selection,
@@ -49,6 +50,19 @@ def test_immediate_failure_threshold_can_replace_ok_with_fail():
     assert updated.status == Status.FAIL
 
 
+def test_failure_thresholds_can_remain_unknown_before_degraded():
+    runtime = make_check("Router", status=Status.OK)
+    thresholds = TransitionThresholds(failures_to_degraded=2, failures_to_failed=3)
+
+    updated = apply_observation(
+        runtime,
+        CheckObservation(identifier="router", name="Router", status=Status.FAIL),
+        thresholds,
+    )
+
+    assert updated.status == Status.UNKNOWN
+
+
 def test_success_recovers_from_fail_and_unknown():
     failed = CheckRuntime(
         identifier="router",
@@ -79,6 +93,17 @@ def test_apply_observation_coerces_string_status_values():
     )
 
     assert updated.status == Status.OK
+
+
+def test_apply_observation_treats_invalid_status_values_as_unknown():
+    runtime = make_check("Router", status=Status.FAIL)
+
+    updated = apply_observation(
+        runtime,
+        CheckObservation(identifier="router", name="Router", status="not-a-real-status"),
+    )
+
+    assert updated.status == Status.UNKNOWN
 
 
 def test_integrate_observations_recovers_fail_to_ok_without_retaining_stale_status():
@@ -215,6 +240,14 @@ def test_move_selection_on_empty_state_keeps_no_selection():
     moved = move_selection(AppState(), 1)
 
     assert moved.selected_id is None
+
+
+def test_selection_helpers_cover_empty_and_reverse_wrap_paths():
+    assert _sorted_selected_index(AppState()) is None
+
+    state = AppState(checks=(make_check("Alpha"), make_check("Bravo")), selected_id="bravo")
+
+    assert would_wrap_selection(state, step=-1) is False
 
 
 def test_move_selection_recovers_from_missing_selected_identifier():
