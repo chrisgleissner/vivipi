@@ -11,7 +11,9 @@ try:
     from displays.waveshare_epaper import WaveshareEPaper213BV4Display
     from displays.waveshare_epaper_mono import WaveshareEPaperMonoDisplay
     from displays.waveshare_epaper_tricolor import WaveshareEPaperTriColorDisplay
-except ImportError:  # pragma: no cover - used by CPython tests
+except ImportError as error:  # pragma: no cover - used by CPython tests
+    if not str(getattr(error, "name", "")).startswith("displays"):
+        raise
     from firmware.displays.sh1107 import SH1107Display
     from firmware.displays.ssd1305 import SSD1305Display
     from firmware.displays.st77xx import ST77xxDisplay

@@ -175,7 +175,11 @@ run_ci_workflow() {
     run_python_module pytest
     require_runtime_env
     with_wifi_env
-    run_python_module vivipi.tooling.build_deploy build-firmware --config "$CONFIG_PATH" --output-dir "$OUTPUT_DIR"
+    local args=(vivipi.tooling.build_deploy build-firmware --config "$CONFIG_PATH" --output-dir "$OUTPUT_DIR")
+    if should_prefer_local_config; then
+        args+=(--prefer-local-config)
+    fi
+    run_python_module "${args[@]}"
 }
 
 build_firmware_bundle() {

@@ -2,11 +2,8 @@ from __future__ import annotations
 
 import os
 import re
-from pathlib import Path
 
-import yaml
-
-from vivipi.core.models import CheckDefinition, CheckType
+from vivipi.core.models import CheckDefinition, CheckType, ProbeSchedulingPolicy
 
 
 SLUG_PATTERN = re.compile(r"[^a-z0-9]+")
@@ -83,6 +80,40 @@ def _optional_auth_value(item: dict[str, object], key: str) -> str | None:
     return normalized or None
 
 
+def _parse_bool(value: object, context: str, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "1", "on"}:
+            return True
+        if normalized in {"false", "no", "0", "off"}:
+            return False
+    raise ValueError(f"{context} must be a boolean")
+
+
+def parse_probe_schedule_config(raw: object) -> ProbeSchedulingPolicy:
+    if raw is None:
+        return ProbeSchedulingPolicy()
+    if not isinstance(raw, dict):
+        raise ValueError("probe_schedule must be a mapping")
+    return ProbeSchedulingPolicy(
+        allow_concurrent_hosts=_parse_bool(
+            raw.get("allow_concurrent_hosts"),
+            "probe_schedule.allow_concurrent_hosts",
+            False,
+        ),
+        allow_concurrent_same_host=_parse_bool(
+            raw.get("allow_concurrent_same_host"),
+            "probe_schedule.allow_concurrent_same_host",
+            False,
+        ),
+        same_host_backoff_ms=int(raw.get("same_host_backoff_ms", 250)),
+    )
+
+
 def parse_checks_config(raw: object) -> tuple[CheckDefinition, ...]:
     if not isinstance(raw, dict):
         raise ValueError("checks config must be a mapping")
@@ -134,8 +165,10 @@ def parse_checks_config(raw: object) -> tuple[CheckDefinition, ...]:
     return tuple(definitions)
 
 
-def load_checks_config(path: str | Path, env: dict[str, str] | None = None) -> tuple[CheckDefinition, ...]:
-    config_path = Path(path)
-    raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+def load_checks_config(path: str | os.PathLike[str], env: dict[str, str] | None = None) -> tuple[CheckDefinition, ...]:
+    import yaml
+
+    with open(path, "r", encoding="utf-8") as handle:
+        raw = yaml.safe_load(handle.read()) or {}
     raw = _resolve_placeholders(raw, env or dict(os.environ))
     return parse_checks_config(raw)

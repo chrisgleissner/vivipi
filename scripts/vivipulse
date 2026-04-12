@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+VENV_DIR="${VENV_DIR:-$ROOT_DIR/.venv}"
+
+if [[ -x "$VENV_DIR/bin/python" ]]; then
+    PYTHON="$VENV_DIR/bin/python"
+else
+    PYTHON="$PYTHON_BIN"
+fi
+
+export PYTHONPATH="$ROOT_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
+exec "$PYTHON" -m vivipi.tooling.vivipulse "$@"

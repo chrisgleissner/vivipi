@@ -10,6 +10,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from textwrap import dedent
 from urllib.parse import urlparse
@@ -34,6 +35,9 @@ OPTIONAL_PLACEHOLDERS = frozenset({"VIVIPI_SERVICE_BASE_URL"})
 OPTIONAL_AUTH_PLACEHOLDER_KEYS = frozenset({"username", "password"})
 DEFAULT_DEPLOY_PORT = "auto"
 PRERELEASE_VERSION_PATTERN = re.compile(r"^(\d+\.\d+\.\d+)-?(a|b|rc)(\d+)$")
+MPREMOTE_COMMAND_TIMEOUT_S = 20
+MPREMOTE_RECOVERY_TIMEOUT_S = 10
+MPREMOTE_RECOVERY_ATTEMPTS = 1
 
 
 def _parse_brightness(value: object) -> int:
@@ -132,6 +136,7 @@ def _normalize_probe_schedule_settings(settings: dict[str, object]):
     raw = settings.get("probe_schedule")
     if raw is None:
         settings["probe_schedule"] = {
+            "allow_concurrent_hosts": False,
             "allow_concurrent_same_host": False,
             "same_host_backoff_ms": 250,
         }
@@ -144,6 +149,11 @@ def _normalize_probe_schedule_settings(settings: dict[str, object]):
         raise ValueError("probe_schedule.same_host_backoff_ms must not be negative")
 
     settings["probe_schedule"] = {
+        "allow_concurrent_hosts": _parse_bool(
+            raw.get("allow_concurrent_hosts"),
+            "probe_schedule.allow_concurrent_hosts",
+            False,
+        ),
         "allow_concurrent_same_host": _parse_bool(
             raw.get("allow_concurrent_same_host"),
             "probe_schedule.allow_concurrent_same_host",
@@ -151,6 +161,50 @@ def _normalize_probe_schedule_settings(settings: dict[str, object]):
         ),
         "same_host_backoff_ms": same_host_backoff_ms,
     }
+
+
+def _invoke_run_command(run_command, command: list[str], *, check: bool, timeout: int | None = None):
+    try:
+        if timeout is None:
+            return run_command(command, check=check)
+        return run_command(command, check=check, timeout=timeout)
+    except TypeError as error:
+        if "timeout" not in str(error):
+            raise
+        return run_command(command, check=check)
+
+
+def _run_mpremote_command(
+    command: list[str],
+    *,
+    run_command,
+    recovery_port: str,
+    attempts: int = MPREMOTE_RECOVERY_ATTEMPTS,
+):
+    wrapped = _wrap_with_dialout(command)
+    recovery_command = _wrap_with_dialout(["mpremote", "connect", recovery_port, "soft-reset"])
+
+    for attempt in range(attempts + 1):
+        try:
+            return _invoke_run_command(
+                run_command,
+                wrapped,
+                check=True,
+                timeout=MPREMOTE_COMMAND_TIMEOUT_S,
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            if attempt >= attempts:
+                raise
+            time.sleep(float(attempt + 1))
+            try:
+                _invoke_run_command(
+                    run_command,
+                    recovery_command,
+                    check=False,
+                    timeout=MPREMOTE_RECOVERY_TIMEOUT_S,
+                )
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                pass
 
 
 def _check_to_dict(check: CheckDefinition) -> dict[str, object]:
@@ -655,7 +709,7 @@ def _wrap_with_dialout(command: list[str]) -> list[str]:
     if username not in set(dialout.gr_mem):
         return command
 
-    return ["sg", "dialout", "-c", shlex.join(command)]
+    return ["sg", "dialout", "-c", f"exec {shlex.join(command)}"]
 
 
 def deploy_firmware(
@@ -678,8 +732,12 @@ def deploy_firmware(
                 command.extend(["-r", str(item), ":"])
             else:
                 command.extend([str(item), f":{item.name}"])
-            run_command(_wrap_with_dialout(command), check=True)
-        run_command(_wrap_with_dialout(["mpremote", "connect", resolved_port, "soft-reset"]), check=True)
+            _run_mpremote_command(command, run_command=run_command, recovery_port=resolved_port)
+        _run_mpremote_command(
+            ["mpremote", "connect", resolved_port, "soft-reset"],
+            run_command=run_command,
+            recovery_port=resolved_port,
+        )
     except FileNotFoundError as error:
         raise RuntimeError("mpremote is required for deploy") from error
 

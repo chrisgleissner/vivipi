@@ -2,7 +2,9 @@
 
 try:
     from runtime import run_forever
-except ImportError:  # pragma: no cover - used by CPython tests
+except ImportError as error:  # pragma: no cover - used by CPython tests
+    if getattr(error, "name", None) != "runtime":
+        raise
     from firmware.runtime import run_forever
 
 

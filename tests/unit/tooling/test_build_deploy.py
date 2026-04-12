@@ -1,5 +1,8 @@
+import importlib.util
 import json
 import runpy
+import subprocess
+import sys
 import zipfile
 from pathlib import Path
 
@@ -10,6 +13,7 @@ from vivipi.tooling import build_deploy
 from vivipi.tooling.build_deploy import (
     _clear_generated_release_assets,
     _copy_release_tree,
+    _invoke_run_command,
     _is_loopback_host,
     _parse_brightness,
     _parse_column_separator,
@@ -20,6 +24,7 @@ from vivipi.tooling.build_deploy import (
     _release_version_from_wheel,
     _resolve_checks_path,
     _resolve_release_wheel,
+    _run_mpremote_command,
     _wrap_with_dialout,
     build_firmware_bundle,
     build_service_bundle,
@@ -123,6 +128,7 @@ def test_load_build_deploy_settings_substitutes_environment_placeholders(tmp_pat
     assert settings["device"]["display"]["failure_color"] == "red"
     assert settings["device"]["display"]["pins"]["dc"] == "GP8"
     assert settings["probe_schedule"] == {
+        "allow_concurrent_hosts": False,
         "allow_concurrent_same_host": False,
         "same_host_backoff_ms": 250,
     }
@@ -402,6 +408,67 @@ def test_load_build_deploy_settings_allows_missing_service_base_url(tmp_path: Pa
 
     assert settings["wifi"]["ssid"] == "TestWifi"
     assert settings["service"] == {}
+
+
+def test_invoke_run_command_and_mpremote_recovery_cover_fallback_paths(monkeypatch):
+    calls = []
+
+    def fake_run_command(command, check, timeout=None):
+        calls.append((tuple(command), check, timeout))
+        if timeout is not None:
+            raise TypeError("timeout unsupported")
+        return "ok"
+
+    assert _invoke_run_command(fake_run_command, ["mpremote", "fs", "ls"], check=True, timeout=5) == "ok"
+    assert calls == [(("mpremote", "fs", "ls"), True, 5), (("mpremote", "fs", "ls"), True, None)]
+
+    with pytest.raises(TypeError, match="other failure"):
+        _invoke_run_command(lambda command, check, timeout=None: (_ for _ in ()).throw(TypeError("other failure")), ["cmd"], check=True, timeout=1)
+
+    sleep_calls = []
+    monkeypatch.setattr(build_deploy.time, "sleep", lambda value: sleep_calls.append(value))
+    attempt_log = []
+
+    def flaky_run_command(command, check, timeout=None):
+        attempt_log.append((tuple(command), check, timeout))
+        if "soft-reset" in command:
+            raise subprocess.TimeoutExpired(command, timeout)
+        if len([entry for entry in attempt_log if entry[1] is True]) == 1:
+            raise subprocess.CalledProcessError(1, command)
+        return "recovered"
+
+    assert _run_mpremote_command(["mpremote", "fs", "ls"], run_command=flaky_run_command, recovery_port="auto", attempts=1) == "recovered"
+    assert sleep_calls == [1.0]
+
+    def always_fail(command, check, timeout=None):
+        raise subprocess.CalledProcessError(1, command)
+
+    with pytest.raises(subprocess.CalledProcessError):
+        _run_mpremote_command(["mpremote", "fs", "ls"], run_command=always_fail, recovery_port="auto", attempts=0)
+
+
+def test_normalize_probe_schedule_settings_validates_non_mapping(tmp_path: Path):
+    config_path = tmp_path / "build-deploy.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "device:",
+                "  board: pico2w",
+                "  display:",
+                "    type: waveshare-pico-oled-1.3",
+                "wifi:",
+                "  ssid: ${VIVIPI_WIFI_SSID}",
+                "  password: ${VIVIPI_WIFI_PASSWORD}",
+                "probe_schedule: invalid",
+                "checks_config: checks.yaml",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "checks.yaml").write_text("checks: []\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="probe_schedule must be a mapping"):
+        load_build_deploy_settings(config_path, env=FIXTURE_ENV)
 
 
 def test_load_build_deploy_settings_validates_display_limits(tmp_path: Path):
@@ -1175,6 +1242,26 @@ def test_deploy_firmware_copies_files_via_mpremote(tmp_path: Path, monkeypatch):
     assert commands[-1] == ["mpremote", "connect", "/dev/ttyUSB0", "soft-reset"]
 
 
+def test_build_firmware_bundle_staged_entrypoint_imports_on_flattened_filesystem(tmp_path: Path):
+    config_path = write_fixture_files(tmp_path)
+
+    build_firmware_bundle(config_path, tmp_path / "release", env=FIXTURE_ENV, version_resolver=lambda: "0.0.0-test")
+
+    staging_dir = tmp_path / "release" / "vivipi-device-fs"
+    sys.path.insert(0, str(staging_dir))
+    try:
+        spec = importlib.util.spec_from_file_location("staged_main", staging_dir / "main.py")
+        module = importlib.util.module_from_spec(spec)
+        assert spec is not None
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+        assert callable(module.main)
+    finally:
+        sys.path.remove(str(staging_dir))
+        for module_name in ("runtime", "display", "input", "displays", "vivipi"):
+            sys.modules.pop(module_name, None)
+
+
 def test_deploy_firmware_uses_sg_dialout_when_process_lacks_group_membership(tmp_path: Path, monkeypatch):
     config_path = write_fixture_files(tmp_path)
     commands = []
@@ -1194,8 +1281,36 @@ def test_deploy_firmware_uses_sg_dialout_when_process_lacks_group_membership(tmp
     )
 
     assert all(command[:3] == ["sg", "dialout", "-c"] for command in commands)
-    assert "mpremote connect /dev/ttyUSB0 fs cp" in commands[0][3]
-    assert commands[-1] == ["sg", "dialout", "-c", "mpremote connect /dev/ttyUSB0 soft-reset"]
+    assert "exec mpremote connect /dev/ttyUSB0 fs cp" in commands[0][3]
+    assert commands[-1] == ["sg", "dialout", "-c", "exec mpremote connect /dev/ttyUSB0 soft-reset"]
+
+
+def test_deploy_firmware_retries_mpremote_after_timeout(tmp_path: Path, monkeypatch):
+    config_path = write_fixture_files(tmp_path)
+    commands = []
+    attempts = {"fs": 0}
+
+    monkeypatch.setattr(build_deploy, "_wrap_with_dialout", lambda command: command)
+
+    def fake_run(command, check, timeout=None):
+        commands.append((command, check, timeout))
+        if command[:4] == ["mpremote", "connect", "/dev/ttyUSB0", "fs"]:
+            attempts["fs"] += 1
+            if attempts["fs"] == 1:
+                raise build_deploy.subprocess.TimeoutExpired(command, timeout or 0)
+
+    deploy_firmware(
+        config_path,
+        tmp_path / "release",
+        env=FIXTURE_ENV,
+        port="/dev/ttyUSB0",
+        run_command=fake_run,
+    )
+
+    fs_commands = [command for command, _, _ in commands if command[:4] == ["mpremote", "connect", "/dev/ttyUSB0", "fs"]]
+    soft_resets = [command for command, _, _ in commands if command == ["mpremote", "connect", "/dev/ttyUSB0", "soft-reset"]]
+    assert len(fs_commands) >= 2
+    assert len(soft_resets) >= 2
 
 
 def test_deploy_firmware_reports_missing_mpremote(tmp_path: Path):
@@ -1241,6 +1356,7 @@ def test_load_build_deploy_settings_handles_missing_device_and_validates_probe_s
     settings = load_build_deploy_settings(config_path, env={})
 
     assert settings["probe_schedule"] == {
+        "allow_concurrent_hosts": False,
         "allow_concurrent_same_host": True,
         "same_host_backoff_ms": 0,
     }
@@ -1269,6 +1385,7 @@ def test_load_build_deploy_settings_parses_false_probe_schedule_values(tmp_path:
     settings = load_build_deploy_settings(config_path, env={})
 
     assert settings["probe_schedule"] == {
+        "allow_concurrent_hosts": False,
         "allow_concurrent_same_host": False,
         "same_host_backoff_ms": 25,
     }

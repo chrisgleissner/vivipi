@@ -60,6 +60,17 @@ def _monotonic_now_s() -> float:
     return float(time.perf_counter())
 
 
+def _network_priority(definition: CheckDefinition) -> tuple[int, str]:
+    check_order = {
+        "PING": 0,
+        "HTTP": 1,
+        "SERVICE": 2,
+        "TELNET": 3,
+        "FTP": 4,
+    }
+    return (check_order.get(_enum_text(definition.check_type), 99), definition.identifier)
+
+
 def _allocate_lock():
     if threading is not None:
         return threading.Lock()
@@ -160,6 +171,8 @@ class RuntimeApp:
         self.active_workers: set[str] = set()
         self.inflight_check_ids: set[str] = set()
         self.completed_checks: list[CompletedCheckRun] = []
+        self.pending_probe_traces: list[tuple[CheckDefinition, str, dict[str, object]]] = []
+        self.probe_trace_sink = None
         self.state = AppState(
             checks=tuple(
                 CheckRuntime(
@@ -221,6 +234,9 @@ class RuntimeApp:
         self.feedback_message = ""
         self.feedback_until_s: float | None = None
         self.feedback_duration_s = 1.5
+        self.press_feedback_message = ""
+        self.press_feedback_until_s: float | None = None
+        self.press_feedback_duration_s = 0.15
         self.last_cycle_ms: float | None = None
         self.last_render_at_s: float | None = None
         self.last_render_reason = "bootstrap"
@@ -231,12 +247,59 @@ class RuntimeApp:
         self.network_operation_inflight = False
         self.network_operation_result: dict[str, object] | None = None
 
+    def emit_probe_trace(self, definition: CheckDefinition, event: str, fields: dict[str, object]):
+        if self.probe_trace_sink is not None:
+            self.probe_trace_sink(definition, event, dict(fields))
+        if self._background_enabled():
+            lock_acquired = _lock_context(self.background_lock)
+            try:
+                self.pending_probe_traces.append((definition, event, dict(fields)))
+            finally:
+                if lock_acquired:
+                    self.background_lock.release()
+            return
+
+        self._log_probe_trace(definition, event, fields)
+
+    def _log_probe_trace(self, definition: CheckDefinition, event: str, fields: dict[str, object]):
+        level = LogLevel.WARN if event.endswith("timeout") or event.endswith("error") else LogLevel.INFO
+        trace_fields = [
+            log_field("id", definition.identifier),
+            log_field("evt", event),
+        ]
+        if "stage" in fields:
+            trace_fields.append(log_field("stage", fields["stage"]))
+        target = fields.get("target")
+        if target is not None:
+            trace_fields.append(log_field("target", target))
+        elif "remain_ms" in fields:
+            trace_fields.append(log_field("remain_ms", fields["remain_ms"]))
+        self.logger.emit(level, "PROBE", event, tuple(trace_fields))
+
+    def _pop_pending_probe_traces(self) -> tuple[tuple[CheckDefinition, str, dict[str, object]], ...]:
+        if not self._background_enabled():
+            return ()
+        lock_acquired = _lock_context(self.background_lock)
+        try:
+            if not self.pending_probe_traces:
+                return ()
+            items = tuple(self.pending_probe_traces)
+            self.pending_probe_traces.clear()
+            return items
+        finally:
+            if lock_acquired:
+                self.background_lock.release()
+
+    def _drain_probe_traces(self):
+        for definition, event, fields in self._pop_pending_probe_traces():
+            self._log_probe_trace(definition, event, fields)
+
     def render_once(self, now_s: float) -> str:
         boot_logo_until_s = getattr(self, "boot_logo_until_s", None)
         if self.last_rendered_state is None and boot_logo_until_s is not None and now_s < float(boot_logo_until_s):
             return "boot-logo"
         reason = render_reason(self.last_rendered_state, self.state)
-        feedback_text = self._feedback_text(now_s) or ""
+        feedback_text = self._overlay_feedback_text(now_s) or ""
         if (
             reason == "none"
             and self.last_rendered_debug_mode == self.debug_mode
@@ -688,32 +751,33 @@ class RuntimeApp:
     def _apply_button_events(self, button_events: tuple[ButtonEvent, ...]):
         now_s = self.current_time_s() or self._probe_now_s()
         for event in button_events:
-            if event.button == Button.A:
-                enabled = self.toggle_debug_mode()
-                self._set_feedback("DBG ON" if enabled else "DBG OFF", now_s)
-                self.logger.info(
-                    "BTN",
-                    "action",
-                    (
-                        log_field("button", _button_text(event.button)),
-                        log_field("action", "debug"),
-                        log_field("enabled", enabled),
-                    ),
-                )
+            button = event.button
+            if isinstance(button, str):
+                try:
+                    button = Button(button)
+                except ValueError:
+                    button = event.button
+            previous_mode = self.state.mode
+            previous_selection = self.state.selected_id
+            self.state = self.input_controller.apply(self.state, button, held_ms=event.held_ms)
+            if button in (Button.A, Button.B):
+                self._set_press_feedback(button, now_s)
+            if self.state.mode == previous_mode and self.state.selected_id == previous_selection:
                 continue
-            if event.button == Button.B:
-                self.request_refresh(now_s)
-                self._set_feedback("REFRESH", now_s)
-                self.logger.info(
-                    "BTN",
-                    "action",
-                    (
-                        log_field("button", _button_text(event.button)),
-                        log_field("action", "refresh"),
-                    ),
-                )
+            self.logger.info(
+                "BTN",
+                "action",
+                (
+                    log_field("button", _button_text(button)),
+                    log_field("held_ms", event.held_ms),
+                    log_field("mode", _enum_text(self.state.mode)),
+                    log_field("selected", self.state.selected_id or "-"),
+                ),
+            )
 
     def _worker_key(self, definition: CheckDefinition) -> str:
+        if not self.probe_scheduling.allow_concurrent_hosts:
+            return "__all__"
         host_key = probe_host_key(definition) or definition.identifier
         if self.probe_scheduling.allow_concurrent_same_host:
             return f"{host_key}:{definition.identifier}"
@@ -762,9 +826,19 @@ class RuntimeApp:
 
         remaining_s = probe_backoff_remaining_s(definition, completed_at, self._probe_now_s(), self.probe_scheduling)
         if remaining_s <= 0:
-            return
+            return 0
         remaining_ms = max(1, int((remaining_s * 1000.0) + 0.999))
+        self.logger.debug(
+            "CHECK",
+            "backoff",
+            (
+                log_field("id", definition.identifier),
+                log_field("host", probe_host_key(definition) or "-"),
+                log_field("wait_ms", remaining_ms),
+            ),
+        )
         self.sleep_ms(remaining_ms)
+        return remaining_ms
 
     def _mark_probe_complete(self, definition: CheckDefinition):
         host_key = probe_host_key(definition)
@@ -781,9 +855,20 @@ class RuntimeApp:
         self.last_completed_at_by_host[host_key] = self._probe_now_s()
 
     def _execute_check_once(self, definition: CheckDefinition, now_s: float, manual: bool = False) -> CompletedCheckRun:
-        self._wait_for_probe_slot(definition)
+        waited_ms = self._wait_for_probe_slot(definition)
+        host_key = probe_host_key(definition) or "-"
         started_now_s = now_s if manual else (self.current_time_s() or now_s)
         started_at, timer_kind = start_timer()
+        self.logger.debug(
+            "CHECK",
+            "start",
+            (
+                log_field("id", definition.identifier),
+                log_field("host", host_key),
+                log_field("bg", self._background_enabled()),
+                log_field("wait_ms", waited_ms),
+            ),
+        )
         if self._background_enabled():
             lock_acquired = _lock_context(self.background_lock)
             try:
@@ -798,6 +883,16 @@ class RuntimeApp:
         except Exception as error:
             duration_ms = elapsed_ms(started_at, timer_kind)
             self._mark_probe_complete(definition)
+            self.logger.debug(
+                "CHECK",
+                "done",
+                (
+                    log_field("id", definition.identifier),
+                    log_field("host", host_key),
+                    log_field("dur_ms", f"{duration_ms:.1f}"),
+                    log_field("status", "EXC"),
+                ),
+            )
             return CompletedCheckRun(
                 definition=definition,
                 observed_at_s=started_now_s,
@@ -808,6 +903,19 @@ class RuntimeApp:
 
         duration_ms = elapsed_ms(started_at, timer_kind)
         self._mark_probe_complete(definition)
+        status = "?"
+        if result.observations:
+            status = _enum_text(result.observations[0].status)
+        self.logger.debug(
+            "CHECK",
+            "done",
+            (
+                log_field("id", definition.identifier),
+                log_field("host", host_key),
+                log_field("dur_ms", f"{duration_ms:.1f}"),
+                log_field("status", status),
+            ),
+        )
         return CompletedCheckRun(
             definition=definition,
             observed_at_s=started_now_s,
@@ -902,6 +1010,16 @@ class RuntimeApp:
                     self.background_lock.release()
 
     def _queue_check(self, definition: CheckDefinition, now_s: float, manual: bool = False):
+        self.logger.debug(
+            "CHECK",
+            "queue",
+            (
+                log_field("id", definition.identifier),
+                log_field("host", probe_host_key(definition) or "-"),
+                log_field("bg", self._background_enabled()),
+                log_field("manual", manual),
+            ),
+        )
         if not self._background_enabled():
             self._run_check(definition, now_s, manual=manual)
             return
@@ -943,7 +1061,21 @@ class RuntimeApp:
 
     def _run_due_checks(self, now_s: float):
         # Hot path: keep metrics on every execution but only log state transitions.
-        for scheduled in due_checks(self.definitions, self._copy_last_started_at(), now_s):
+        scheduled_checks = due_checks(self.definitions, self._copy_last_started_at(), now_s)
+        host_order: list[str | None] = []
+        groups: dict[str | None, list[object]] = {}
+        for scheduled in scheduled_checks:
+            host_key = probe_host_key(scheduled.definition)
+            if host_key not in groups:
+                host_order.append(host_key)
+                groups[host_key] = []
+            groups[host_key].append(scheduled)
+        ordered: list[object] = []
+        for host_key in host_order:
+            group = groups[host_key]
+            group.sort(key=lambda item: _network_priority(item.definition))
+            ordered.extend(group)
+        for scheduled in ordered:
             self._queue_check(scheduled.definition, now_s)
 
     def prime_due_checks(self, now_s: float):
@@ -972,6 +1104,7 @@ class RuntimeApp:
                 self.active_workers.clear()
                 self.inflight_check_ids.clear()
                 self.completed_checks.clear()
+                self.pending_probe_traces.clear()
             finally:
                 if lock_acquired:
                     self.background_lock.release()
@@ -1067,10 +1200,23 @@ class RuntimeApp:
         feedback_duration_s = self.feedback_duration_s if duration_s is None else max(0.0, float(duration_s))
         self.feedback_until_s = now_s + feedback_duration_s
 
+    def _set_press_feedback(self, button: object, now_s: float, duration_s: float | None = None):
+        self.press_feedback_message = bound_text(f"BTN {_button_text(button)}", self.state.row_width)
+        feedback_duration_s = self.press_feedback_duration_s if duration_s is None else max(0.0, float(duration_s))
+        self.press_feedback_until_s = now_s + feedback_duration_s
+
     def _feedback_text(self, now_s: float) -> str | None:
         if self.feedback_until_s is None or now_s > self.feedback_until_s or not self.feedback_message:
             return None
         return self.feedback_message
+
+    def _press_feedback_text(self, now_s: float) -> str | None:
+        if self.press_feedback_until_s is None or now_s > self.press_feedback_until_s or not self.press_feedback_message:
+            return None
+        return self.press_feedback_message
+
+    def _overlay_feedback_text(self, now_s: float) -> str | None:
+        return self._press_feedback_text(now_s) or self._feedback_text(now_s)
 
     def _pad_row(self, value: str) -> str:
         text = bound_text(value, self.state.row_width)
@@ -1100,7 +1246,7 @@ class RuntimeApp:
             start_index = len(rows) - overlay_count
             for index in range(overlay_count):
                 rows[start_index + index] = overlay_rows[index]
-        feedback = self._feedback_text(now_s)
+        feedback = self._overlay_feedback_text(now_s)
         if feedback and rows:
             rows[-1] = self._pad_row(feedback)
         return replace(frame, rows=tuple(rows))
@@ -1175,10 +1321,13 @@ class RuntimeApp:
                 events = tuple(self.button_reader.poll())
 
         self._apply_button_events(events)
+        self._drain_probe_traces()
         self._drain_completed_checks()
         self._maybe_reconnect_network(now_s)
         self._run_due_checks(now_s)
+        self._drain_probe_traces()
         self._drain_completed_checks()
+        self._drain_probe_traces()
         self._apply_page_rotation(now_s)
         self._apply_shift(now_s)
 

@@ -95,13 +95,17 @@ def _about_rows(state: AppState, row_width: int, page_size: int) -> tuple[str, .
 def _legacy_overview_frame(state: AppState, checks: tuple[CheckRuntime, ...]) -> Frame:
     rows = _blank_rows(state.row_width, state.page_size)
     failure_spans: list[TextSpan] = []
+    inverted_row = None
     for row_index, check in enumerate(checks):
         status_text = _enum_text(check.status)
         rows[row_index] = overview_row(check.name, status_text, state.row_width)
+        if check.identifier == state.selected_id:
+            inverted_row = row_index
         if check.status == Status.FAIL:
             failure_spans.append(_status_span(row_index, state.row_width, status_text))
     return Frame(
         rows=tuple(rows),
+        inverted_row=inverted_row,
         shift_offset=state.shift_offset,
         failure_spans=tuple(failure_spans),
     )
@@ -109,6 +113,7 @@ def _legacy_overview_frame(state: AppState, checks: tuple[CheckRuntime, ...]) ->
 
 def _compact_overview_frame(state: AppState, checks: tuple[CheckRuntime, ...]) -> Frame:
     rows = _blank_rows(state.row_width, state.page_size)
+    inverted_spans: list[InvertedSpan] = []
     separator = state.column_separator
     widths = column_widths(state.row_width, state.overview_columns, separator_width=len(separator))
     failure_spans: list[TextSpan] = []
@@ -127,6 +132,14 @@ def _compact_overview_frame(state: AppState, checks: tuple[CheckRuntime, ...]) -
             else:
                 display_text = compact_overview_cell(check.name, _enum_text(check.status), width)
                 cell = _pad_right(display_text, width)
+                if check.identifier == state.selected_id:
+                    inverted_spans.append(
+                        InvertedSpan(
+                            row_index=row_index,
+                            start_column=cursor,
+                            end_column=cursor + width,
+                        )
+                    )
                 if display_text and check.status == Status.FAIL:
                     failure_spans.append(
                         TextSpan(
@@ -144,7 +157,12 @@ def _compact_overview_frame(state: AppState, checks: tuple[CheckRuntime, ...]) -
 
         rows[row_index] = "".join(parts)
 
-    return Frame(rows=tuple(rows), shift_offset=state.shift_offset, failure_spans=tuple(failure_spans))
+    return Frame(
+        rows=tuple(rows),
+        shift_offset=state.shift_offset,
+        inverted_spans=tuple(inverted_spans),
+        failure_spans=tuple(failure_spans),
+    )
 
 
 def _overview_frame(state: AppState) -> Frame:

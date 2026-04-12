@@ -72,13 +72,24 @@ def _failure_status(failures: int, thresholds: TransitionThresholds) -> Status:
     return Status.UNKNOWN
 
 
+def _normalized_status(value) -> Status:
+    if isinstance(value, Status):
+        return value
+    candidate = getattr(value, "value", value)
+    try:
+        return Status(candidate)
+    except Exception:
+        return Status.UNKNOWN
+
+
 def apply_observation(
     runtime: CheckRuntime,
     observation: CheckObservation,
     thresholds: TransitionThresholds | None = None,
 ) -> CheckRuntime:
     policy = thresholds or TransitionThresholds()
-    if observation.status == Status.UNKNOWN:
+    observation_status = _normalized_status(observation.status)
+    if observation_status == Status.UNKNOWN:
         return replace(
             runtime,
             name=observation.name,
@@ -91,7 +102,7 @@ def apply_observation(
             source_identifier=observation.source_identifier,
         )
 
-    if observation.status == Status.OK:
+    if observation_status == Status.OK:
         successes = runtime.consecutive_successes + 1
         next_status = runtime.status
         if runtime.status in {Status.DEG, Status.FAIL, Status.UNKNOWN}:
@@ -111,7 +122,7 @@ def apply_observation(
             source_identifier=observation.source_identifier,
         )
 
-    if observation.status == Status.DEG:
+    if observation_status == Status.DEG:
         return replace(
             runtime,
             name=observation.name,

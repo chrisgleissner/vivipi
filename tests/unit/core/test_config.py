@@ -1,8 +1,19 @@
+import builtins
+import importlib.util
+import sys
+
 from pathlib import Path
 
 import pytest
 
-from vivipi.core.config import build_direct_check_id, build_service_check_id, load_checks_config, parse_checks_config, slugify
+from vivipi.core.config import (
+    build_direct_check_id,
+    build_service_check_id,
+    load_checks_config,
+    parse_checks_config,
+    parse_probe_schedule_config,
+    slugify,
+)
 from vivipi.core.models import CheckType
 
 
@@ -248,6 +259,26 @@ def test_parse_checks_config_rejects_non_mapping_root():
         parse_checks_config([])
 
 
+def test_parse_probe_schedule_config_validates_mapping_and_boolean_values():
+    policy = parse_probe_schedule_config(
+        {
+            "allow_concurrent_hosts": "false",
+            "allow_concurrent_same_host": "yes",
+            "same_host_backoff_ms": 900,
+        }
+    )
+
+    assert policy.allow_concurrent_hosts is False
+    assert policy.allow_concurrent_same_host is True
+    assert policy.same_host_backoff_ms == 900
+
+    with pytest.raises(ValueError, match="probe_schedule must be a mapping"):
+        parse_probe_schedule_config([])
+
+    with pytest.raises(ValueError, match="probe_schedule.allow_concurrent_hosts must be a boolean"):
+        parse_probe_schedule_config({"allow_concurrent_hosts": object()})
+
+
 def test_parse_checks_config_rejects_non_string_auth_fields():
     with pytest.raises(ValueError, match="username must be a string"):
         parse_checks_config(
@@ -262,6 +293,21 @@ def test_parse_checks_config_rejects_non_string_auth_fields():
                 ]
             }
         )
+
+
+def test_parse_probe_schedule_config_defaults_and_validates_boolean_strings():
+    defaults = parse_probe_schedule_config(None)
+    assert defaults.allow_concurrent_same_host is False
+    assert defaults.same_host_backoff_ms == 250
+
+    custom = parse_probe_schedule_config(
+        {
+            "allow_concurrent_same_host": "true",
+            "same_host_backoff_ms": 750,
+        }
+    )
+    assert custom.allow_concurrent_same_host is True
+    assert custom.same_host_backoff_ms == 750
 
     with pytest.raises(ValueError, match="password must be a string"):
         parse_checks_config(
@@ -312,3 +358,30 @@ checks:
 
     with pytest.raises(ValueError, match="timeout_s must be positive"):
         load_checks_config(config_path, env={"OTHER": "value"})
+
+
+def test_config_module_import_does_not_require_pathlib_or_yaml(monkeypatch):
+    config_path = Path(__file__).resolve().parents[3] / "src" / "vivipi" / "core" / "config.py"
+    original_import = builtins.__import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name in {"pathlib", "yaml"}:
+            raise ImportError(f"no module named '{name}'", name=name)
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    spec = importlib.util.spec_from_file_location("test_config_micropython", config_path)
+    assert spec is not None
+    assert spec.loader is not None
+
+    module = importlib.util.module_from_spec(spec)
+    sys.modules.pop("test_config_micropython", None)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.modules.pop("test_config_micropython", None)
+
+    defaults = module.parse_probe_schedule_config(None)
+    assert defaults.allow_concurrent_same_host is False
+    assert defaults.same_host_backoff_ms == 250

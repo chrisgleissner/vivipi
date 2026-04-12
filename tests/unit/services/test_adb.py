@@ -133,6 +133,72 @@ def test_collect_adb_device_status_returns_command_failure_and_offline_target_de
     assert payload["details"] == "transport_id:1"
 
 
+def test_collect_adb_payload_recovers_after_starting_the_adb_server():
+    calls = []
+
+    def run_command(command):
+        calls.append(command)
+        if command == ["adb", "devices", "-l"] and len([item for item in calls if item == command]) == 1:
+            return SimpleNamespace(returncode=1, stdout="", stderr="daemon offline")
+        if command == ["adb", "start-server"]:
+            return SimpleNamespace(returncode=0, stdout="started", stderr="")
+        if command == ["adb", "reconnect", "offline"]:
+            return SimpleNamespace(returncode=0, stdout="done", stderr="")
+        return SimpleNamespace(
+            returncode=0,
+            stdout="List of devices attached\nserial-01 device\n",
+            stderr="",
+        )
+
+    payload = collect_adb_service_payload(run_command=run_command)
+
+    assert payload["checks"][0]["name"] == "serial-01"
+    assert payload["checks"][0]["status"] == "OK"
+    assert calls[:4] == [
+        ["adb", "devices", "-l"],
+        ["adb", "start-server"],
+        ["adb", "reconnect", "offline"],
+        ["adb", "devices", "-l"],
+    ]
+
+
+def test_collect_adb_device_status_recovers_an_offline_target():
+    calls = []
+
+    def run_command(command):
+        calls.append(command)
+        if command == ["adb", "start-server"]:
+            return SimpleNamespace(returncode=0, stdout="started", stderr="")
+        if command == ["adb", "reconnect", "offline"]:
+            return SimpleNamespace(returncode=0, stdout="done", stderr="")
+        if command == ["adb", "devices", "-l"] and len([item for item in calls if item == command]) == 1:
+            return SimpleNamespace(
+                returncode=0,
+                stdout="List of devices attached\n9B081FFAZ001WX offline transport_id:1\n",
+                stderr="",
+            )
+        return SimpleNamespace(
+            returncode=0,
+            stdout="List of devices attached\n9B081FFAZ001WX device product:flame model:Pixel_4 device:flame\n",
+            stderr="",
+        )
+
+    status_code, payload = collect_adb_device_status(
+        "9B081FFAZ001WX",
+        "PIXEL4 ADB",
+        run_command=run_command,
+    )
+
+    assert status_code == 200
+    assert payload["status"] == "OK"
+    assert calls[:4] == [
+        ["adb", "devices", "-l"],
+        ["adb", "start-server"],
+        ["adb", "reconnect", "offline"],
+        ["adb", "devices", "-l"],
+    ]
+
+
 def test_route_request_serves_health_and_check_routes():
     health_status, health_body = route_request("/health")
     checks_status, checks_body = route_request("/checks", payload_factory=lambda: {"checks": []})

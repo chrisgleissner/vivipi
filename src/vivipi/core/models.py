@@ -48,6 +48,7 @@ class TransitionThresholds:
 
 @dataclass(frozen=True)
 class ProbeSchedulingPolicy:
+    allow_concurrent_hosts: bool = False
     allow_concurrent_same_host: bool = False
     same_host_backoff_ms: int = 250
 

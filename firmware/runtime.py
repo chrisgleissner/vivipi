@@ -3,6 +3,11 @@
 import json
 
 try:
+    import _thread
+except ImportError:  # pragma: no cover - imported on-device
+    _thread = None
+
+try:
     import network
     import utime as time
 except ImportError:  # pragma: no cover - imported on-device
@@ -10,21 +15,32 @@ except ImportError:  # pragma: no cover - imported on-device
     time = None
 
 from vivipi.core.input import InputController
+from vivipi.core.config import parse_probe_schedule_config
 from vivipi.core.display import normalize_display_config
 from vivipi.core.logging import bound_text
-from vivipi.core.models import DiagnosticEvent, DisplayMode, ProbeSchedulingPolicy, TransitionThresholds
+from vivipi.core.models import DiagnosticEvent, DisplayMode, TransitionThresholds
+from vivipi.core.probe_trace import ProbeTraceCollector
+from vivipi.core.render import Frame
 from vivipi.runtime import state as runtime_state
 from vivipi.runtime import RuntimeApp, build_executor, build_runtime_definitions
 
 try:
     from display import create_display
-    from input import ButtonReader
-except ImportError:  # pragma: no cover - used by CPython tests
+except ImportError as error:  # pragma: no cover - used by CPython tests
+    if getattr(error, "name", None) != "display":
+        raise
     from firmware.display import create_display
-    from firmware.input import ButtonReader
+
+try:
+    from input import ButtonReader, probe_pin_states
+except ImportError as error:  # pragma: no cover - used by CPython tests
+    if getattr(error, "name", None) != "input":
+        raise
+    from firmware.input import ButtonReader, probe_pin_states
 
 
 DEFAULT_BUTTON_PINS = {"a": "GP15", "b": "GP17"}
+BUTTON_SELF_TEST_DISCOVERY_PINS = (15, 17, 21, 22)
 
 
 class HeadlessDisplay:
@@ -134,11 +150,56 @@ def _safe_build_definitions(definitions_builder, config):
         return (), (_boot_diagnostic("CONF", "checks bad"),), (("config", error),)
 
 
+def _build_executor_with_optional_trace(executor_factory, trace_sink=None):
+    if trace_sink is None:
+        return executor_factory()
+    try:
+        return executor_factory(trace_sink=trace_sink)
+    except TypeError as error:
+        if "trace_sink" not in str(error):
+            raise
+        return executor_factory()
+
+
 def _safe_build_button_reader(button_reader_factory, buttons_config, input_controller):
     try:
         return button_reader_factory(buttons_config, input_controller=input_controller), (), ()
     except Exception as error:
         return None, (_boot_diagnostic("BTN", "init failed"),), (("buttons", error),)
+
+
+class _SerialProbeTraceWriter:
+    def __init__(self):
+        self._lock = None
+        if _thread is not None and hasattr(_thread, "allocate_lock"):
+            self._lock = _thread.allocate_lock()
+
+    def write(self, record):
+        if self._lock is not None:
+            self._lock.acquire()
+        try:
+            print(json.dumps(record.to_dict(), sort_keys=True))
+        finally:
+            if self._lock is not None:
+                self._lock.release()
+
+
+def _probe_trace_jsonl_enabled(config) -> bool:
+    if not isinstance(config, dict):
+        return False
+    for section_name in ("service", "observability"):
+        section = config.get(section_name)
+        if isinstance(section, dict) and section.get("probe_trace_jsonl") is True:
+            return True
+    return False
+
+
+def _build_probe_trace_sink(config):
+    if not _probe_trace_jsonl_enabled(config):
+        return None
+    writer = _SerialProbeTraceWriter()
+    collector = ProbeTraceCollector(writer.write, source="firmware", mode="runtime")
+    return collector.emit
 
 
 def _transition_thresholds_from_config(config):
@@ -152,28 +213,9 @@ def _transition_thresholds_from_config(config):
     )
 
 
-def _bool_from_config(value: object, default: bool) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"true", "yes", "1", "on"}:
-            return True
-        if normalized in {"false", "no", "0", "off"}:
-            return False
-    raise ValueError("probe_schedule.allow_concurrent_same_host must be a boolean")
-
-
 def _probe_scheduling_from_config(config):
     raw = config.get("probe_schedule") if isinstance(config, dict) else None
-    if not isinstance(raw, dict):
-        return ProbeSchedulingPolicy()
-    return ProbeSchedulingPolicy(
-        allow_concurrent_same_host=_bool_from_config(raw.get("allow_concurrent_same_host"), False),
-        same_host_backoff_ms=int(raw.get("same_host_backoff_ms", 250)),
-    )
+    return parse_probe_schedule_config(raw)
 
 
 def _safe_connect_wifi(wifi_connector, config):
@@ -200,6 +242,125 @@ def _sleep_ms(value):
         time.sleep_ms(value)
         return
     time.sleep(value / 1000.0)
+
+
+def _fit_row(value: object, row_width: int) -> str:
+    text = str(value)
+    if len(text) >= row_width:
+        return text[:row_width]
+    return text + (" " * (row_width - len(text)))
+
+
+def _button_self_test_duration_s(button_config) -> float:
+    if not isinstance(button_config, dict):
+        return 0.0
+    raw_value = button_config.get("startup_self_test_s")
+    if raw_value is None:
+        raw_value = button_config.get("startup_self_test_duration_s")
+    if raw_value is None:
+        return 0.0
+    try:
+        return max(0.0, float(raw_value))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _format_button_snapshot(label: str, snapshot: dict) -> str:
+    pin = str(snapshot.get("pin", "GP?"))
+    pin_suffix = pin.replace("GP", "")
+    return f"{label}{pin_suffix} r{snapshot.get('raw', '?')} s{snapshot.get('stable', '?')}"
+
+
+def _button_self_test_frame(snapshot, probe_snapshot, row_width: int, page_size: int, remaining_s: float) -> Frame:
+    rows = [
+        _fit_row("BTN SELFTEST", row_width),
+        _fit_row(_format_button_snapshot("A", snapshot.get("A", {})), row_width),
+        _fit_row(_format_button_snapshot("B", snapshot.get("B", {})), row_width),
+        _fit_row(f"15:{probe_snapshot.get('GP15', '?')} 17:{probe_snapshot.get('GP17', '?')}", row_width),
+        _fit_row(f"21:{probe_snapshot.get('GP21', '?')} 22:{probe_snapshot.get('GP22', '?')}", row_width),
+        _fit_row("PRESS BTN NOW", row_width),
+        _fit_row(f"T-{max(0.0, remaining_s):0.1f}s", row_width),
+    ]
+    while len(rows) < page_size:
+        rows.append(" " * row_width)
+    return Frame(rows=tuple(rows[:page_size]))
+
+
+def _run_button_self_test(display, button_reader, button_config, row_width: int, page_size: int, now_provider, sleep_ms):
+    duration_s = _button_self_test_duration_s(button_config)
+    if duration_s <= 0:
+        _serial_log("BTNTEST", "skip", reason="disabled")
+        return False
+    if button_reader is None:
+        _serial_log("BTNTEST", "skip", reason="button_reader_missing")
+        return False
+
+    _serial_log("BTNTEST", "start", duration_s=f"{duration_s:.1f}")
+    deadline_s = now_provider() + duration_s
+    last_serial_snapshot = None
+    while True:
+        now_s = now_provider()
+        remaining_s = deadline_s - now_s
+        if remaining_s <= 0:
+            break
+        events = tuple(button_reader.poll())
+        snapshot = button_reader.snapshot() if hasattr(button_reader, "snapshot") else {}
+        probe_snapshot = probe_pin_states(BUTTON_SELF_TEST_DISCOVERY_PINS)
+        serial_snapshot = (
+            _format_button_snapshot("A", snapshot.get("A", {})),
+            _format_button_snapshot("B", snapshot.get("B", {})),
+            tuple((key, probe_snapshot.get(key)) for key in ("GP15", "GP17", "GP21", "GP22")),
+        )
+        if serial_snapshot != last_serial_snapshot:
+            _serial_log(
+                "BTNTEST",
+                "snapshot",
+                a=serial_snapshot[0],
+                b=serial_snapshot[1],
+                gp15=probe_snapshot.get("GP15", "?"),
+                gp17=probe_snapshot.get("GP17", "?"),
+                gp21=probe_snapshot.get("GP21", "?"),
+                gp22=probe_snapshot.get("GP22", "?"),
+            )
+            last_serial_snapshot = serial_snapshot
+        display.draw_frame(_button_self_test_frame(snapshot, probe_snapshot, row_width, page_size, remaining_s))
+        if events:
+            _serial_log("BTNTEST", "button-detected", count=len(events))
+            return True
+        sleep_ms(100)
+    _serial_log("BTNTEST", "done", result="timeout")
+    return True
+
+
+def _button_config_from_runtime_config(config):
+    if not isinstance(config, dict):
+        return {}
+    device = config.get("device")
+    if not isinstance(device, dict):
+        return {}
+    buttons = device.get("buttons")
+    if not isinstance(buttons, dict):
+        return {}
+    return buttons
+
+
+def _maybe_run_button_self_test_from_app(app, now_provider, sleep_ms):
+    if getattr(app, "button_self_test_ran", False):
+        return False
+    config = getattr(app, "config", None)
+    button_config = _button_config_from_runtime_config(config)
+    state = getattr(app, "state", None)
+    ran = _run_button_self_test(
+        getattr(app, "display", None),
+        getattr(app, "button_reader", None),
+        button_config,
+        getattr(state, "row_width", 16),
+        getattr(state, "page_size", 8),
+        now_provider,
+        sleep_ms,
+    )
+    app.button_self_test_ran = bool(ran)
+    return bool(ran)
 
 
 def connect_wifi(config, timeout_s=10):
@@ -320,6 +481,8 @@ def build_runtime_app(
     font = display_config.get("font", {}) if isinstance(display_config, dict) else {}
     font_width = int(font.get("width_px", 8)) if isinstance(font, dict) else 8
     font_height = int(font.get("height_px", 8)) if isinstance(font, dict) else 8
+    page_size = max(1, int(display_config.get("height_px", 64)) // font_height)
+    row_width = max(1, int(display_config.get("width_px", 128)) // font_width)
 
     project = config.get("project", {}) if isinstance(config.get("project"), dict) else {}
     version = str(project.get("version", ""))
@@ -346,15 +509,17 @@ def build_runtime_app(
     collected_diagnostics.extend(definition_diagnostics)
     collected_errors.extend(definition_errors)
 
+    button_self_test_ran = _run_button_self_test(display, button_reader, button_input, row_width, page_size, now_provider, sleep_ms)
+
     app = runtime_app_factory(
         definitions=definitions,
-        executor=executor_factory(),
+        executor=None,
         display=display,
         button_reader=button_reader,
         input_controller=input_controller,
         page_interval_s=int(display_config.get("page_interval_s", 15)),
-        page_size=max(1, int(display_config.get("height_px", 64)) // font_height),
-        row_width=max(1, int(display_config.get("width_px", 128)) // font_width),
+        page_size=page_size,
+        row_width=row_width,
         display_mode=DisplayMode(str(display_config.get("mode", str(DisplayMode.STANDARD)))),
         overview_columns=int(display_config.get("columns", 1)),
         column_separator=str(display_config.get("column_separator", " ")),
@@ -365,6 +530,11 @@ def build_runtime_app(
         version=version,
         build_time=build_time_value,
     )
+    trace_sink = None
+    if not getattr(app, "background_workers_enabled", False):
+        trace_sink = getattr(app, "emit_probe_trace", None)
+    app.executor = _build_executor_with_optional_trace(executor_factory, trace_sink)
+    app.probe_trace_sink = _build_probe_trace_sink(config)
     boot_logo_duration_s = float(boot_logo_min_s)
     if explicit_boot_logo_duration is not None:
         boot_logo_duration_s = max(float(boot_logo_min_s), float(display_config.get("boot_logo_duration_s", boot_logo_min_s)))
@@ -382,6 +552,7 @@ def build_runtime_app(
             network_state_reader=read_wifi_state,
         )
         app._refresh_network_state()
+    app.button_self_test_ran = bool(button_self_test_ran)
     _serial_log("BOOT", "app ready", boot_logo_until_s=f"{app.boot_logo_until_s:.3f}")
     if hasattr(app, "_record_exception") and collected_errors:
         observed_at_s = now_provider()
@@ -492,6 +663,7 @@ def run_loop(app, poll_interval_ms=50, iterations=None, now_provider=_now_s, sle
 
 def run_forever(config_path="config.json", poll_interval_ms=50):
     app = build_runtime_app_from_path(config_path)
+    _maybe_run_button_self_test_from_app(app, _now_s, _sleep_ms)
     startup_now_s = _now_s()
     _serial_log("BOOT", "startup tick", now_s=f"{startup_now_s:.3f}")
     _run_startup_network(app, startup_now_s)

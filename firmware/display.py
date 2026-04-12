@@ -24,7 +24,9 @@ try:
     )
     from displays.waveshare_epaper import WaveshareEPaper213BV4Display as _WaveshareEPaper213BV4Display, WaveshareEPaper213BV4Surface
     from displays.waveshare_epaper_tricolor import WaveshareEPaperTriColorDisplay
-except ImportError:  # pragma: no cover - used by CPython tests
+except ImportError as error:  # pragma: no cover - used by CPython tests
+    if not str(getattr(error, "name", "")).startswith("displays"):
+        raise
     from firmware.displays import SH1107Display, SSD1305Display, ST77xxDisplay, WaveshareEPaperMonoDisplay, create_display
     from firmware.displays.rendering import (
         HorizontalMonochromeSurface,

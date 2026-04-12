@@ -69,8 +69,8 @@ Direct probes run from the Pico itself. `SERVICE` is the extension point for any
 | --- | --- | --- | --- |
 | `PING` | ICMP ping | Response received; latency measured locally | No response or timeout |
 | `HTTP` | HTTP request | Response status is `2xx` or `3xx`; latency measured locally | Non-`2xx`/`3xx` response or timeout |
-| `FTP` | FTP control session with optional credentials | Login succeeds and the top-level directory can be listed via passive mode | Login failure, invalid listing, or timeout |
-| `TELNET` | Telnet session with optional credentials | Login succeeds when prompted and valid prompt or session output is observed | Login failure, invalid output, or timeout |
+| `FTP` | FTP control session with optional credentials | A valid FTP greeting is received and the control socket stays usable long enough to quit cleanly | Missing or invalid greeting, connection failure, or timeout |
+| `TELNET` | Telnet session with optional credentials | TCP session accepts and optional banner/session output is readable when present | Connection failure, explicit login failure text, or timeout |
 | `SERVICE` | HTTP request to a `/checks` endpoint | Response returns a valid checks payload; each returned check becomes an independent ViviPi check | Default backend uses `adb` to report Android availability, but any backend can return checks through the same schema |
 
 ## Default Hardware Target
@@ -129,6 +129,12 @@ Without `VIVIPI_SERVICE_BASE_URL`, ViviPi builds only the direct `PING`, `HTTP`,
 
 ```bash
 ./build service --host 0.0.0.0 --port 8080
+```
+
+1. Run one local pass of all configured health checks from the host.
+
+```bash
+scripts/vivipulse --mode local
 ```
 
 1. Build and deploy to the Pico when hardware is connected.
@@ -225,6 +231,8 @@ Each GitHub release publishes a small, versioned set of assets. Download the fil
 | `./build release-assets` | Build the versioned GitHub release assets |
 | `./build deploy` | Build the firmware bundle and copy it to the first connected Pico via `mpremote` |
 | `./build service --host 0.0.0.0 --port 8080` | Run the default ADB-backed Vivi Service |
+| `scripts/vivipulse --mode local` | Run one local pass of all configured health checks |
+| `scripts/vivipulse --mode plan` | Resolve the host-side probe plan without sending traffic |
 
 Typical examples:
 
@@ -267,6 +275,144 @@ The default host-side service discovers connected ADB devices and exposes them a
 ```
 
 The HTTP endpoint implementation lives in [src/vivipi/services/adb_service.py](src/vivipi/services/adb_service.py). The sample `SERVICE` check in [config/checks.yaml](config/checks.yaml) points at `VIVIPI_SERVICE_BASE_URL`.
+
+### Kubuntu ADB Auto-Start
+
+The checked-in local development config in [config/checks.local.yaml](config/checks.local.yaml) probes the Pixel 4 through `http://mickey:8081/vivipi/probe/adb/9B081FFAZ001WX`, so this machine needs the ADB-backed service listening on port `8081`.
+
+Install the user-level systemd units once:
+
+```bash
+./scripts/install_adb_service_user_units.sh
+```
+
+That installer:
+
+- enables `vivipi-adb-service.service` so the HTTP service starts automatically for your user session
+- enables `vivipi-adb-recover.timer` so `adb start-server` and `adb reconnect offline` run periodically after boot and resume
+- starts the service immediately on the current login session
+
+Manual fallback commands:
+
+```bash
+./scripts/run_adb_service.sh start
+./scripts/run_adb_service.sh ensure-adb
+```
+
+## Vivipulse
+
+`scripts/vivipulse` is the host-side stability, reproduction, mitigation-search, and soak-testing entrypoint for direct ViviPi probes.
+
+It intentionally reuses the Pico's shared lower-level execution seam:
+
+- `vivipi.runtime.checks.build_runtime_definitions()`
+- `vivipi.runtime.checks.build_executor()`
+- `vivipi.core.execution.execute_check()`
+- `vivipi.core.scheduler.due_checks()`
+- `vivipi.core.scheduler.probe_host_key()`
+- `vivipi.core.scheduler.probe_backoff_remaining_s()`
+
+It intentionally does not run the Pico shell on Linux. `vivipulse` does not reuse `firmware.runtime.run_forever()` as its host loop, `RuntimeApp`, display rendering, button handling, Wi-Fi bootstrap, or firmware display backends.
+
+### Purpose
+
+Use `vivipulse` when you want to:
+
+- reproduce instability outside the Pico UI/runtime shell
+- capture request-level JSONL traces with exact ordering and timing
+- identify the last-success and first-failure boundary for a target
+- inspect a local `1541ultimate` checkout to guide safer probe profiles
+- search for a less disruptive same-host execution profile
+- soak-test a chosen profile for a fixed wall-clock duration
+
+### Inputs
+
+The canonical repository input is `--build-config`, which defaults to `config/build-deploy.yaml` and prefers `config/build-deploy.local.yaml` automatically when no explicit input option is supplied.
+
+Supported input shapes:
+
+- `--build-config PATH`
+- `--runtime-config PATH`
+- `--checks-config PATH`
+
+### Modes
+
+`local` runs exactly one host-side pass of all resolved checks and is the simplest way to verify the full local health configuration:
+
+```bash
+scripts/vivipulse --mode local
+```
+
+`plan` resolves checks, same-host groups, and ordering without sending traffic:
+
+```bash
+scripts/vivipulse --mode plan
+```
+
+`reproduce` runs the shared probes from Linux and writes request-level traces:
+
+```bash
+scripts/vivipulse --mode reproduce --passes 2 --target http://192.168.1.10/health
+```
+
+`search` inspects the local Ultimate firmware source, then evaluates a small mitigation set in priority order:
+
+```bash
+scripts/vivipulse \
+  --mode search \
+  --passes 2 \
+  --ultimate-repo ../1541ultimate
+```
+
+`soak` runs a chosen profile for a wall-clock duration:
+
+```bash
+scripts/vivipulse --mode soak --duration 2h --same-host-backoff-ms 1000
+```
+
+Useful controls:
+
+- `--check-id ID` to restrict execution to one or more checks
+- `--target TARGET` to restrict execution to an exact target value
+- `--same-host-backoff-ms N` to override the configured same-host gap
+- `--allow-concurrent-same-host` to disable same-host serialization
+- `--interactive-recovery --resume-after-recovery` to stop on transport failure, preserve artifacts, and resume only after explicit confirmation
+- `--stop-on-failure` to stop after the first transport failure boundary
+
+### Artifacts
+
+Each run writes a timestamped directory under `artifacts/vivipulse/` containing:
+
+- `trace.jsonl`
+- `run-summary.txt`
+- `failure-boundary.txt`
+- `reuse-map.txt`
+- `firmware-research.txt`
+- `search-summary.txt`
+- `soak-summary.txt`
+
+### Recovery Flow
+
+When `--interactive-recovery` is enabled and a target becomes transport-unresponsive, `vivipulse`:
+
+- stops further same-host traffic immediately
+- flushes the trace before prompting
+- prints last-success and first-failure context
+- asks for only the minimum recovery action implied by the failure class
+- resumes only when `--resume-after-recovery` is also set and the operator types `resume`
+
+### Prerequisites
+
+- Python 3.12+
+- a local ViviPi checkout
+- the `1541ultimate` source tree when you want firmware-guided `search` mode
+
+### Intentionally Unsupported
+
+- running the full Pico firmware shell on Linux
+- host-side display parity testing
+- button or Wi-Fi bootstrap behavior
+- automatic physical recovery without operator confirmation
 
 ## Configuration
 
@@ -413,8 +559,9 @@ config/                  Build-time configuration
 docs/                    Specification, traceability, and audits
 firmware/                MicroPython entrypoints
 firmware/displays/       Display backend registry and hardware drivers
+scripts/                 Public host-side shell entrypoints
 src/vivipi/core/         Pure application logic and rendering model
 src/vivipi/services/     Host-side services
-src/vivipi/tooling/      Build and deploy logic
+src/vivipi/tooling/      Build, deploy, and host-side CLI logic
 tests/                   All test suites
 ```
