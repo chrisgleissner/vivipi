@@ -756,7 +756,12 @@ def test_runtime_app_queues_probe_traces_from_background_workers_and_drains_them
 def test_runtime_app_probe_trace_overlay_and_button_edge_paths_cover_remaining_branches():
     definition = make_definition("router", check_type=CheckType.HTTP)
     trace_calls = []
-    app = RuntimeApp(definitions=(definition,), executor=lambda definition, now_s: None, display=FakeDisplay(), page_interval_s=0)
+    app = RuntimeApp(
+        definitions=(definition,),
+        executor=lambda definition, now_s: CheckExecutionResult(source_identifier=definition.identifier, observations=()),
+        display=FakeDisplay(),
+        page_interval_s=0,
+    )
     app.probe_trace_sink = lambda definition, event, fields: trace_calls.append((definition.identifier, event, dict(fields)))
     app.background_workers_enabled = False
 
