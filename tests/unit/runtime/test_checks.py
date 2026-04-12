@@ -813,6 +813,48 @@ def test_portable_ftp_runner_stdlib_paths_cover_success_and_failures(monkeypatch
     assert bad_quit.ok is False
     assert bad_quit.details == "expected FTP 221, got 500 Bad quit"
 
+    monkeypatch.setitem(sys.modules, "ftplib", SimpleNamespace(FTP=lambda: FakeFTP(greeting="500 Down")))
+    bad_greeting = portable_ftp_runner("ftp://nas.example.local", 10)
+    assert bad_greeting.ok is False
+    assert bad_greeting.details == "expected FTP 220, got 500 Down"
+
+    monkeypatch.setitem(sys.modules, "ftplib", SimpleNamespace(FTP=lambda: FakeFTP(login="530 Not logged in")))
+    bad_login = portable_ftp_runner("ftp://nas.example.local", 10)
+    assert bad_login.ok is False
+    assert bad_login.details == "expected FTP 230, got 530 Not logged in"
+
+
+def test_portable_ftp_runner_falls_back_to_raw_path_when_ftplib_is_missing(monkeypatch):
+    original_import = builtins.__import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "ftplib":
+            raise ImportError("no ftplib")
+        return original_import(name, globals, locals, fromlist, level)
+
+    control_socket = FakeSocket(
+        [
+            b"220 Ready\r\n",
+            b"331 Password required\r\n",
+            b"230 Logged in\r\n",
+            b"227 Entering Passive Mode (192,0,2,10,4,1)\r\n",
+            b"150 Opening data connection\r\n",
+            b"226 Closing data connection\r\n",
+            b"221 Bye\r\n",
+        ]
+    )
+    data_socket = FakeSocket([b"games\r\n", b""])
+    sockets = iter((control_socket, data_socket))
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    monkeypatch.setattr(runtime_checks, "_open_socket_compat", lambda *args, **kwargs: next(sockets))
+    monkeypatch.setattr(runtime_checks, "_is_micropython_runtime", lambda: False)
+
+    result = portable_ftp_runner("ftp://nas.example.local", 10)
+
+    assert result.ok is True
+    assert result.details == "NLST bytes=5"
+
 
 def test_portable_ftp_runner_raw_path_reports_remaining_failures(monkeypatch):
     def run_case(control_responses, data_responses=(b"games\r\n", b"")):
@@ -1106,6 +1148,7 @@ def test_runtime_target_alias_resolution_rewrites_matching_hosts_only():
         {"other.local": "192.0.2.20"},
     ) == "http://router.local/health"
     assert runtime_checks._resolve_target_alias("router.local", {"router.local": "   "}) == "router.local"
+    assert runtime_checks._resolve_target_alias("router.local", {"other.local": "192.0.2.20"}) == "router.local"
 
 
 def test_network_helper_functions_cover_additional_fallback_paths(monkeypatch):
@@ -1118,6 +1161,50 @@ def test_network_helper_functions_cover_additional_fallback_paths(monkeypatch):
     assert _classify_network_error(OSError("weird failure")) == "io"
     assert runtime_checks._resolve_target_alias("", {"router.local": "192.0.2.10"}) == ""
     assert runtime_checks._resolve_target_alias("http://router.local/health", {"router.local": "   "}) == "http://router.local/health"
+    assert runtime_checks._error_errno(OSError("boom", 115)) is None
+
+
+def test_error_errno_uses_integer_first_arg_and_socket_helpers_reraise_other_errors(monkeypatch):
+    assert runtime_checks._error_errno(OSError(115, "in progress")) == 115
+
+    monkeypatch.setattr(runtime_checks, "_socket_wait", lambda handle, deadline, writable, trace=None, stage="send": None)
+
+    class SenderSocket:
+        def send(self, payload):
+            raise OSError("send boom")
+
+    with pytest.raises(OSError, match="send boom"):
+        runtime_checks._socket_sendall(SenderSocket(), b"payload", ("perf", 1.0))
+
+    class SendallSocket:
+        def sendall(self, payload):
+            raise OSError("sendall boom")
+
+    with pytest.raises(OSError, match="sendall boom"):
+        runtime_checks._socket_sendall(SendallSocket(), b"payload", ("perf", 1.0))
+
+    class RecvSocket:
+        def recv(self, size):
+            raise OSError("recv boom")
+
+    with pytest.raises(OSError, match="recv boom"):
+        runtime_checks._socket_recv(RecvSocket(), 32, ("perf", 1.0))
+
+
+def test_open_socket_reports_dns_errors(monkeypatch):
+    trace_events = []
+    monkeypatch.setattr(runtime_checks.socket, "getaddrinfo", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("name resolution failed")))
+
+    with pytest.raises(OSError, match="name resolution failed"):
+        _open_socket(
+            "nas.example.local",
+            21,
+            10,
+            trace=lambda event, **fields: trace_events.append((event, fields)),
+        )
+
+    assert trace_events[0] == ("dns-start", {"host": "nas.example.local", "port": 21})
+    assert trace_events[1][0] == "dns-error"
 
 
 def test_portable_http_runner_urllib_fallback_covers_plaintext_and_transport_errors(monkeypatch):

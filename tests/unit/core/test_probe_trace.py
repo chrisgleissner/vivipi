@@ -103,6 +103,18 @@ def test_probe_trace_helper_fallbacks_and_rendering(monkeypatch, tmp_path):
     assert probe_trace.render_parity_summary(None) == "Parity comparison was not run for this invocation.\n"
 
 
+def test_probe_trace_current_thread_id_falls_back_when_threading_ident_breaks(monkeypatch):
+    class BrokenThreading:
+        @staticmethod
+        def get_ident():
+            raise RuntimeError("threading unavailable")
+
+    monkeypatch.setattr(probe_trace, "_thread", None)
+    monkeypatch.setattr(probe_trace, "threading", BrokenThreading)
+
+    assert probe_trace._current_thread_id() == "main"
+
+
 def test_probe_trace_compare_detects_lifecycle_and_timing_differences():
     reference = (
         probe_trace.ProbeTraceRecord(
