@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from vivipi.core.models import CheckDefinition, CheckType
+import vivipi.core.probe_trace as probe_trace
 from vivipi.core.probe_trace import ProbeTraceCollector, compare_probe_traces, load_probe_trace_records
 
 
@@ -76,3 +77,170 @@ def test_probe_trace_load_and_compare_detects_ordering_differences(tmp_path):
 
     assert comparison.request_count_match is True
     assert comparison.ordering_match is False
+
+
+def test_probe_trace_helper_fallbacks_and_rendering(monkeypatch, tmp_path):
+    monkeypatch.setattr(probe_trace, "threading", None)
+    monkeypatch.setattr(probe_trace, "_thread", None)
+
+    assert probe_trace._allocate_lock() is None
+    assert probe_trace._lock_context(None) is False
+    class BrokenThreadModule:
+        @staticmethod
+        def get_ident():
+            raise RuntimeError("no thread id")
+
+    monkeypatch.setattr(probe_trace, "_thread", BrokenThreadModule)
+    assert probe_trace._current_thread_id() == "main"
+    converted = probe_trace._jsonable({"bytes": b"abc", "items": (1, object())})
+    assert converted["bytes"] == "abc"
+    assert converted["items"][0] == 1
+    assert isinstance(converted["items"][1], str)
+
+    invalid_path = tmp_path / "invalid.jsonl"
+    invalid_path.write_text("not-json\n[]\n{}\n", encoding="utf-8")
+    assert load_probe_trace_records(invalid_path) == ()
+    assert probe_trace.render_parity_summary(None) == "Parity comparison was not run for this invocation.\n"
+
+
+def test_probe_trace_compare_detects_lifecycle_and_timing_differences():
+    reference = (
+        probe_trace.ProbeTraceRecord(
+            source="firmware",
+            mode="runtime",
+            wall_time="2026-01-01T00:00:00.000000Z",
+            monotonic_s=1.0,
+            sequence=1,
+            request_index=1,
+            request_id="alpha:1",
+            thread_id="main",
+            check_id="alpha",
+            check_name="ALPHA",
+            check_type="HTTP",
+            target="http://a",
+            probe_host_key="a",
+            event="probe-start",
+        ),
+        probe_trace.ProbeTraceRecord(
+            source="firmware",
+            mode="runtime",
+            wall_time="2026-01-01T00:00:00.100000Z",
+            monotonic_s=1.1,
+            sequence=2,
+            request_index=1,
+            request_id="alpha:1",
+            thread_id="main",
+            check_id="alpha",
+            check_name="ALPHA",
+            check_type="HTTP",
+            target="http://a",
+            probe_host_key="a",
+            event="probe-end",
+        ),
+        probe_trace.ProbeTraceRecord(
+            source="firmware",
+            mode="runtime",
+            wall_time="2026-01-01T00:00:00.200000Z",
+            monotonic_s=1.2,
+            sequence=3,
+            request_index=1,
+            request_id="beta:1",
+            thread_id="main",
+            check_id="beta",
+            check_name="BETA",
+            check_type="HTTP",
+            target="http://b",
+            probe_host_key="b",
+            event="probe-start",
+        ),
+        probe_trace.ProbeTraceRecord(
+            source="firmware",
+            mode="runtime",
+            wall_time="2026-01-01T00:00:00.300000Z",
+            monotonic_s=1.3,
+            sequence=4,
+            request_index=1,
+            request_id="beta:1",
+            thread_id="main",
+            check_id="beta",
+            check_name="BETA",
+            check_type="HTTP",
+            target="http://b",
+            probe_host_key="b",
+            event="probe-end",
+        ),
+    )
+    candidate = (
+        probe_trace.ProbeTraceRecord(
+            source="host",
+            mode="local",
+            wall_time="2026-01-01T00:00:00.000000Z",
+            monotonic_s=1.0,
+            sequence=1,
+            request_index=1,
+            request_id="alpha:1",
+            thread_id="main",
+            check_id="alpha",
+            check_name="ALPHA",
+            check_type="HTTP",
+            target="http://a",
+            probe_host_key="a",
+            event="probe-start",
+        ),
+        probe_trace.ProbeTraceRecord(
+            source="host",
+            mode="local",
+            wall_time="2026-01-01T00:00:00.300000Z",
+            monotonic_s=1.3,
+            sequence=2,
+            request_index=1,
+            request_id="alpha:1",
+            thread_id="main",
+            check_id="alpha",
+            check_name="ALPHA",
+            check_type="HTTP",
+            target="http://a",
+            probe_host_key="a",
+            event="probe-error",
+        ),
+        probe_trace.ProbeTraceRecord(
+            source="host",
+            mode="local",
+            wall_time="2026-01-01T00:00:00.500000Z",
+            monotonic_s=1.5,
+            sequence=3,
+            request_index=1,
+            request_id="beta:1",
+            thread_id="main",
+            check_id="beta",
+            check_name="BETA",
+            check_type="HTTP",
+            target="http://b",
+            probe_host_key="b",
+            event="probe-start",
+        ),
+        probe_trace.ProbeTraceRecord(
+            source="host",
+            mode="local",
+            wall_time="2026-01-01T00:00:00.600000Z",
+            monotonic_s=1.6,
+            sequence=4,
+            request_index=1,
+            request_id="beta:1",
+            thread_id="main",
+            check_id="beta",
+            check_name="BETA",
+            check_type="HTTP",
+            target="http://b",
+            probe_host_key="b",
+            event="probe-end",
+        ),
+    )
+
+    comparison = compare_probe_traces(reference, candidate, timing_tolerance_ratio=0.05)
+    summary = probe_trace.render_parity_summary(comparison)
+
+    assert comparison.lifecycle_match is False
+    assert comparison.timing_within_tolerance is False
+    assert comparison.lifecycle_differences
+    assert "Lifecycle differences:" in summary

@@ -162,7 +162,7 @@ def resolve_input(args) -> ResolvedInput:
         runtime_config = _runtime_config_from_runtime_json(input_path)
         definitions = build_runtime_definitions(runtime_config)
         parser_reuse = (
-            "json.load",
+            "json.loads",
             "vivipi.runtime.checks.build_runtime_definitions",
         )
         input_kind = "runtime-config"
@@ -205,6 +205,7 @@ def resolve_input(args) -> ResolvedInput:
     profile = _profile_from_runtime_config(runtime_config)
     if args.same_host_backoff_ms is not None:
         profile = VivipulseProfile(
+            allow_concurrent_hosts=profile.allow_concurrent_hosts,
             allow_concurrent_same_host=profile.allow_concurrent_same_host,
             same_host_backoff_ms=int(args.same_host_backoff_ms),
             pass_spacing_s=profile.pass_spacing_s,
@@ -215,6 +216,7 @@ def resolve_input(args) -> ResolvedInput:
         )
     if args.allow_concurrent_same_host:
         profile = VivipulseProfile(
+            allow_concurrent_hosts=profile.allow_concurrent_hosts,
             allow_concurrent_same_host=True,
             same_host_backoff_ms=profile.same_host_backoff_ms,
             pass_spacing_s=profile.pass_spacing_s,
@@ -445,10 +447,17 @@ def render_parity_mode_summary(enabled: bool, firmware_trace: str | None) -> str
 
 
 def _ensure_artifact_dir(root: Path, mode: str) -> Path:
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    run_dir = root / f"{timestamp}-{mode}"
-    run_dir.mkdir(parents=True, exist_ok=False)
-    return run_dir
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    base_name = f"{timestamp}-{mode}"
+    attempt = 0
+    while True:
+        suffix = "" if attempt == 0 else f"-{attempt}"
+        run_dir = root / f"{base_name}{suffix}"
+        try:
+            run_dir.mkdir(parents=True, exist_ok=False)
+            return run_dir
+        except FileExistsError:
+            attempt += 1
 
 
 def _write_text(path: Path, content: str):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import importlib
 import re
 import select
 import socket
@@ -29,6 +30,7 @@ TELNET_DONT = 254
 TELNET_DO = 253
 TELNET_WONT = 252
 TELNET_WILL = 251
+TELNET_IDLE_TIMEOUT_S = 0.20
 TELNET_SB = 250
 TELNET_SE = 240
 POLLIN = getattr(select, "POLLIN", 0x0001)
@@ -63,6 +65,10 @@ def _sleep_ms(value_ms: int):
         time.sleep_ms(value_ms)
         return
     time.sleep(value_ms / 1000.0)
+
+
+def _is_micropython_runtime() -> bool:
+    return hasattr(time, "ticks_ms")
 
 
 def _deadline_after_s(timeout_s: int | float):
@@ -285,11 +291,10 @@ def portable_ping_runner(target: str, timeout_s: int) -> PingProbeResult:
     return _single_ping()
 
 
-def _http_headers(username: str | None = None, password: str | None = None) -> dict[str, str]:
-    headers = {"Connection": "close"}
-    if password:
-        headers["X-Password"] = password
-    return headers
+def _probe_error_detail(error: BaseException) -> str:
+    if isinstance(error, (OSError, TimeoutError)):
+        return _format_network_error(error)
+    return _normalize_error_text(error)
 
 
 def portable_http_runner(
@@ -300,74 +305,38 @@ def portable_http_runner(
     password: str | None = None,
     trace=None,
 ) -> HttpResponseResult:
-    headers = _http_headers(username=username, password=password)
+    del username, password
+    if trace is not None or _is_micropython_runtime():
+        return _portable_http_runner_socket(method, target, timeout_s, trace=trace)
+
     try:
-        import urequests  # type: ignore
+        http_client = importlib.import_module("http.client")
     except ImportError:
-        import urllib.error
-        import urllib.request
+        return _portable_http_runner_socket(method, target, timeout_s, trace=trace)
 
-        request = urllib.request.Request(url=target, method=method, headers=headers)
-        started_at, uses_ticks_ms = _start_timer()
-        try:
-            with urllib.request.urlopen(request, timeout=timeout_s) as response:
-                raw_body = response.read().decode("utf-8")
-                try:
-                    body = json.loads(raw_body)
-                except ValueError:
-                    body = raw_body
-                return HttpResponseResult(
-                    status_code=response.getcode(),
-                    body=body,
-                    latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
-                    details=f"HTTP {response.getcode()}",
-                )
-        except urllib.error.HTTPError as error:
-            raw_body = error.read().decode("utf-8")
-            try:
-                body = json.loads(raw_body)
-            except ValueError:
-                body = raw_body
-            return HttpResponseResult(
-                status_code=error.code,
-                body=body,
-                latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
-                details=f"HTTP {error.code}",
-            )
-        except Exception as error:
-            return HttpResponseResult(
-                status_code=None,
-                body=None,
-                latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
-                details=_format_network_error(error),
-            )
-
-    if hasattr(time, "ticks_ms"):
-        return _portable_http_runner_socket(method, target, timeout_s, headers=headers, trace=trace)
-
+    scheme, host, port, path = _parse_http_target(target)
+    connection_class = http_client.HTTPSConnection if scheme == "https" else http_client.HTTPConnection
+    connection = connection_class(host, port, timeout=timeout_s)
     started_at, uses_ticks_ms = _start_timer()
     try:
-        response = urequests.request(method, target, timeout=timeout_s, headers=headers)
+        connection.request(method, path, headers={"Connection": "close"})
+        response = connection.getresponse()
+        body_bytes = response.read()
+        return HttpResponseResult(
+            status_code=int(response.status),
+            body=_decode_http_body(body_bytes),
+            latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
+            details=f"HTTP {response.status}",
+        )
     except Exception as error:
         return HttpResponseResult(
             status_code=None,
             body=None,
             latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
-            details=_format_network_error(error),
-        )
-    try:
-        try:
-            body = response.json()
-        except ValueError:
-            body = response.text
-        return HttpResponseResult(
-            status_code=int(response.status_code),
-            body=body,
-            latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
-            details=f"HTTP {response.status_code}",
+            details=_probe_error_detail(error),
         )
     finally:
-        response.close()
+        connection.close()
 
 
 def _parse_socket_target(target: str, default_port: int, expected_scheme: str | None = None) -> tuple[str, int]:
@@ -608,6 +577,10 @@ def _ftp_parse_pasv(response: str) -> tuple[str, int]:
     return host, port
 
 
+def _ftp_nlst_names(payload: bytes) -> list[str]:
+    return [line.strip() for line in payload.decode("utf-8", "replace").splitlines() if line.strip()]
+
+
 def _recv_all(handle) -> bytes:
     chunks: list[bytes] = []
     while True:
@@ -628,26 +601,57 @@ def _recv_until_closed(handle, deadline, trace=None, stage: str = "recv-all") ->
     return b"".join(chunks)
 
 
-def _looks_like_ftp_listing(value: str) -> bool:
-    lines = [line.strip() for line in value.splitlines() if line.strip()]
-    return any(line[0] in "-dl" or len(line.split()) >= 2 for line in lines)
-
-
 def portable_ftp_runner(target: str, timeout_s: int, username: str | None = None, password: str | None = None, trace=None) -> PingProbeResult:
     host, port = _parse_socket_target(target, 21, expected_scheme="ftp")
+    if trace is None and not _is_micropython_runtime():
+        try:
+            import ftplib
+        except ImportError:
+            pass
+        else:
+            ftp = ftplib.FTP()
+            started_at, uses_ticks_ms = _start_timer()
+            try:
+                greeting = ftp.connect(host, port, timeout=timeout_s)
+                if not greeting.startswith("220"):
+                    raise RuntimeError(f"expected FTP 220, got {greeting}")
+                login = ftp.login(username or "anonymous", password or "")
+                if not login.startswith("230"):
+                    raise RuntimeError(f"expected FTP 230, got {login}")
+                ftp.set_pasv(True)
+                names = ftp.nlst(".")
+                if not names:
+                    raise RuntimeError("empty FTP NLST data")
+                goodbye = ftp.quit()
+                if not goodbye.startswith("221"):
+                    raise RuntimeError(f"expected FTP 221, got {goodbye}")
+                return PingProbeResult(
+                    ok=True,
+                    latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
+                    details=f"NLST bytes={sum(len(name) for name in names)}",
+                )
+            except Exception as error:
+                return PingProbeResult(
+                    ok=False,
+                    latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
+                    details=_probe_error_detail(error),
+                )
+            finally:
+                try:
+                    ftp.close()
+                except OSError:
+                    pass
+
     started_at, uses_ticks_ms = _start_timer()
     deadline = _deadline_after_s(timeout_s)
 
     control_socket = None
     data_socket = None
-    quit_sent = False
-    session_started = False
     try:
         control_socket = _open_socket_compat(host, port, timeout_s, deadline, trace=trace)
         code, response = _ftp_read_response(control_socket, deadline=deadline, trace=trace)
         if code != 220:
-            return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details=response or "ftp unavailable")
-        session_started = True
+            raise RuntimeError(f"expected FTP 220, got {response}")
 
         login_username = username or "anonymous"
         login_password = password or ""
@@ -658,50 +662,45 @@ def portable_ftp_runner(target: str, timeout_s: int, username: str | None = None
             _ftp_command_with_deadline(control_socket, f"PASS {login_password}", deadline, trace=trace)
             code, response = _ftp_read_response(control_socket, deadline=deadline, trace=trace)
         if code != 230:
-            return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details=response or "login failed")
+            raise RuntimeError(f"expected FTP 230, got {response}")
 
         _ftp_command_with_deadline(control_socket, "PASV", deadline, trace=trace)
         code, response = _ftp_read_response(control_socket, deadline=deadline, trace=trace)
         if code != 227:
-            return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details=response or "passive mode failed")
+            raise RuntimeError(f"expected FTP 227, got {response}")
 
         data_host, data_port = _ftp_parse_pasv(response)
         data_socket = _open_socket_compat(data_host, data_port, timeout_s, deadline, trace=trace)
 
-        _ftp_command_with_deadline(control_socket, "LIST /", deadline, trace=trace)
+        _ftp_command_with_deadline(control_socket, "NLST .", deadline, trace=trace)
         code, response = _ftp_read_response(control_socket, deadline=deadline, trace=trace)
         if code not in {125, 150}:
-            return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details=response or "listing failed")
+            raise RuntimeError(f"expected FTP 125/150, got {response}")
 
         listing_payload = _recv_until_closed(data_socket, deadline, trace=trace, stage="ftp-data-recv")
-        listing_text = listing_payload.decode("utf-8", "replace").strip()
-        if listing_text and not _looks_like_ftp_listing(listing_text):
-            return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details="invalid directory listing")
+        names = _ftp_nlst_names(listing_payload)
+        if not names:
+            raise RuntimeError("empty FTP NLST data")
         _close_socket(data_socket, trace=trace, target=f"{data_host}:{data_port}")
         data_socket = None
 
         code, response = _ftp_read_response(control_socket, deadline=deadline, trace=trace)
         if code not in {226, 250}:
-            return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details=response or "listing failed")
+            raise RuntimeError(f"expected FTP 226/250, got {response}")
 
         _ftp_command_with_deadline(control_socket, "QUIT", deadline, trace=trace)
-        quit_sent = True
-        _ftp_read_response(control_socket, deadline=deadline, trace=trace)
+        code, response = _ftp_read_response(control_socket, deadline=deadline, trace=trace)
+        if code != 221:
+            raise RuntimeError(f"expected FTP 221, got {response}")
         return PingProbeResult(
             ok=True,
             latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
-            details="directory listed",
+            details=f"NLST bytes={sum(len(name) for name in names)}",
         )
-    except (OSError, TimeoutError, ValueError) as error:
-        return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details=_format_network_error(error))
+    except Exception as error:
+        return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details=_probe_error_detail(error))
     finally:
         _close_socket(data_socket, trace=trace, target=None)
-        if control_socket is not None and session_started and not quit_sent and _deadline_remaining_ms(deadline) > 0:
-            try:
-                _ftp_command_with_deadline(control_socket, "QUIT", deadline, trace=trace)
-                _ftp_read_response(control_socket, deadline=deadline, trace=trace)
-            except (OSError, TimeoutError, ValueError):
-                pass
         _close_socket(control_socket, trace=trace, target=f"{host}:{port}")
 
 
@@ -788,27 +787,93 @@ def _looks_like_telnet_output(value: str) -> bool:
     return _has_alnum_ascii(stripped) or stripped[-1:] in ">#$%"
 
 
-def portable_telnet_runner(target: str, timeout_s: int, username: str | None = None, password: str | None = None, trace=None) -> PingProbeResult:
-    host, port = _parse_socket_target(target, 23, expected_scheme="telnet")
-    started_at, uses_ticks_ms = _start_timer()
-    deadline = _deadline_after_s(timeout_s)
+def _telnet_collect_visible(handle, chunk: bytes, trace=None) -> bytes:
+    visible = bytearray()
+    index = 0
+    while index < len(chunk):
+        byte = chunk[index]
+        if byte == TELNET_IAC and index + 2 < len(chunk) and chunk[index + 1] in (TELNET_DO, TELNET_DONT, TELNET_WILL, TELNET_WONT):
+            command = chunk[index + 1]
+            option = chunk[index + 2]
+            reply = bytes((TELNET_IAC, TELNET_WONT if command in (TELNET_DO, TELNET_DONT) else TELNET_DONT, option))
+            handle.sendall(reply)
+            _emit_probe_trace(trace, "socket-send", stage="telnet-send", bytes_sent=len(reply))
+            index += 3
+            continue
+        visible.append(byte)
+        index += 1
+    return bytes(visible)
 
+
+def portable_telnet_runner(target: str, timeout_s: int, username: str | None = None, password: str | None = None, trace=None) -> PingProbeResult:
+    del username, password
+    host, port = _parse_socket_target(target, 23, expected_scheme="telnet")
+    if trace is None and not _is_micropython_runtime() and hasattr(socket, "create_connection"):
+        started_at, uses_ticks_ms = _start_timer()
+        handle = None
+        try:
+            handle = socket.create_connection((host, port), timeout=timeout_s)
+            handle.settimeout(TELNET_IDLE_TIMEOUT_S)
+            handle.sendall(b"\r\n")
+            visible = bytearray()
+            while True:
+                try:
+                    chunk = handle.recv(4096)
+                except socket.timeout:
+                    break
+                if not chunk:
+                    break
+                visible.extend(_telnet_collect_visible(handle, chunk))
+            text = bytes(visible).decode("utf-8", "ignore").strip()
+            if not text:
+                raise RuntimeError("empty telnet banner")
+            return PingProbeResult(
+                ok=True,
+                latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
+                details=f"banner_bytes={len(text.encode())}",
+            )
+        except Exception as error:
+            return PingProbeResult(
+                ok=False,
+                latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
+                details=_probe_error_detail(error),
+            )
+        finally:
+            _close_socket(handle, trace=trace, target=f"{host}:{port}")
+
+    started_at, uses_ticks_ms = _start_timer()
     handle = None
     try:
+        deadline = _deadline_after_s(timeout_s)
         handle = _open_socket_compat(host, port, timeout_s, deadline, trace=trace)
-        initial_raw = _recv_telnet_chunk_compat(handle, 4096, deadline=deadline, trace=trace)
-        transcript = _telnet_strip_negotiation(handle, initial_raw)
-        if _contains_any(transcript, TELNET_FAILURE_MARKERS):
-            return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details="login failed")
-
-        if transcript:
-            cleaned = transcript.decode("utf-8", "replace")
-            if _looks_like_telnet_output(cleaned):
-                return PingProbeResult(ok=True, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details="banner ready")
-
-        return PingProbeResult(ok=True, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details="connected")
-    except (OSError, TimeoutError, ValueError) as error:
-        return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details=_format_network_error(error))
+        if hasattr(handle, "settimeout"):
+            handle.settimeout(TELNET_IDLE_TIMEOUT_S)
+        handle.sendall(b"\r\n")
+        _emit_probe_trace(trace, "socket-send", stage="telnet-send", bytes_sent=2)
+        visible = bytearray()
+        while True:
+            try:
+                chunk = handle.recv(4096)
+            except TimeoutError:
+                break
+            except OSError as error:
+                if _classify_network_error(error) == "timeout":
+                    break
+                raise
+            if not chunk:
+                break
+            _emit_probe_trace(trace, "socket-recv", stage="telnet-recv", bytes_received=len(chunk))
+            visible.extend(_telnet_collect_visible(handle, chunk, trace=trace))
+        text = bytes(visible).decode("utf-8", "ignore").strip()
+        if not text:
+            raise RuntimeError("empty telnet banner")
+        return PingProbeResult(
+            ok=True,
+            latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
+            details=f"banner_bytes={len(text.encode())}",
+        )
+    except Exception as error:
+        return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details=_probe_error_detail(error))
     finally:
         _close_socket(handle, trace=trace, target=f"{host}:{port}")
 
@@ -857,7 +922,7 @@ def _parse_http_response(payload: bytes) -> tuple[int, object]:
     return int(parts[1]), _decode_http_body(payload[header_end + 4 :])
 
 
-def _portable_http_runner_socket(method: str, target: str, timeout_s: int, headers: dict[str, str], trace=None) -> HttpResponseResult:
+def _portable_http_runner_socket(method: str, target: str, timeout_s: int, trace=None) -> HttpResponseResult:
     scheme, host, port, path = _parse_http_target(target)
     if scheme == "https":
         raise OSError("https unsupported on device")
@@ -866,14 +931,10 @@ def _portable_http_runner_socket(method: str, target: str, timeout_s: int, heade
     deadline = _deadline_after_s(timeout_s)
     host_header = host if port == 80 else f"{host}:{port}"
     request_lines = [
-        f"{method} {path} HTTP/1.0",
+        f"{method} {path} HTTP/1.1",
         f"Host: {host_header}",
         "Connection: close",
     ]
-    for key, value in headers.items():
-        if _fold(key) == "connection":
-            continue
-        request_lines.append(f"{key}: {value}")
     request_lines.extend(("", ""))
     request_payload = "\r\n".join(request_lines).encode("utf-8")
 
@@ -894,7 +955,7 @@ def _portable_http_runner_socket(method: str, target: str, timeout_s: int, heade
             status_code=None,
             body=None,
             latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
-            details=_format_network_error(error),
+            details=_probe_error_detail(error),
         )
     finally:
         _close_socket(handle, trace=trace, target=f"{host}:{port}")

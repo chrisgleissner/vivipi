@@ -71,6 +71,15 @@ def _service_summary(result: CheckExecutionResult) -> str:
     )
 
 
+def _is_service_payload_result(definition: CheckDefinition, result: CheckExecutionResult) -> bool:
+    if not result.replace_source or result.diagnostics:
+        return False
+    return bool(result.observations) and all(
+        observation.source_identifier == definition.identifier
+        for observation in result.observations
+    )
+
+
 def _direct_summary(detail: str, diagnostics: tuple[str, ...], exception_detail: str | None) -> str:
     if detail:
         return detail
@@ -451,7 +460,7 @@ class HostProbeRunner:
                 exception_detail,
             )
 
-        if definition.check_type == CheckType.SERVICE and not result.replace_source and not result.diagnostics:
+        if definition.check_type == CheckType.SERVICE and _is_service_payload_result(definition, result):
             summary = _service_summary(result)
             return (
                 Status.OK.value,

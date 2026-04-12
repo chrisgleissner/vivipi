@@ -95,6 +95,31 @@ def test_parse_duration_rejects_blank():
         tooling_vivipulse.parse_duration("   ")
 
 
+def test_build_executor_with_optional_trace_uses_supported_and_fallback_paths(monkeypatch):
+    calls = []
+
+    def fake_build_executor(*, trace_sink=None):
+        calls.append(trace_sink)
+        return trace_sink or "plain"
+
+    monkeypatch.setattr(tooling_vivipulse, "build_executor", fake_build_executor)
+
+    assert tooling_vivipulse._build_executor_with_optional_trace() == "plain"
+    marker = object()
+    assert tooling_vivipulse._build_executor_with_optional_trace(marker) is marker
+    assert calls == [None, marker]
+
+
+def test_build_executor_with_optional_trace_reraises_unexpected_type_error(monkeypatch):
+    def fake_build_executor(*, trace_sink=None):
+        raise TypeError("different failure")
+
+    monkeypatch.setattr(tooling_vivipulse, "build_executor", fake_build_executor)
+
+    with pytest.raises(TypeError, match="different failure"):
+        tooling_vivipulse._build_executor_with_optional_trace(object())
+
+
 def test_resolve_input_reuses_build_runtime_definitions_for_checks_config(tmp_path, monkeypatch):
     config_path = tmp_path / "checks.yaml"
     config_path.write_text("checks: []\n", encoding="utf-8")
@@ -167,13 +192,40 @@ def test_resolve_input_reuses_build_config_stack(tmp_path, monkeypatch):
     assert "vivipi.tooling.build_deploy.render_device_runtime_config" in resolved.parser_reuse
 
 
+def test_resolve_input_uses_default_build_config_resolution(monkeypatch, tmp_path):
+    root = tmp_path / "repo"
+    config_path = root / "config" / "build-deploy.yaml"
+    expected = (make_definition("alpha"),)
+
+    monkeypatch.setattr(tooling_vivipulse, "repository_root", lambda: root)
+    monkeypatch.setattr(tooling_vivipulse, "resolve_config_path", lambda path, prefer_local_config: config_path)
+    monkeypatch.setattr(tooling_vivipulse, "load_build_deploy_settings", lambda path: {"checks_config": "checks.yaml"})
+    monkeypatch.setattr(tooling_vivipulse, "_resolve_checks_path", lambda path, settings: path.parent / settings["checks_config"])
+    monkeypatch.setattr(tooling_vivipulse, "load_runtime_checks", lambda path: expected)
+    monkeypatch.setattr(
+        tooling_vivipulse,
+        "render_device_runtime_config",
+        lambda settings, checks: {"checks": [{"id": "alpha", "name": "ALPHA", "type": "PING", "target": "device.local"}]},
+    )
+    monkeypatch.setattr(tooling_vivipulse, "build_runtime_definitions", lambda runtime_config: expected)
+
+    resolved = tooling_vivipulse.resolve_input(make_args())
+
+    assert resolved.input_kind == "build-config"
+    assert resolved.input_path == config_path
+
+
 def test_resolve_input_applies_cli_probe_schedule_overrides(tmp_path):
     runtime_path = tmp_path / "config.json"
     runtime_path.write_text(
         json.dumps(
             {
                 "checks": [{"id": "alpha", "name": "Alpha", "type": "PING", "target": "device.local"}],
-                "probe_schedule": {"allow_concurrent_same_host": False, "same_host_backoff_ms": 250},
+                "probe_schedule": {
+                    "allow_concurrent_hosts": True,
+                    "allow_concurrent_same_host": False,
+                    "same_host_backoff_ms": 250,
+                },
             }
         ),
         encoding="utf-8",
@@ -187,6 +239,7 @@ def test_resolve_input_applies_cli_probe_schedule_overrides(tmp_path):
         )
     )
 
+    assert resolved.profile.allow_concurrent_hosts is True
     assert resolved.profile.same_host_backoff_ms == 900
     assert resolved.profile.allow_concurrent_same_host is True
 
@@ -394,7 +447,7 @@ def test_render_helpers_cover_empty_branches(tmp_path):
         runtime_config={},
         input_kind="runtime-config",
         input_path=tmp_path / "config.json",
-        parser_reuse=("json.load",),
+        parser_reuse=("json.loads",),
     )
     plan = tooling_vivipulse.build_plan_view(resolved.definitions, resolved.profile)
     payload = tooling_vivipulse._summary_payload(
@@ -419,6 +472,100 @@ def test_render_helpers_cover_empty_branches(tmp_path):
     ) == "No transport failure boundaries were recorded.\n"
     assert tooling_vivipulse.render_search_summary(None) == "Search mode was not run for this invocation.\n"
     assert tooling_vivipulse.render_soak_summary(None, None) == "Soak mode was not run for this invocation.\n"
+
+
+def test_render_helpers_cover_search_soak_and_parity_variants(tmp_path):
+    profile = tooling_vivipulse.VivipulseProfile(same_host_backoff_ms=900, pass_spacing_s=0.5, same_host_spacing_ms=250)
+    outcome = tooling_vivipulse.RunOutcome(
+        mode="search",
+        profile=profile,
+        started_at="start",
+        completed_at="end",
+        trace_events=(),
+        failure_boundaries=(),
+        selected_definition_ids=("alpha",),
+        blocked_host_keys=("shared.local",),
+    )
+    baseline = SimpleNamespace(label="baseline", profile=profile, outcome=outcome)
+    candidate = SimpleNamespace(label="candidate-1", profile=profile, outcome=outcome)
+    search = SimpleNamespace(baseline=baseline, experiments=(candidate,), selected=candidate)
+
+    search_summary = tooling_vivipulse.render_search_summary(search)
+    soak_summary = tooling_vivipulse.render_soak_summary(outcome, 30.0)
+
+    assert "candidate-1" in search_summary
+    assert "Blocked hosts: shared.local" in soak_summary
+    assert tooling_vivipulse.render_parity_mode_summary(True, None) == "Parity mode was enabled without a firmware trace for comparison.\n"
+    assert tooling_vivipulse.render_parity_mode_summary(True, "trace.jsonl") == "Parity mode was enabled using firmware trace: trace.jsonl\n"
+
+
+def test_summary_payload_includes_search_and_parity_data(tmp_path):
+    resolved = tooling_vivipulse.ResolvedInput(
+        definitions=(make_definition("alpha"),),
+        profile=tooling_vivipulse.VivipulseProfile(),
+        runtime_config={},
+        input_kind="runtime-config",
+        input_path=tmp_path / "config.json",
+        parser_reuse=("json.loads",),
+    )
+    outcome = tooling_vivipulse.RunOutcome(
+        mode="search",
+        profile=resolved.profile,
+        started_at="start",
+        completed_at="end",
+        trace_events=(),
+        failure_boundaries=(),
+        selected_definition_ids=("alpha",),
+        blocked_host_keys=(),
+    )
+    baseline = SimpleNamespace(label="baseline", profile=resolved.profile, outcome=outcome)
+    search = SimpleNamespace(baseline=baseline, experiments=(), selected=baseline)
+
+    class FakeParity:
+        def to_dict(self):
+            return {"ordering_match": True}
+
+    payload = tooling_vivipulse._summary_payload(
+        mode="search",
+        artifacts_dir=tmp_path,
+        resolved=resolved,
+        outcome=outcome,
+        search=search,
+        parity_mode=True,
+        parity_comparison=FakeParity(),
+    )
+
+    assert payload["search"]["selected_label"] == "baseline"
+    assert payload["parity"] == {"ordering_match": True}
+
+
+def test_resolve_input_runtime_config_reports_json_loads_reuse(tmp_path):
+    runtime_path = tmp_path / "config.json"
+    runtime_path.write_text(
+        json.dumps({"checks": [{"id": "alpha", "name": "Alpha", "type": "PING", "target": "device.local"}]}),
+        encoding="utf-8",
+    )
+
+    resolved = tooling_vivipulse.resolve_input(make_args(runtime_config=str(runtime_path)))
+
+    assert "json.loads" in resolved.parser_reuse
+
+
+def test_ensure_artifact_dir_retries_on_same_timestamp_collision(tmp_path, monkeypatch):
+    real_datetime = tooling_vivipulse.datetime
+
+    class FixedDateTime:
+        @classmethod
+        def now(cls, tz=None):
+            return real_datetime(2026, 4, 12, 12, 0, 0, 123456, tzinfo=tz)
+
+    monkeypatch.setattr(tooling_vivipulse, "datetime", FixedDateTime)
+
+    first = tooling_vivipulse._ensure_artifact_dir(tmp_path, "local")
+    second = tooling_vivipulse._ensure_artifact_dir(tmp_path, "local")
+
+    assert first.name == "20260412T120000.123456Z-local"
+    assert second.name == "20260412T120000.123456Z-local-1"
 
 
 def test_main_reproduce_mode_wires_interactive_recovery(tmp_path, monkeypatch):
@@ -525,3 +672,157 @@ def test_main_search_requires_repo_when_default_is_missing(tmp_path, monkeypatch
             ["--runtime-config", str(runtime_path), "--mode", "search", "--artifacts-dir", str(tmp_path / "artifacts")],
             output_stream=io.StringIO(),
         )
+
+
+def test_main_search_mode_writes_debug_output_with_explicit_repo(tmp_path, monkeypatch):
+    runtime_path = tmp_path / "config.json"
+    runtime_path.write_text(
+        json.dumps({"checks": [{"id": "alpha", "name": "Alpha", "type": "PING", "target": "device.local"}]}),
+        encoding="utf-8",
+    )
+    output = io.StringIO()
+    outcome = tooling_vivipulse.RunOutcome(
+        mode="search",
+        profile=tooling_vivipulse.VivipulseProfile(),
+        started_at="start",
+        completed_at="end",
+        trace_events=(),
+        failure_boundaries=(),
+        selected_definition_ids=("alpha",),
+        blocked_host_keys=(),
+    )
+    report = tooling_vivipulse.FirmwareResearchReport(
+        hints=tooling_vivipulse.FirmwareResearchHints(repo_path=str(tmp_path / "1541ultimate")),
+        confirmed_facts=("fact",),
+        strong_inferences=("inference",),
+        open_questions=("question",),
+    )
+    monkeypatch.setattr(tooling_vivipulse, "inspect_ultimate_repo", lambda path: report)
+    monkeypatch.setattr(
+        tooling_vivipulse,
+        "run_search",
+        lambda *args, **kwargs: SimpleNamespace(
+            baseline=SimpleNamespace(label="baseline", profile=tooling_vivipulse.VivipulseProfile(), outcome=outcome),
+            experiments=(),
+            selected=SimpleNamespace(label="baseline", profile=tooling_vivipulse.VivipulseProfile(), outcome=outcome),
+        ),
+    )
+
+    exit_code = tooling_vivipulse.main(
+        [
+            "--runtime-config",
+            str(runtime_path),
+            "--mode",
+            "search",
+            "--ultimate-repo",
+            str(tmp_path / "1541ultimate"),
+            "--artifacts-dir",
+            str(tmp_path / "artifacts"),
+            "--debug",
+        ],
+        output_stream=output,
+    )
+
+    assert exit_code == 0
+    assert "Artifacts:" in output.getvalue()
+    assert "Shared production functions reused by vivipulse:" in output.getvalue()
+    assert "Confirmed Facts:" in output.getvalue()
+
+
+def test_main_search_mode_uses_default_ultimate_repo_when_present(tmp_path, monkeypatch):
+    runtime_path = tmp_path / "config.json"
+    runtime_path.write_text(
+        json.dumps({"checks": [{"id": "alpha", "name": "Alpha", "type": "PING", "target": "device.local"}]}),
+        encoding="utf-8",
+    )
+    repo_root = tmp_path / "repo"
+    default_repo = tmp_path / "1541ultimate"
+    default_repo.mkdir()
+    seen = {}
+    outcome = tooling_vivipulse.RunOutcome(
+        mode="search",
+        profile=tooling_vivipulse.VivipulseProfile(),
+        started_at="start",
+        completed_at="end",
+        trace_events=(),
+        failure_boundaries=(),
+        selected_definition_ids=("alpha",),
+        blocked_host_keys=(),
+    )
+    monkeypatch.setattr(tooling_vivipulse, "repository_root", lambda: repo_root)
+    def fake_inspect_ultimate_repo(path):
+        seen["path"] = path
+        return tooling_vivipulse.FirmwareResearchReport(
+            hints=tooling_vivipulse.FirmwareResearchHints(repo_path=str(path)),
+            confirmed_facts=(),
+            strong_inferences=(),
+            open_questions=(),
+        )
+
+    monkeypatch.setattr(tooling_vivipulse, "inspect_ultimate_repo", fake_inspect_ultimate_repo)
+    monkeypatch.setattr(
+        tooling_vivipulse,
+        "run_search",
+        lambda *args, **kwargs: SimpleNamespace(
+            baseline=SimpleNamespace(label="baseline", profile=tooling_vivipulse.VivipulseProfile(), outcome=outcome),
+            experiments=(),
+            selected=SimpleNamespace(label="baseline", profile=tooling_vivipulse.VivipulseProfile(), outcome=outcome),
+        ),
+    )
+
+    exit_code = tooling_vivipulse.main(
+        ["--runtime-config", str(runtime_path), "--mode", "search", "--artifacts-dir", str(tmp_path / "artifacts")],
+        output_stream=io.StringIO(),
+    )
+
+    assert exit_code == 0
+    assert seen["path"] == default_repo
+
+
+def test_main_soak_mode_runs_duration(tmp_path, monkeypatch):
+    runtime_path = tmp_path / "config.json"
+    runtime_path.write_text(
+        json.dumps({"checks": [{"id": "alpha", "name": "Alpha", "type": "PING", "target": "device.local"}]}),
+        encoding="utf-8",
+    )
+    outcome = tooling_vivipulse.RunOutcome(
+        mode="soak",
+        profile=tooling_vivipulse.VivipulseProfile(),
+        started_at="start",
+        completed_at="end",
+        trace_events=(),
+        failure_boundaries=(),
+        selected_definition_ids=("alpha",),
+        blocked_host_keys=("device.local",),
+    )
+
+    class FakeRunner:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def run_duration(self, duration_s):
+            assert duration_s == 15.0
+            return outcome
+
+        def run_passes(self, passes):
+            raise AssertionError("run_passes should not be used for soak mode")
+
+    monkeypatch.setattr(tooling_vivipulse, "HostProbeRunner", FakeRunner)
+    output = io.StringIO()
+
+    exit_code = tooling_vivipulse.main(
+        [
+            "--runtime-config",
+            str(runtime_path),
+            "--mode",
+            "soak",
+            "--duration",
+            "15s",
+            "--artifacts-dir",
+            str(tmp_path / "artifacts"),
+        ],
+        output_stream=output,
+    )
+
+    assert exit_code == 0
+    assert "Requested duration seconds: 15.0" in (next((tmp_path / "artifacts").iterdir()) / "soak-summary.txt").read_text(encoding="utf-8")

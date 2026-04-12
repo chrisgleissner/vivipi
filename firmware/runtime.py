@@ -3,6 +3,11 @@
 import json
 
 try:
+    import _thread
+except ImportError:  # pragma: no cover - imported on-device
+    _thread = None
+
+try:
     import network
     import utime as time
 except ImportError:  # pragma: no cover - imported on-device
@@ -166,7 +171,7 @@ def _safe_build_button_reader(button_reader_factory, buttons_config, input_contr
 class _SerialProbeTraceWriter:
     def __init__(self):
         self._lock = None
-        if hasattr(_thread, "allocate_lock"):
+        if _thread is not None and hasattr(_thread, "allocate_lock"):
             self._lock = _thread.allocate_lock()
 
     def write(self, record):
@@ -525,7 +530,9 @@ def build_runtime_app(
         version=version,
         build_time=build_time_value,
     )
-    trace_sink = getattr(app, "emit_probe_trace", None)
+    trace_sink = None
+    if not getattr(app, "background_workers_enabled", False):
+        trace_sink = getattr(app, "emit_probe_trace", None)
     app.executor = _build_executor_with_optional_trace(executor_factory, trace_sink)
     app.probe_trace_sink = _build_probe_trace_sink(config)
     boot_logo_duration_s = float(boot_logo_min_s)
