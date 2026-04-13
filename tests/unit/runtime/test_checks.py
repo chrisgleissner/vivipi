@@ -431,6 +431,14 @@ def test_http_helpers_cover_import_fallback_and_invalid_payloads(monkeypatch):
         runtime_checks._parse_http_response(b"HTTP/1.1 OK\r\n\r\nbody")
 
 
+def test_import_module_falls_back_without_importlib(monkeypatch):
+    http_client = SimpleNamespace(HTTPConnection=object, HTTPSConnection=object)
+    monkeypatch.setitem(sys.modules, "http.client", http_client)
+    monkeypatch.setattr(runtime_checks, "importlib", None)
+
+    assert runtime_checks._import_module("http.client") is http_client
+
+
 def test_deadline_and_error_helpers_cover_remaining_fallbacks(monkeypatch):
     monkeypatch.setattr(runtime_checks, "time", SimpleNamespace(perf_counter=lambda: 5.0))
 
@@ -1655,6 +1663,29 @@ def test_portable_telnet_runner_accepts_password_prompt_as_banner(monkeypatch):
     assert result.ok is True
     assert result.details == "banner_bytes=17"
     assert handle.sent == [b"\r\n", bytes((255, 254, 1))]
+
+
+def test_portable_telnet_runner_tolerates_negotiation_reply_timeout(monkeypatch):
+    class ReplyTimeoutSocket(FakeSocket):
+        def __init__(self, responses):
+            super().__init__(responses)
+            self.reply_attempts = 0
+
+        def sendall(self, data):
+            if data != b"\r\n":
+                self.reply_attempts += 1
+                raise OSError(110, "timed out")
+            super().sendall(data)
+
+    handle = ReplyTimeoutSocket([b"Password: \xff\xfb\x01", b"\r\nREADY\r\n", b""])
+    monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: handle)
+
+    result = portable_telnet_runner("switch.example.local:23", 10, trace=lambda event, **fields: None)
+
+    assert result.ok is True
+    assert result.details == "banner_bytes=17"
+    assert handle.sent == [b"\r\n"]
+    assert handle.reply_attempts == 1
 
 
 def test_portable_telnet_runner_handles_explicit_failure_text_and_socket_error(monkeypatch):

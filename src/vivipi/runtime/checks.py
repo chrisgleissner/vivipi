@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
-import importlib
+try:
+    import importlib
+except ImportError:  # pragma: no cover - MicroPython fallback
+    importlib = None
 import re
 import select
 import socket
@@ -44,6 +47,12 @@ SOCKET_WOULD_BLOCK_ERRNOS = frozenset({11, 35, 36, 10035})
 
 def _fold(value: object) -> str:
     return str(value).strip().lower()
+
+
+def _import_module(name: str):
+    if importlib is not None:
+        return importlib.import_module(name)
+    return __import__(name, None, None, ("*",))
 
 
 def _start_timer() -> tuple[float, bool]:
@@ -310,7 +319,7 @@ def portable_http_runner(
         return _portable_http_runner_socket(method, target, timeout_s, trace=trace)
 
     try:
-        http_client = importlib.import_module("http.client")
+        http_client = _import_module("http.client")
     except ImportError:
         return _portable_http_runner_socket(method, target, timeout_s, trace=trace)
 
@@ -777,6 +786,17 @@ def _recv_telnet_chunk(handle, size: int = 4096, deadline=None, trace=None) -> b
         raise
 
 
+def _telnet_send_best_effort(handle, payload: bytes, trace=None) -> bool:
+    try:
+        handle.sendall(payload)
+    except OSError as error:
+        if _classify_network_error(error) == "timeout":
+            return False
+        raise
+    _emit_probe_trace(trace, "socket-send", stage="telnet-send", bytes_sent=len(payload))
+    return True
+
+
 def _looks_like_telnet_output(value: str) -> bool:
     stripped = value.strip()
     if not stripped:
@@ -796,8 +816,7 @@ def _telnet_collect_visible(handle, chunk: bytes, trace=None) -> bytes:
             command = chunk[index + 1]
             option = chunk[index + 2]
             reply = bytes((TELNET_IAC, TELNET_WONT if command in (TELNET_DO, TELNET_DONT) else TELNET_DONT, option))
-            handle.sendall(reply)
-            _emit_probe_trace(trace, "socket-send", stage="telnet-send", bytes_sent=len(reply))
+            _telnet_send_best_effort(handle, reply, trace=trace)
             index += 3
             continue
         visible.append(byte)
@@ -848,8 +867,7 @@ def portable_telnet_runner(target: str, timeout_s: int, username: str | None = N
         handle = _open_socket_compat(host, port, timeout_s, deadline, trace=trace)
         if hasattr(handle, "settimeout"):
             handle.settimeout(TELNET_IDLE_TIMEOUT_S)
-        handle.sendall(b"\r\n")
-        _emit_probe_trace(trace, "socket-send", stage="telnet-send", bytes_sent=2)
+        _telnet_send_best_effort(handle, b"\r\n", trace=trace)
         visible = bytearray()
         while True:
             try:
