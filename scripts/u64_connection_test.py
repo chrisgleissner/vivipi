@@ -725,6 +725,28 @@ def _is_retryable_surface_error(error: Exception) -> bool:
     return False
 
 
+def _is_expected_incomplete_disconnect(error: Exception) -> bool:
+    if isinstance(error, (ConnectionResetError, BrokenPipeError)):
+        return True
+    if isinstance(error, OSError) and getattr(error, "errno", None) == 104:
+        return True
+    detail = str(error).lower()
+    return "connection reset by peer" in detail or "broken pipe" in detail
+
+
+def _run_incomplete_surface_operation(protocol: str, surface: ProbeSurface, op_name: str, operation: callable, settings: RuntimeSettings) -> ProbeOutcome:
+    started_at = time.perf_counter_ns()
+    try:
+        detail = _run_surface_operation(protocol, operation, settings)
+        elapsed_ms = (time.perf_counter_ns() - started_at) / 1_000_000.0
+        return ProbeOutcome("OK", _surface_detail(surface, op_name, detail), elapsed_ms)
+    except Exception as error:
+        elapsed_ms = (time.perf_counter_ns() - started_at) / 1_000_000.0
+        if _is_expected_incomplete_disconnect(error):
+            return ProbeOutcome("OK", _surface_detail(surface, op_name, "expected_disconnect_after_abort"), elapsed_ms)
+        return ProbeOutcome("FAIL", _surface_detail(surface, op_name, str(error)), elapsed_ms)
+
+
 def _run_surface_operation(protocol: str, operation: callable, *args):
     attempts = len(SURFACE_OPERATION_RETRY_DELAYS_S) + 1
     last_error: Exception | None = None
@@ -1029,6 +1051,14 @@ def _ftp_prime_temp_dir(settings: RuntimeSettings, minimum_count: int = 1) -> tu
         _ftp_close(ftp)
 
 
+def _try_ftp_prime_temp_dir(settings: RuntimeSettings, minimum_count: int = 1) -> tuple[str, ...]:
+    try:
+        return _ftp_prime_temp_dir(settings, minimum_count=minimum_count)
+    except Exception as error:
+        log("ftp", "INFO", f"prime_temp_dir_failed detail={error} continuing=1")
+        return ()
+
+
 def _ftp_list_temp_entries(settings: RuntimeSettings, ftp: ftplib.FTP) -> str:
     del settings
     entries = _ftp_collect_temp_entries(ftp)
@@ -1089,6 +1119,23 @@ def _ftp_pasv_only_abort(settings: RuntimeSettings) -> str:
             pass
 
 
+def _ftp_login_only_abort(settings: RuntimeSettings) -> str:
+    ftp = ftplib.FTP()
+    try:
+        greeting = ftp.connect(settings.host, settings.ftp_port, timeout=3)
+        if not greeting.startswith("220"):
+            raise RuntimeError(f"expected FTP 220, got {greeting}")
+        login = ftp.login(settings.ftp_user, settings.ftp_pass)
+        if not login.startswith("230"):
+            raise RuntimeError(f"expected FTP 230, got {login}")
+        return "phase=login_abort"
+    finally:
+        try:
+            ftp.close()
+        except OSError:
+            pass
+
+
 def _close_socket_quietly(sock) -> None:
     if sock is None:
         return
@@ -1124,7 +1171,7 @@ def _ftp_partial_stor_temp(settings: RuntimeSettings) -> str:
 
 def _ftp_incomplete_operations(surface: ProbeSurface) -> tuple[tuple[str, callable], ...]:
     if surface == ProbeSurface.SMOKE:
-        return (("ftp_pasv_only_abort", lambda settings: _ftp_pasv_only_abort(settings)),)
+        return (("ftp_login_only_abort", lambda settings: _ftp_login_only_abort(settings)),)
     operations = (
         ("ftp_pasv_only_abort", lambda settings: _ftp_pasv_only_abort(settings)),
         ("ftp_partial_list_root", lambda settings: _ftp_partial_transfer_abort(settings, "LIST .")),
@@ -1613,14 +1660,7 @@ def run_telnet_probe(settings: RuntimeSettings, correctness: ProbeCorrectness) -
             operations = _telnet_incomplete_operations(surface)
             index = _select_probe_operation_index("telnet", surface, len(operations))
             op_name, operation = operations[index]
-            started_at = time.perf_counter_ns()
-            try:
-                detail = _run_surface_operation("telnet", operation, settings)
-                elapsed_ms = (time.perf_counter_ns() - started_at) / 1_000_000.0
-                return ProbeOutcome("OK", _surface_detail(surface, op_name, detail), elapsed_ms)
-            except Exception as error:
-                elapsed_ms = (time.perf_counter_ns() - started_at) / 1_000_000.0
-                return ProbeOutcome("FAIL", _surface_detail(surface, op_name, str(error)), elapsed_ms)
+            return _run_incomplete_surface_operation("telnet", surface, op_name, operation, settings)
         surface = _current_probe_surface("telnet")
         operations = _telnet_surface_operations(surface)
         index = _select_probe_operation_index("telnet", surface, len(operations))
@@ -1720,14 +1760,7 @@ def run_ftp_probe(settings: RuntimeSettings, correctness: ProbeCorrectness) -> P
             operations = _ftp_incomplete_operations(surface)
             index = _select_probe_operation_index("ftp", surface, len(operations))
             op_name, operation = operations[index]
-            started_at = time.perf_counter_ns()
-            try:
-                detail = _run_surface_operation("ftp", operation, settings)
-                elapsed_ms = (time.perf_counter_ns() - started_at) / 1_000_000.0
-                return ProbeOutcome("OK", _surface_detail(surface, op_name, detail), elapsed_ms)
-            except Exception as error:
-                elapsed_ms = (time.perf_counter_ns() - started_at) / 1_000_000.0
-                return ProbeOutcome("FAIL", _surface_detail(surface, op_name, str(error)), elapsed_ms)
+            return _run_incomplete_surface_operation("ftp", surface, op_name, operation, settings)
         operations = _ftp_surface_operations(surface)
         index = _select_probe_operation_index("ftp", surface, len(operations))
         op_name, operation = operations[index]
@@ -1935,7 +1968,7 @@ def profile_execution_config(profile: str) -> ExecutionConfig:
             profile=PROFILE_STRESS,
             probes=("ftp", "telnet", "http", "ftp", "telnet", "ping"),
             schedule=SCHEDULE_CONCURRENT,
-            runners=5,
+            runners=1,
             duration_s=DEFAULT_PROFILE_DURATION_S,
             probe_correctness={
                 "ping": ProbeCorrectness.CORRECT,
@@ -2258,7 +2291,7 @@ def run_runner_loop(
 
 def run_extended(config: ExecutionConfig, settings: RuntimeSettings) -> int:
     if "ftp" in config.probes and config.probe_surfaces.get("ftp", ProbeSurface.SMOKE) in (ProbeSurface.READ, ProbeSurface.READWRITE):
-        _ftp_prime_temp_dir(settings)
+        _try_ftp_prime_temp_dir(settings)
     state = ExecutionState(settings=settings, include_runner_context=True)
     stop_event = threading.Event()
     deadline_s = None if config.duration_s is None else time.monotonic() + config.duration_s

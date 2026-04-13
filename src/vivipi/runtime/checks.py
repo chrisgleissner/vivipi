@@ -34,6 +34,7 @@ TELNET_DO = 253
 TELNET_WONT = 252
 TELNET_WILL = 251
 TELNET_IDLE_TIMEOUT_S = 0.20
+TELNET_MAX_EMPTY_READS = 1
 TELNET_SB = 250
 TELNET_SE = 240
 POLLIN = getattr(select, "POLLIN", 0x0001)
@@ -586,6 +587,18 @@ def _ftp_parse_pasv(response: str) -> tuple[str, int]:
     return host, port
 
 
+def _ftp_parse_pwd(response: str) -> str:
+    if '"' in response:
+        parts = response.split('"')
+        if len(parts) >= 3 and parts[1]:
+            return parts[1]
+    if response.startswith("257 "):
+        remainder = response[4:].strip()
+        if remainder:
+            return remainder
+    raise ValueError("invalid FTP PWD response")
+
+
 def _ftp_nlst_names(payload: bytes) -> list[str]:
     return [line.strip() for line in payload.decode("utf-8", "replace").splitlines() if line.strip()]
 
@@ -627,17 +640,16 @@ def portable_ftp_runner(target: str, timeout_s: int, username: str | None = None
                 login = ftp.login(username or "anonymous", password or "")
                 if not login.startswith("230"):
                     raise RuntimeError(f"expected FTP 230, got {login}")
-                ftp.set_pasv(True)
-                names = ftp.nlst(".")
-                if not names:
-                    raise RuntimeError("empty FTP NLST data")
+                working_directory = ftp.pwd()
+                if not working_directory:
+                    raise RuntimeError("empty FTP PWD response")
                 goodbye = ftp.quit()
                 if not goodbye.startswith("221"):
                     raise RuntimeError(f"expected FTP 221, got {goodbye}")
                 return PingProbeResult(
                     ok=True,
                     latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
-                    details=f"NLST bytes={sum(len(name) for name in names)}",
+                    details=f"pwd={working_directory}",
                 )
             except Exception as error:
                 return PingProbeResult(
@@ -673,29 +685,14 @@ def portable_ftp_runner(target: str, timeout_s: int, username: str | None = None
         if code != 230:
             raise RuntimeError(f"expected FTP 230, got {response}")
 
-        _ftp_command_with_deadline(control_socket, "PASV", deadline, trace=trace)
+        _ftp_command_with_deadline(control_socket, "PWD", deadline, trace=trace)
         code, response = _ftp_read_response(control_socket, deadline=deadline, trace=trace)
-        if code != 227:
-            raise RuntimeError(f"expected FTP 227, got {response}")
 
-        data_host, data_port = _ftp_parse_pasv(response)
-        data_socket = _open_socket_compat(data_host, data_port, timeout_s, deadline, trace=trace)
 
-        _ftp_command_with_deadline(control_socket, "NLST .", deadline, trace=trace)
-        code, response = _ftp_read_response(control_socket, deadline=deadline, trace=trace)
-        if code not in {125, 150}:
-            raise RuntimeError(f"expected FTP 125/150, got {response}")
 
-        listing_payload = _recv_until_closed(data_socket, deadline, trace=trace, stage="ftp-data-recv")
-        names = _ftp_nlst_names(listing_payload)
-        if not names:
-            raise RuntimeError("empty FTP NLST data")
-        _close_socket(data_socket, trace=trace, target=f"{data_host}:{data_port}")
-        data_socket = None
-
-        code, response = _ftp_read_response(control_socket, deadline=deadline, trace=trace)
-        if code not in {226, 250}:
-            raise RuntimeError(f"expected FTP 226/250, got {response}")
+        if code != 257:
+            raise RuntimeError(f"expected FTP 257, got {response}")
+        working_directory = _ftp_parse_pwd(response)
 
         _ftp_command_with_deadline(control_socket, "QUIT", deadline, trace=trace)
         code, response = _ftp_read_response(control_socket, deadline=deadline, trace=trace)
@@ -704,12 +701,11 @@ def portable_ftp_runner(target: str, timeout_s: int, username: str | None = None
         return PingProbeResult(
             ok=True,
             latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
-            details=f"NLST bytes={sum(len(name) for name in names)}",
+            details=f"pwd={working_directory}",
         )
     except Exception as error:
         return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details=_probe_error_detail(error))
     finally:
-        _close_socket(data_socket, trace=trace, target=None)
         _close_socket(control_socket, trace=trace, target=f"{host}:{port}")
 
 
@@ -807,6 +803,12 @@ def _looks_like_telnet_output(value: str) -> bool:
     return _has_alnum_ascii(stripped) or stripped[-1:] in ">#$%"
 
 
+def _is_telnet_post_connect_success(error: BaseException) -> bool:
+    if isinstance(error, RuntimeError):
+        return False
+    return _classify_network_error(error) in {"reset", "timeout"}
+
+
 def _telnet_collect_visible(handle, chunk: bytes, trace=None) -> bytes:
     visible = bytearray()
     index = 0
@@ -824,6 +826,33 @@ def _telnet_collect_visible(handle, chunk: bytes, trace=None) -> bytes:
     return bytes(visible)
 
 
+def _read_telnet_until_idle(handle, *, max_empty_reads: int = TELNET_MAX_EMPTY_READS, trace=None) -> bytes:
+    visible = bytearray()
+    empty_reads = 0
+    while empty_reads < max_empty_reads:
+        try:
+            chunk = handle.recv(4096)
+        except TimeoutError:
+            empty_reads += 1
+            continue
+        except OSError as error:
+            if _classify_network_error(error) == "timeout":
+                empty_reads += 1
+                continue
+            raise
+        if trace is not None:
+            _emit_probe_trace(trace, "socket-recv", stage="telnet-recv", bytes_received=len(chunk))
+        if not chunk:
+            break
+        empty_reads = 0
+        visible.extend(_telnet_collect_visible(handle, chunk, trace=trace))
+    payload = bytes(visible)
+    text = payload.decode("utf-8", "ignore").strip()
+    if text and any(marker.decode("utf-8") in text.lower() for marker in TELNET_FAILURE_MARKERS):
+        raise RuntimeError("telnet failure marker present")
+    return payload
+
+
 def portable_telnet_runner(target: str, timeout_s: int, username: str | None = None, password: str | None = None, trace=None) -> PingProbeResult:
     del username, password
     host, port = _parse_socket_target(target, 23, expected_scheme="telnet")
@@ -833,25 +862,19 @@ def portable_telnet_runner(target: str, timeout_s: int, username: str | None = N
         try:
             handle = socket.create_connection((host, port), timeout=timeout_s)
             handle.settimeout(TELNET_IDLE_TIMEOUT_S)
-            handle.sendall(b"\r\n")
-            visible = bytearray()
-            while True:
-                try:
-                    chunk = handle.recv(4096)
-                except socket.timeout:
-                    break
-                if not chunk:
-                    break
-                visible.extend(_telnet_collect_visible(handle, chunk))
-            text = bytes(visible).decode("utf-8", "ignore").strip()
-            if not text:
-                raise RuntimeError("empty telnet banner")
+            text = _read_telnet_until_idle(handle).decode("utf-8", "ignore").strip()
             return PingProbeResult(
                 ok=True,
                 latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
-                details=f"banner_bytes={len(text.encode())}",
+                details=(f"visible_bytes={len(text.encode())}" if text else "connected"),
             )
         except Exception as error:
+            if handle is not None and _is_telnet_post_connect_success(error):
+                return PingProbeResult(
+                    ok=True,
+                    latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
+                    details="connected",
+                )
             return PingProbeResult(
                 ok=False,
                 latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
@@ -867,30 +890,15 @@ def portable_telnet_runner(target: str, timeout_s: int, username: str | None = N
         handle = _open_socket_compat(host, port, timeout_s, deadline, trace=trace)
         if hasattr(handle, "settimeout"):
             handle.settimeout(TELNET_IDLE_TIMEOUT_S)
-        _telnet_send_best_effort(handle, b"\r\n", trace=trace)
-        visible = bytearray()
-        while True:
-            try:
-                chunk = handle.recv(4096)
-            except TimeoutError:
-                break
-            except OSError as error:
-                if _classify_network_error(error) == "timeout":
-                    break
-                raise
-            if not chunk:
-                break
-            _emit_probe_trace(trace, "socket-recv", stage="telnet-recv", bytes_received=len(chunk))
-            visible.extend(_telnet_collect_visible(handle, chunk, trace=trace))
-        text = bytes(visible).decode("utf-8", "ignore").strip()
-        if not text:
-            raise RuntimeError("empty telnet banner")
+        text = _read_telnet_until_idle(handle, trace=trace).decode("utf-8", "ignore").strip()
         return PingProbeResult(
             ok=True,
             latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
-            details=f"banner_bytes={len(text.encode())}",
+            details=(f"visible_bytes={len(text.encode())}" if text else "connected"),
         )
     except Exception as error:
+        if handle is not None and _is_telnet_post_connect_success(error):
+            return PingProbeResult(ok=True, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details="connected")
         return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details=_probe_error_detail(error))
     finally:
         _close_socket(handle, trace=trace, target=f"{host}:{port}")

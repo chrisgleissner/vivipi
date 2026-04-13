@@ -655,6 +655,43 @@ def test_ftp_normal_mode_performs_login_pasv_nlst_quit_and_close():
     ]
 
 
+def test_ftp_login_only_abort_closes_after_login_without_pasv():
+    module = load_module()
+    calls = []
+
+    class FakeFTP:
+        def connect(self, host, port, timeout):
+            calls.append(("connect", host, port, timeout))
+            return "220 ready"
+
+        def login(self, user, password):
+            calls.append(("login", user, password))
+            return "230 logged in"
+
+        def close(self):
+            calls.append("close")
+
+    module.ftplib.FTP = FakeFTP
+    settings = module.RuntimeSettings("host", "v1/version", 80, 23, 21, "anonymous", "", 0, 1, True)
+
+    detail = module._ftp_login_only_abort(settings)
+
+    assert detail == "phase=login_abort"
+    assert calls == [
+        ("connect", "host", 21, 3),
+        ("login", "anonymous", ""),
+        "close",
+    ]
+
+
+def test_ftp_smoke_incomplete_operations_abort_after_login():
+    module = load_module()
+
+    operations = module._ftp_incomplete_operations(module.ProbeSurface.SMOKE)
+
+    assert [name for name, _operation in operations] == ["ftp_login_only_abort"]
+
+
 def test_ftp_read_surface_rotates_across_multiple_operation_names(monkeypatch):
     module = load_module()
 
@@ -744,6 +781,36 @@ def test_run_extended_primes_temp_dir_before_ftp_read_surface(monkeypatch):
     assert calls == [("host", 1)]
 
 
+def test_run_extended_continues_when_ftp_temp_dir_priming_fails(monkeypatch, capsys):
+    module = load_module()
+    settings = module.RuntimeSettings("host", "v1/version", 80, 23, 21, "anonymous", "", 0, 1, True)
+    config = module.ExecutionConfig(
+        profile="stress",
+        probes=("ftp",),
+        schedule="sequential",
+        runners=1,
+        duration_s=1,
+        probe_correctness={
+            "ping": module.ProbeCorrectness.CORRECT,
+            "http": module.ProbeCorrectness.CORRECT,
+            "ftp": module.ProbeCorrectness.INCOMPLETE,
+            "telnet": module.ProbeCorrectness.INCOMPLETE,
+        },
+        uses_extended_flags=True,
+        overrides=(),
+        probe_surfaces={"ftp": module.ProbeSurface.READWRITE},
+    )
+    run_calls = []
+
+    monkeypatch.setattr(module, "_ftp_prime_temp_dir", lambda current_settings, minimum_count=1: (_ for _ in ()).throw(ConnectionResetError(104, "Connection reset by peer")))
+    monkeypatch.setattr(module, "run_runner_loop", lambda *args, **kwargs: run_calls.append((args, kwargs)) or 0)
+
+    assert module.run_extended(config, settings) == 0
+    assert len(run_calls) == 1
+    output = capsys.readouterr().out
+    assert 'protocol=ftp result=INFO detail="prime_temp_dir_failed detail=[Errno 104] Connection reset by peer continuing=1"' in output
+
+
 def test_ftp_prime_temp_dir_seeds_known_files_without_listing(monkeypatch):
     module = load_module()
     settings = module.RuntimeSettings("host", "v1/version", 80, 23, 21, "anonymous", "", 0, 1, True)
@@ -767,6 +834,17 @@ def test_ftp_prime_temp_dir_seeds_known_files_without_listing(monkeypatch):
         ("seed", fake_ftp, 2),
         ("close", fake_ftp),
     ]
+
+
+def test_try_ftp_prime_temp_dir_swallows_failures_and_returns_empty(monkeypatch, capsys):
+    module = load_module()
+    settings = module.RuntimeSettings("host", "v1/version", 80, 23, 21, "anonymous", "", 0, 1, True)
+
+    monkeypatch.setattr(module, "_ftp_prime_temp_dir", lambda current_settings, minimum_count=1: (_ for _ in ()).throw(TimeoutError("timed out")))
+
+    assert module._try_ftp_prime_temp_dir(settings) == ()
+    output = capsys.readouterr().out
+    assert 'protocol=ftp result=INFO detail="prime_temp_dir_failed detail=timed out continuing=1"' in output
 
 
 def test_ftp_readwrite_surface_rotates_across_mutating_operation_names(monkeypatch):
@@ -1174,6 +1252,78 @@ def test_extended_telnet_incomplete_mode_uses_surface_specific_incomplete_operat
 
     assert outcome.result == "OK"
     assert outcome.detail == "surface=readwrite op=telnet_f2_abort surface=readwrite"
+
+
+def test_extended_ftp_incomplete_mode_treats_connection_reset_as_expected_disconnect(monkeypatch):
+    module = load_module()
+    settings = module.RuntimeSettings("host", "v1/version", 80, 23, 21, "anonymous", "", 0, 1, True)
+    config = module.ExecutionConfig(
+        profile="stress",
+        probes=("ftp",),
+        schedule="sequential",
+        runners=1,
+        duration_s=120,
+        probe_correctness={
+            "ping": module.ProbeCorrectness.CORRECT,
+            "http": module.ProbeCorrectness.CORRECT,
+            "ftp": module.ProbeCorrectness.INCOMPLETE,
+            "telnet": module.ProbeCorrectness.INCOMPLETE,
+        },
+        uses_extended_flags=True,
+        overrides=(),
+        probe_surfaces={"ftp": module.ProbeSurface.READWRITE},
+    )
+    state = module.ExecutionState(settings=settings, include_runner_context=False)
+    monkeypatch.setattr(
+        module,
+        "_ftp_incomplete_operations",
+        lambda surface: (("ftp_partial_list_root", lambda current_settings: (_ for _ in ()).throw(ConnectionResetError(104, "Connection reset by peer"))),),
+    )
+
+    previous = module._set_probe_context(module.ProbeRuntimeContext(config=config, state=state, protocol="ftp", runner_id=1, iteration=1))
+    try:
+        outcome = module.run_ftp_probe(settings, module.ProbeCorrectness.INCOMPLETE)
+    finally:
+        module._restore_probe_context(previous)
+
+    assert outcome.result == "OK"
+    assert outcome.detail == "surface=readwrite op=ftp_partial_list_root expected_disconnect_after_abort"
+
+
+def test_extended_telnet_incomplete_mode_treats_connection_reset_as_expected_disconnect(monkeypatch):
+    module = load_module()
+    settings = module.RuntimeSettings("host", "v1/version", 80, 23, 21, "anonymous", "", 0, 1, True)
+    config = module.ExecutionConfig(
+        profile="stress",
+        probes=("telnet",),
+        schedule="sequential",
+        runners=1,
+        duration_s=120,
+        probe_correctness={
+            "ping": module.ProbeCorrectness.CORRECT,
+            "http": module.ProbeCorrectness.CORRECT,
+            "ftp": module.ProbeCorrectness.INCOMPLETE,
+            "telnet": module.ProbeCorrectness.INCOMPLETE,
+        },
+        uses_extended_flags=True,
+        overrides=(),
+        probe_surfaces={"telnet": module.ProbeSurface.READWRITE},
+    )
+    state = module.ExecutionState(settings=settings, include_runner_context=False)
+    monkeypatch.setattr(
+        module,
+        "_telnet_incomplete_operations",
+        lambda surface: (("telnet_f2_abort", lambda current_settings: (_ for _ in ()).throw(ConnectionResetError(104, "Connection reset by peer"))),),
+    )
+
+    previous = module._set_probe_context(module.ProbeRuntimeContext(config=config, state=state, protocol="telnet", runner_id=1, iteration=1))
+    try:
+        outcome = module.run_telnet_probe(settings, module.ProbeCorrectness.INCOMPLETE)
+    finally:
+        module._restore_probe_context(previous)
+
+    assert outcome.result == "OK"
+    assert outcome.detail == "surface=readwrite op=telnet_f2_abort expected_disconnect_after_abort"
 
 
 def test_extended_telnet_correct_mode_retries_by_recreating_session_without_inner_helper(monkeypatch):

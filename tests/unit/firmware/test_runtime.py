@@ -263,7 +263,7 @@ def test_build_executor_with_optional_trace_uses_trace_sink_when_runtime_app_exp
     assert built.__self__ is app
     assert built.__func__ is FakeApp.emit_probe_trace
 
-def test_build_runtime_app_disables_trace_sink_when_background_workers_are_enabled():
+def test_build_runtime_app_forces_serial_probe_execution_when_background_workers_are_enabled():
     trace_sinks = []
 
     class FakeApp:
@@ -296,7 +296,10 @@ def test_build_runtime_app_disables_trace_sink_when_background_workers_are_enabl
     )
 
     assert app.executor is not None
-    assert trace_sinks == [None]
+    assert app.background_workers_enabled is False
+    assert len(trace_sinks) == 1
+    assert trace_sinks[0].__self__ is app
+    assert trace_sinks[0].__func__ is FakeApp.emit_probe_trace
 
 
 def test_build_runtime_app_does_not_prime_initial_checks_during_boot():

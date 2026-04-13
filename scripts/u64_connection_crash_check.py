@@ -91,7 +91,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-D",
         "--stress-duration-s",
         type=int,
-        default=5,
+        default=120,
         help="Stress duration in seconds unless full degradation is detected sooner",
     )
     parser.add_argument(
