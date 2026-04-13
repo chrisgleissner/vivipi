@@ -213,6 +213,7 @@ def test_help_output_mentions_new_flags_and_precedence():
     assert "--ftp-mode" in help_text
     assert "--telnet-mode" in help_text
     assert "override the profile" in help_text
+    assert "--surface, --mode, --*-surface, and --*-mode" in help_text
     assert "correct" in help_text
     assert "incomplete" in help_text
     assert "invalid" in help_text
@@ -1173,6 +1174,127 @@ def test_extended_telnet_incomplete_mode_uses_surface_specific_incomplete_operat
 
     assert outcome.result == "OK"
     assert outcome.detail == "surface=readwrite op=telnet_f2_abort surface=readwrite"
+
+
+def test_extended_telnet_correct_mode_retries_by_recreating_session_without_inner_helper(monkeypatch):
+    module = load_module()
+    settings = module.RuntimeSettings("host", "v1/version", 80, 23, 21, "anonymous", "", 0, 1, True)
+    config = module.ExecutionConfig(
+        profile="stress",
+        probes=("telnet",),
+        schedule="sequential",
+        runners=1,
+        duration_s=120,
+        probe_correctness={
+            "ping": module.ProbeCorrectness.CORRECT,
+            "http": module.ProbeCorrectness.CORRECT,
+            "ftp": module.ProbeCorrectness.INCOMPLETE,
+            "telnet": module.ProbeCorrectness.CORRECT,
+        },
+        uses_extended_flags=True,
+        overrides=(),
+        probe_surfaces={"telnet": module.ProbeSurface.READ},
+    )
+    state = module.ExecutionState(settings=settings, include_runner_context=False)
+    calls = []
+    sleeps = []
+
+    def fake_get_telnet_session(current_settings, runner_id):
+        del current_settings
+        session = f"session-{runner_id}-{len([call for call in calls if call[0] == 'get']) + 1}"
+        calls.append(("get", session))
+        return session
+
+    def fake_operation(current_settings, session):
+        del current_settings
+        calls.append(("operation", session))
+        if session.endswith("1"):
+            raise RuntimeError("timed out while reading")
+        return f"session={session}"
+
+    monkeypatch.setattr(module, "_telnet_surface_operations", lambda surface: (("telnet_read", fake_operation),))
+    monkeypatch.setattr(module, "_get_telnet_session", fake_get_telnet_session)
+    monkeypatch.setattr(module, "_drop_telnet_session", lambda runner_id: calls.append(("drop", runner_id)))
+    monkeypatch.setattr(module, "_run_surface_operation", lambda *args: pytest.fail("unexpected inner retry helper"))
+    monkeypatch.setattr(module.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    previous = module._set_probe_context(module.ProbeRuntimeContext(config=config, state=state, protocol="telnet", runner_id=1, iteration=1))
+    try:
+        outcome = module.run_telnet_probe(settings, module.ProbeCorrectness.CORRECT)
+    finally:
+        module._restore_probe_context(previous)
+
+    assert outcome.result == "OK"
+    assert outcome.detail == "surface=read op=telnet_read session=session-1-2"
+    assert calls == [
+        ("get", "session-1-1"),
+        ("operation", "session-1-1"),
+        ("drop", 1),
+        ("get", "session-1-2"),
+        ("operation", "session-1-2"),
+    ]
+    assert sleeps == [module.SURFACE_OPERATION_RETRY_DELAYS_S[0]]
+
+
+def test_extended_ftp_correct_mode_retries_by_reconnecting_without_inner_helper(monkeypatch):
+    module = load_module()
+    settings = module.RuntimeSettings("host", "v1/version", 80, 23, 21, "anonymous", "", 0, 1, True)
+    config = module.ExecutionConfig(
+        profile="stress",
+        probes=("ftp",),
+        schedule="sequential",
+        runners=1,
+        duration_s=120,
+        probe_correctness={
+            "ping": module.ProbeCorrectness.CORRECT,
+            "http": module.ProbeCorrectness.CORRECT,
+            "ftp": module.ProbeCorrectness.CORRECT,
+            "telnet": module.ProbeCorrectness.INCOMPLETE,
+        },
+        uses_extended_flags=True,
+        overrides=(),
+        probe_surfaces={"ftp": module.ProbeSurface.READ},
+    )
+    state = module.ExecutionState(settings=settings, include_runner_context=False)
+    calls = []
+    sleeps = []
+
+    def fake_ftp_connect(current_settings):
+        del current_settings
+        ftp = f"ftp-{len([call for call in calls if call[0] == 'connect']) + 1}"
+        calls.append(("connect", ftp))
+        return ftp
+
+    def fake_operation(current_settings, ftp, entries):
+        del current_settings, entries
+        calls.append(("operation", ftp))
+        if ftp.endswith("1"):
+            raise RuntimeError("timed out while listing")
+        return f"ftp={ftp}"
+
+    monkeypatch.setattr(module, "_ftp_surface_operations", lambda surface: (("ftp_pwd", fake_operation),))
+    monkeypatch.setattr(module, "_ftp_connect", fake_ftp_connect)
+    monkeypatch.setattr(module, "_ftp_close", lambda ftp: calls.append(("close", ftp)))
+    monkeypatch.setattr(module, "_run_surface_operation", lambda *args: pytest.fail("unexpected inner retry helper"))
+    monkeypatch.setattr(module.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    previous = module._set_probe_context(module.ProbeRuntimeContext(config=config, state=state, protocol="ftp", runner_id=1, iteration=1))
+    try:
+        outcome = module.run_ftp_probe(settings, module.ProbeCorrectness.CORRECT)
+    finally:
+        module._restore_probe_context(previous)
+
+    assert outcome.result == "OK"
+    assert outcome.detail == "surface=read op=ftp_pwd ftp=ftp-2"
+    assert calls == [
+        ("connect", "ftp-1"),
+        ("operation", "ftp-1"),
+        ("close", "ftp-1"),
+        ("connect", "ftp-2"),
+        ("operation", "ftp-2"),
+        ("close", "ftp-2"),
+    ]
+    assert sleeps == [module.SURFACE_OPERATION_RETRY_DELAYS_S[0]]
 
 
 def test_collect_telnet_visible_ignores_subnegotiation_and_keeps_literal_iac():

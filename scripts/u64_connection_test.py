@@ -43,7 +43,7 @@ SE = 240
 FTP_TEMP_DIR = "/Temp"
 FTP_SELF_FILE_PREFIX = "u64test_"
 HTTP_AUDIO_MIXER_CATEGORY_PATH = "/v1/configs/Audio%20Mixer"
-HTTP_VOLUME_ULTISID_1_PATH = "/v1/configs/Audio%20Mixer/Vol%20UltiSid%201"
+HTTP_VOLUME_ULTISID_1_PATH = f"{HTTP_AUDIO_MIXER_CATEGORY_PATH}/Vol%20UltiSid%201"
 AUDIO_MIXER_WRITE_ITEM = "Vol UltiSid 1"
 AUDIO_MIXER_WRITE_TARGET_VALUES = ("0 dB", "+1 dB")
 AUDIO_MIXER_WRITE_VALUE_PATTERN = re.compile(r"Vol UltiSid 1\s+(OFF|[+-]?\d+ dB|\d+ dB)")
@@ -438,7 +438,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--profile",
         choices=(PROFILE_SOAK, PROFILE_STRESS),
         default=None,
-        help="Preset profile. Explicit --probes, --schedule, --runners, --*-surface, and --*-mode flags override the profile.",
+        help="Preset profile. Explicit --probes, --schedule, --runners, --surface, --mode, --*-surface, and --*-mode flags override the profile.",
     )
     parser.add_argument(
         "--probes",
@@ -907,7 +907,7 @@ def _http_surface_operations(surface: ProbeSurface) -> tuple[tuple[str, callable
         ("get_version", lambda settings: _http_generic_read(settings, "/v1/version")),
         ("get_info", lambda settings: _http_generic_read(settings, "/v1/info")),
         ("get_configs", lambda settings: _http_generic_read(settings, "/v1/configs")),
-        ("get_config_audio_mixer", lambda settings: _http_generic_read(settings, "/v1/configs/Audio%20Mixer")),
+        ("get_config_audio_mixer", lambda settings: _http_generic_read(settings, HTTP_AUDIO_MIXER_CATEGORY_PATH)),
         ("get_vol_ultisid_1", lambda settings: _http_read_audio_mixer_item(settings)),
         ("get_drives", lambda settings: _http_generic_read(settings, "/v1/drives")),
         ("get_files_temp", lambda settings: _http_generic_read(settings, "/v1/files?path=/Temp")),
@@ -1634,7 +1634,7 @@ def run_telnet_probe(settings: RuntimeSettings, correctness: ProbeCorrectness) -
             for attempt in range(attempts):
                 try:
                     session = _get_telnet_session(settings, runner_id)
-                    detail = _run_surface_operation("telnet", operation, settings, session)
+                    detail = operation(settings, session)
                     break
                 except Exception as error:
                     _drop_telnet_session(runner_id)
@@ -1740,7 +1740,7 @@ def run_ftp_probe(settings: RuntimeSettings, correctness: ProbeCorrectness) -> P
                 try:
                     ftp = _ftp_connect(settings)
                     entries = ()
-                    detail = _run_surface_operation("ftp", operation, settings, ftp, entries)
+                    detail = operation(settings, ftp, entries)
                     break
                 except Exception as error:
                     if not _is_retryable_surface_error(error) or attempt + 1 >= attempts:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import shlex
 import shutil
 import subprocess
@@ -10,12 +11,17 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+
+if TYPE_CHECKING:
+    import u64_connection_test as stress_types
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-import u64_connection_test as stress
+stress = importlib.import_module("u64_connection_test")
 
 
 PROTOCOLS = ("ping", "http", "ftp", "telnet")
@@ -116,7 +122,7 @@ def parse_args(argv: list[str]) -> CrashCheckConfig:
     )
 
 
-def build_runtime_settings(config: CrashCheckConfig) -> stress.RuntimeSettings:
+def build_runtime_settings(config: CrashCheckConfig) -> stress_types.RuntimeSettings:
     return stress.RuntimeSettings(
         host=config.host,
         http_path=config.http_path,
@@ -161,18 +167,18 @@ def build_stress_command(config: CrashCheckConfig) -> list[str]:
     ]
 
 
-def run_probe_round(settings: stress.RuntimeSettings) -> dict[str, stress.ProbeOutcome]:
+def run_probe_round(settings: stress_types.RuntimeSettings) -> dict[str, stress_types.ProbeOutcome]:
     return {
         protocol: stress.PROBE_RUNNERS[protocol](settings, stress.ProbeCorrectness.CORRECT)
         for protocol in PROTOCOLS
     }
 
 
-def all_probes_failed(outcomes: dict[str, stress.ProbeOutcome]) -> bool:
+def all_probes_failed(outcomes: dict[str, stress_types.ProbeOutcome]) -> bool:
     return all(outcome.result == "FAIL" for outcome in outcomes.values())
 
 
-def is_transient_failure(protocol: str, outcome: stress.ProbeOutcome) -> bool:
+def is_transient_failure(protocol: str, outcome: stress_types.ProbeOutcome) -> bool:
     if outcome.result != "FAIL":
         return False
     if protocol == "ping":
@@ -181,17 +187,17 @@ def is_transient_failure(protocol: str, outcome: stress.ProbeOutcome) -> bool:
     return any(marker in detail for marker in TRANSIENT_FAILURE_MARKERS)
 
 
-def is_persistent_failure_candidate(outcomes: dict[str, stress.ProbeOutcome]) -> bool:
+def is_persistent_failure_candidate(outcomes: dict[str, stress_types.ProbeOutcome]) -> bool:
     if not all_probes_failed(outcomes):
         return False
     return not any(is_transient_failure(protocol, outcome) for protocol, outcome in outcomes.items())
 
 
-def survivors(outcomes: dict[str, stress.ProbeOutcome]) -> list[str]:
+def survivors(outcomes: dict[str, stress_types.ProbeOutcome]) -> list[str]:
     return [protocol for protocol, outcome in outcomes.items() if outcome.result == "OK"]
 
 
-def log_probe_summary(phase: str, *, after_s: int | None = None, outcomes: dict[str, stress.ProbeOutcome]) -> None:
+def log_probe_summary(phase: str, *, after_s: int | None = None, outcomes: dict[str, stress_types.ProbeOutcome]) -> None:
     parts = [f"phase={phase}"]
     if after_s is not None:
         parts.append(f"after_s={after_s}")
@@ -199,7 +205,7 @@ def log_probe_summary(phase: str, *, after_s: int | None = None, outcomes: dict[
     log("INFO", " ".join(parts))
 
 
-def log_probe_details(*, checkpoint: int, outcomes: dict[str, stress.ProbeOutcome]) -> None:
+def log_probe_details(*, checkpoint: int, outcomes: dict[str, stress_types.ProbeOutcome]) -> None:
     for protocol in PROTOCOLS:
         outcome = outcomes[protocol]
         log(
@@ -208,7 +214,7 @@ def log_probe_details(*, checkpoint: int, outcomes: dict[str, stress.ProbeOutcom
         )
 
 
-def monitor_stress_process(process: subprocess.Popen[bytes], settings: stress.RuntimeSettings) -> bool:
+def monitor_stress_process(process: subprocess.Popen[bytes], settings: stress_types.RuntimeSettings) -> bool:
     consecutive_full_failures = 0
     while process.poll() is None:
         outcomes = run_probe_round(settings)
@@ -239,7 +245,7 @@ def stop_process(process: subprocess.Popen[bytes]) -> int | None:
         return process.wait()
 
 
-def run_post_checks(checkpoints: tuple[int, ...], settings: stress.RuntimeSettings) -> int:
+def run_post_checks(checkpoints: tuple[int, ...], settings: stress_types.RuntimeSettings) -> int:
     previous = 0
     survivor_lines: list[str] = []
     all_failed_every_time = True

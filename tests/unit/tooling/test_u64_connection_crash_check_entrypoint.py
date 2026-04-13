@@ -103,7 +103,7 @@ def test_u64_connection_crash_check_detects_crash_and_forwards_stress_flags(monk
         "--profile",
         module.stress.PROFILE_STRESS,
         "--duration-s",
-        "20",
+        "5",
     ]]
     assert popen_kwargs == {}
     assert sleeps == [1, 5]
