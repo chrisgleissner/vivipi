@@ -26,7 +26,7 @@ TELNET_PORT = int(os.getenv("TELNET_PORT", "23"))
 FTP_PORT = int(os.getenv("FTP_PORT", "21"))
 FTP_USER = os.getenv("FTP_USER", "anonymous")
 FTP_PASS = os.getenv("FTP_PASS", "")
-INTER_CALL_DELAY_MS = int(os.getenv("INTER_CALL_DELAY_MS", "1"))
+INTER_CALL_DELAY_MS = int(os.getenv("INTER_CALL_DELAY_MS", "0"))
 LOG_EVERY_N_ITERATIONS = int(os.getenv("LOG_EVERY_N_ITERATIONS", "10"))
 CURRENT_ITERATION = 0
 LATENCY_SAMPLES = {"ping": [], "http": [], "ftp": [], "telnet": []}
@@ -510,7 +510,8 @@ def log_iteration_summary(started_at: float, iteration: int) -> None:
 
 
 def sleep_ms(value: int) -> None:
-    time.sleep(value / 1000.0)
+    if (value > 0):
+        time.sleep(value / 1000.0)
 
 
 def _register_ftp_cleanup(settings: RuntimeSettings) -> None:
@@ -920,6 +921,8 @@ def _http_surface_operations(surface: ProbeSurface) -> tuple[tuple[str, callable
     if surface == ProbeSurface.READ:
         return read_operations
     return read_operations + (
+        ("mem_write_screen_space", lambda settings: _http_memory_write_verify(settings, "0x0400", "20")),
+        ("mem_write_screen_exclam", lambda settings: _http_memory_write_verify(settings, "0x0400", "21")),
         ("set_vol_ultisid_1_0_db", lambda settings: _http_write_audio_mixer_item(settings, "0 dB")),
         ("set_vol_ultisid_1_plus_1_db", lambda settings: _http_write_audio_mixer_item(settings, "+1 dB")),
     )
@@ -954,6 +957,13 @@ def _ftp_collect_temp_entries(ftp: ftplib.FTP) -> tuple[str, ...]:
         return tuple(ftp.nlst(FTP_TEMP_DIR))
     except ftplib.Error as error:
         raise RuntimeError(f"{FTP_TEMP_DIR} missing or unavailable: {error}") from error
+
+
+def _ftp_collect_temp_entries_if_available(ftp: ftplib.FTP) -> tuple[str, ...]:
+    try:
+        return _ftp_collect_temp_entries(ftp)
+    except RuntimeError:
+        return ()
 
 
 def _ftp_readable_self_files(entries: tuple[str, ...]) -> tuple[str, ...]:
@@ -1000,7 +1010,7 @@ def _ftp_seed_self_file(settings: RuntimeSettings, ftp: ftplib.FTP, ordinal: int
 
 
 def _ftp_ensure_small_self_files(settings: RuntimeSettings, ftp: ftplib.FTP, minimum_count: int = 2) -> tuple[str, ...]:
-    readable = list(_ftp_readable_self_files(_ftp_collect_temp_entries(ftp)))
+    readable = list(_ftp_readable_self_files(_ftp_collect_temp_entries_if_available(ftp)))
     for path in readable:
         _track_ftp_self_file(settings, path)
     while len(readable) < minimum_count:
@@ -1008,8 +1018,19 @@ def _ftp_ensure_small_self_files(settings: RuntimeSettings, ftp: ftplib.FTP, min
     return tuple(sorted(readable))
 
 
+def _ftp_prime_temp_dir(settings: RuntimeSettings, minimum_count: int = 1) -> tuple[str, ...]:
+    ftp = _ftp_connect(settings)
+    try:
+        seeded_paths = []
+        for ordinal in range(1, minimum_count + 1):
+            seeded_paths.append(_ftp_seed_self_file(settings, ftp, ordinal))
+        return tuple(seeded_paths)
+    finally:
+        _ftp_close(ftp)
+
+
 def _ftp_list_temp_entries(settings: RuntimeSettings, ftp: ftplib.FTP) -> str:
-    _ftp_ensure_small_self_files(settings, ftp)
+    del settings
     entries = _ftp_collect_temp_entries(ftp)
     return f"entries={len(entries)} path={FTP_TEMP_DIR}"
 
@@ -1054,14 +1075,77 @@ def _ftp_delete_self_file(settings: RuntimeSettings, ftp: ftplib.FTP) -> str:
     return f"path={path}"
 
 
+def _ftp_pasv_only_abort(settings: RuntimeSettings) -> str:
+    ftp = _ftp_connect(settings)
+    try:
+        response = ftp.sendcmd("PASV")
+        if not response.startswith("227"):
+            raise RuntimeError(f"expected FTP 227, got {response}")
+        return f"reply={response.split(' ', 1)[0]}"
+    finally:
+        try:
+            ftp.close()
+        except OSError:
+            pass
+
+
+def _close_socket_quietly(sock) -> None:
+    if sock is None:
+        return
+    try:
+        sock.close()
+    except OSError:
+        pass
+
+
+def _ftp_partial_transfer_abort(settings: RuntimeSettings, command: str, *, payload: bytes | None = None, read_limit: int = 64) -> str:
+    ftp = _ftp_connect(settings)
+    data_sock = None
+    try:
+        data_sock = ftp.transfercmd(command)
+        if payload is None:
+            chunk = data_sock.recv(read_limit)
+            return f"command={command} bytes={len(chunk)}"
+        data_sock.sendall(payload)
+        return f"command={command} sent={len(payload)}"
+    finally:
+        _close_socket_quietly(data_sock)
+        try:
+            ftp.close()
+        except OSError:
+            pass
+
+
+def _ftp_partial_stor_temp(settings: RuntimeSettings) -> str:
+    path = _next_ftp_self_file_path()
+    _track_ftp_self_file(settings, path)
+    return _ftp_partial_transfer_abort(settings, f"STOR {path}", payload=b"vivipi-partial\n")
+
+
+def _ftp_incomplete_operations(surface: ProbeSurface) -> tuple[tuple[str, callable], ...]:
+    if surface == ProbeSurface.SMOKE:
+        return (("ftp_pasv_only_abort", lambda settings: _ftp_pasv_only_abort(settings)),)
+    operations = (
+        ("ftp_pasv_only_abort", lambda settings: _ftp_pasv_only_abort(settings)),
+        ("ftp_partial_list_root", lambda settings: _ftp_partial_transfer_abort(settings, "LIST .")),
+        ("ftp_pasv_only_abort", lambda settings: _ftp_pasv_only_abort(settings)),
+        ("ftp_partial_nlst_root", lambda settings: _ftp_partial_transfer_abort(settings, "NLST .")),
+    )
+    if surface == ProbeSurface.READ:
+        return operations
+    return operations + (
+        ("ftp_partial_stor_temp", lambda settings: _ftp_partial_stor_temp(settings)),
+        ("ftp_pasv_only_abort", lambda settings: _ftp_pasv_only_abort(settings)),
+        ("ftp_partial_list_root", lambda settings: _ftp_partial_transfer_abort(settings, "LIST .")),
+    )
+
+
 def _ftp_surface_operations(surface: ProbeSurface) -> tuple[tuple[str, callable], ...]:
     read_operations = (
         ("ftp_pwd", lambda settings, ftp, entries: f"pwd={ftp.pwd()}"),
         ("ftp_nlst_root", lambda settings, ftp, entries: f"entries={len(tuple(ftp.nlst('.')))} path=."),
         ("ftp_list_root", lambda settings, ftp, entries: f"lines={_ftp_list_lines(ftp, '.')} path=."),
         ("ftp_nlst_temp", lambda settings, ftp, entries: _ftp_list_temp_entries(settings, ftp)),
-        ("ftp_read_self_file_1", lambda settings, ftp, entries: _ftp_read_small_self_file(settings, ftp, 0)),
-        ("ftp_read_self_file_2", lambda settings, ftp, entries: _ftp_read_small_self_file(settings, ftp, 1)),
     )
     if surface == ProbeSurface.SMOKE:
         return (("ftp_smoke_pwd", lambda settings, ftp, entries: f"pwd={ftp.pwd()}"),)
@@ -1069,6 +1153,7 @@ def _ftp_surface_operations(surface: ProbeSurface) -> tuple[tuple[str, callable]
         return read_operations
     return read_operations + (
         ("ftp_create_self_file", lambda settings, ftp, entries: _ftp_create_self_file(settings, ftp)),
+        ("ftp_read_self_file", lambda settings, ftp, entries: _ftp_read_small_self_file(settings, ftp, 0)),
         ("ftp_rename_self_file", lambda settings, ftp, entries: _ftp_rename_self_file(settings, ftp)),
         ("ftp_delete_self_file", lambda settings, ftp, entries: _ftp_delete_self_file(settings, ftp)),
     )
@@ -1272,6 +1357,39 @@ def _telnet_session_write_audio_mixer_item(settings: RuntimeSettings, session: T
     session.last_text = text
     session.view_state = "audio_mixer"
     return f"from={current} to={updated} right_steps={steps}"
+
+
+def _telnet_abort_after_sequence(settings: RuntimeSettings, *payloads: bytes, read_initial: bool = True) -> str:
+    sock = _telnet_connect(settings)
+    try:
+        if read_initial:
+            _telnet_read_until_idle(sock, max_empty_reads=1)
+        for payload in payloads:
+            sock.sendall(payload)
+        if not payloads:
+            return "phase=connect_abort"
+        return f"steps={len(payloads)} bytes={sum(len(payload) for payload in payloads)}"
+    finally:
+        _close_telnet_socket(sock)
+
+
+def _telnet_incomplete_operations(surface: ProbeSurface) -> tuple[tuple[str, callable], ...]:
+    if surface == ProbeSurface.SMOKE:
+        return (("telnet_connect_abort", lambda settings: _telnet_abort_after_sequence(settings, read_initial=False)),)
+    operations = (
+        ("telnet_f2_abort", lambda settings: _telnet_abort_after_sequence(settings, TELNET_KEY_F2)),
+        ("telnet_partial_f2_prefix_abort", lambda settings: _telnet_abort_after_sequence(settings, TELNET_KEY_F2[:2])),
+    )
+    if surface == ProbeSurface.READ:
+        return operations
+    return operations + (
+        (
+            "telnet_audio_mixer_abort",
+            lambda settings: _telnet_abort_after_sequence(settings, TELNET_KEY_F2, TELNET_KEY_DOWN, TELNET_KEY_ENTER),
+        ),
+        ("telnet_right_arrow_abort", lambda settings: _telnet_abort_after_sequence(settings, TELNET_KEY_F2, TELNET_KEY_RIGHT)),
+        ("telnet_f2_abort", lambda settings: _telnet_abort_after_sequence(settings, TELNET_KEY_F2)),
+    )
 
 
 def _telnet_reset_to_home(sock) -> None:
@@ -1490,6 +1608,19 @@ def run_http_probe(settings: RuntimeSettings, correctness: ProbeCorrectness) -> 
 
 def run_telnet_probe(settings: RuntimeSettings, correctness: ProbeCorrectness) -> ProbeOutcome:
     if _current_probe_context() is not None:
+        if correctness == ProbeCorrectness.INCOMPLETE:
+            surface = _current_probe_surface("telnet")
+            operations = _telnet_incomplete_operations(surface)
+            index = _select_probe_operation_index("telnet", surface, len(operations))
+            op_name, operation = operations[index]
+            started_at = time.perf_counter_ns()
+            try:
+                detail = _run_surface_operation("telnet", operation, settings)
+                elapsed_ms = (time.perf_counter_ns() - started_at) / 1_000_000.0
+                return ProbeOutcome("OK", _surface_detail(surface, op_name, detail), elapsed_ms)
+            except Exception as error:
+                elapsed_ms = (time.perf_counter_ns() - started_at) / 1_000_000.0
+                return ProbeOutcome("FAIL", _surface_detail(surface, op_name, str(error)), elapsed_ms)
         surface = _current_probe_surface("telnet")
         operations = _telnet_surface_operations(surface)
         index = _select_probe_operation_index("telnet", surface, len(operations))
@@ -1582,7 +1713,21 @@ def run_telnet_probe_incomplete(settings: RuntimeSettings) -> ProbeOutcome:
 
 def run_ftp_probe(settings: RuntimeSettings, correctness: ProbeCorrectness) -> ProbeOutcome:
     if _current_probe_context() is not None:
+        if correctness == ProbeCorrectness.INVALID:
+            return run_ftp_probe_invalid(settings)
         surface = _current_probe_surface("ftp")
+        if correctness == ProbeCorrectness.INCOMPLETE:
+            operations = _ftp_incomplete_operations(surface)
+            index = _select_probe_operation_index("ftp", surface, len(operations))
+            op_name, operation = operations[index]
+            started_at = time.perf_counter_ns()
+            try:
+                detail = _run_surface_operation("ftp", operation, settings)
+                elapsed_ms = (time.perf_counter_ns() - started_at) / 1_000_000.0
+                return ProbeOutcome("OK", _surface_detail(surface, op_name, detail), elapsed_ms)
+            except Exception as error:
+                elapsed_ms = (time.perf_counter_ns() - started_at) / 1_000_000.0
+                return ProbeOutcome("FAIL", _surface_detail(surface, op_name, str(error)), elapsed_ms)
         operations = _ftp_surface_operations(surface)
         index = _select_probe_operation_index("ftp", surface, len(operations))
         op_name, operation = operations[index]
@@ -1788,9 +1933,9 @@ def profile_execution_config(profile: str) -> ExecutionConfig:
     if profile == PROFILE_STRESS:
         return ExecutionConfig(
             profile=PROFILE_STRESS,
-            probes=DEFAULT_PROBES,
-            schedule=SCHEDULE_SEQUENTIAL,
-            runners=1,
+            probes=("ftp", "telnet", "http", "ftp", "telnet", "ping"),
+            schedule=SCHEDULE_CONCURRENT,
+            runners=5,
             duration_s=DEFAULT_PROFILE_DURATION_S,
             probe_correctness={
                 "ping": ProbeCorrectness.CORRECT,
@@ -1802,9 +1947,9 @@ def profile_execution_config(profile: str) -> ExecutionConfig:
             overrides=(),
             probe_surfaces={
                 "ping": ProbeSurface.SMOKE,
-                "http": ProbeSurface.READ,
-                "ftp": ProbeSurface.READ,
-                "telnet": ProbeSurface.READ,
+                "http": ProbeSurface.READWRITE,
+                "ftp": ProbeSurface.READWRITE,
+                "telnet": ProbeSurface.READWRITE,
             },
         )
     raise ValueError(f"unsupported profile: {profile}")
@@ -2112,6 +2257,8 @@ def run_runner_loop(
 
 
 def run_extended(config: ExecutionConfig, settings: RuntimeSettings) -> int:
+    if "ftp" in config.probes and config.probe_surfaces.get("ftp", ProbeSurface.SMOKE) in (ProbeSurface.READ, ProbeSurface.READWRITE):
+        _ftp_prime_temp_dir(settings)
     state = ExecutionState(settings=settings, include_runner_context=True)
     stop_event = threading.Event()
     deadline_s = None if config.duration_s is None else time.monotonic() + config.duration_s

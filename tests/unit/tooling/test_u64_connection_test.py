@@ -85,15 +85,21 @@ def test_stress_profile_resolves_deterministically():
     resolved = module.resolve_execution_config(parser.parse_args(["--profile", "stress"]))
 
     assert resolved.profile == "stress"
-    assert resolved.probes == ("ping", "http", "ftp", "telnet")
-    assert resolved.schedule == "sequential"
-    assert resolved.runners == 1
+    assert resolved.probes == ("ftp", "telnet", "http", "ftp", "telnet", "ping")
+    assert resolved.schedule == "concurrent"
+    assert resolved.runners == 5
     assert resolved.duration_s == 120
     assert resolved.probe_correctness == {
         "ping": module.ProbeCorrectness.CORRECT,
         "http": module.ProbeCorrectness.CORRECT,
         "ftp": module.ProbeCorrectness.INCOMPLETE,
         "telnet": module.ProbeCorrectness.INCOMPLETE,
+    }
+    assert resolved.probe_surfaces == {
+        "ping": module.ProbeSurface.SMOKE,
+        "http": module.ProbeSurface.READWRITE,
+        "ftp": module.ProbeSurface.READWRITE,
+        "telnet": module.ProbeSurface.READWRITE,
     }
 
 
@@ -652,9 +658,6 @@ def test_ftp_read_surface_rotates_across_multiple_operation_names(monkeypatch):
     module = load_module()
 
     class FakeFTP:
-        def __init__(self):
-            self.temp_files = {}
-
         def pwd(self):
             return "/"
 
@@ -662,23 +665,13 @@ def test_ftp_read_surface_rotates_across_multiple_operation_names(monkeypatch):
             if path == ".":
                 return ["a", "b", "c"]
             if path == module.FTP_TEMP_DIR:
-                return sorted(entry.rsplit("/", 1)[-1] for entry in self.temp_files)
+                return [f"{module.FTP_SELF_FILE_PREFIX}existing.txt"]
             raise AssertionError(path)
 
         def retrlines(self, command, callback):
             assert command == "LIST ."
             callback("line 1")
             callback("line 2")
-
-        def storbinary(self, command, payload):
-            assert command.startswith("STOR ")
-            path = command.split(" ", 1)[1]
-            self.temp_files[path] = payload.read()
-
-        def retrbinary(self, command, callback):
-            assert command.startswith("RETR ")
-            path = command.split(" ", 1)[1]
-            callback(self.temp_files[path])
 
     fake_ftp = FakeFTP()
     monkeypatch.setattr(module, "_ftp_connect", lambda settings: fake_ftp)
@@ -704,7 +697,7 @@ def test_ftp_read_surface_rotates_across_multiple_operation_names(monkeypatch):
     state = module.ExecutionState(settings=settings, include_runner_context=False)
 
     details = []
-    for iteration in range(1, 7):
+    for iteration in range(1, 5):
         context = module.ProbeRuntimeContext(config=config, state=state, protocol="ftp", runner_id=1, iteration=iteration)
         previous = module._set_probe_context(context)
         try:
@@ -718,8 +711,140 @@ def test_ftp_read_surface_rotates_across_multiple_operation_names(monkeypatch):
         "op=ftp_nlst_root",
         "op=ftp_list_root",
         "op=ftp_nlst_temp",
-        "op=ftp_read_self_file_1",
-        "op=ftp_read_self_file_2",
+    ]
+    assert details[-1].endswith("entries=1 path=/Temp")
+
+
+def test_run_extended_primes_temp_dir_before_ftp_read_surface(monkeypatch):
+    module = load_module()
+    settings = module.RuntimeSettings("host", "v1/version", 80, 23, 21, "anonymous", "", 0, 1, True)
+    config = module.ExecutionConfig(
+        profile="soak",
+        probes=("ftp",),
+        schedule="sequential",
+        runners=1,
+        duration_s=1,
+        probe_correctness={
+            "ping": module.ProbeCorrectness.CORRECT,
+            "http": module.ProbeCorrectness.CORRECT,
+            "ftp": module.ProbeCorrectness.CORRECT,
+            "telnet": module.ProbeCorrectness.CORRECT,
+        },
+        uses_extended_flags=True,
+        overrides=(),
+        probe_surfaces={"ftp": module.ProbeSurface.READ},
+    )
+    calls = []
+
+    monkeypatch.setattr(module, "_ftp_prime_temp_dir", lambda current_settings, minimum_count=1: calls.append((current_settings.host, minimum_count)))
+    monkeypatch.setattr(module, "run_runner_loop", lambda *args, **kwargs: 0)
+
+    assert module.run_extended(config, settings) == 0
+    assert calls == [("host", 1)]
+
+
+def test_ftp_prime_temp_dir_seeds_known_files_without_listing(monkeypatch):
+    module = load_module()
+    settings = module.RuntimeSettings("host", "v1/version", 80, 23, 21, "anonymous", "", 0, 1, True)
+    fake_ftp = object()
+    calls = []
+
+    monkeypatch.setattr(module, "_ftp_connect", lambda current_settings: calls.append(("connect", current_settings.host)) or fake_ftp)
+    monkeypatch.setattr(module, "_ftp_close", lambda ftp: calls.append(("close", ftp)))
+    monkeypatch.setattr(
+        module,
+        "_ftp_seed_self_file",
+        lambda current_settings, ftp, ordinal: calls.append(("seed", ftp, ordinal)) or f"/Temp/{ordinal}.txt",
+    )
+
+    seeded = module._ftp_prime_temp_dir(settings, minimum_count=2)
+
+    assert seeded == ("/Temp/1.txt", "/Temp/2.txt")
+    assert calls == [
+        ("connect", "host"),
+        ("seed", fake_ftp, 1),
+        ("seed", fake_ftp, 2),
+        ("close", fake_ftp),
+    ]
+
+
+def test_ftp_readwrite_surface_rotates_across_mutating_operation_names(monkeypatch):
+    module = load_module()
+
+    class FakeFTP:
+        def __init__(self):
+            self.temp_files = {}
+
+        def pwd(self):
+            return "/"
+
+        def nlst(self, path):
+            if path == ".":
+                return ["a", "b", "c"]
+            if path == module.FTP_TEMP_DIR:
+                return sorted(entry.rsplit("/", 1)[-1] for entry in self.temp_files)
+            raise AssertionError(path)
+
+        def retrlines(self, command, callback):
+            assert command == "LIST ."
+            callback("line 1")
+
+        def storbinary(self, command, payload):
+            path = command.split(" ", 1)[1]
+            self.temp_files[path] = payload.read()
+
+        def retrbinary(self, command, callback):
+            path = command.split(" ", 1)[1]
+            callback(self.temp_files[path])
+
+        def rename(self, source, target):
+            self.temp_files[target] = self.temp_files.pop(source)
+
+        def delete(self, path):
+            self.temp_files.pop(path, None)
+
+    fake_ftp = FakeFTP()
+    monkeypatch.setattr(module, "_ftp_connect", lambda settings: fake_ftp)
+    monkeypatch.setattr(module, "_ftp_close", lambda ftp: None)
+
+    settings = module.RuntimeSettings("host", "v1/version", 80, 23, 21, "anonymous", "", 0, 1, True)
+    config = module.ExecutionConfig(
+        profile=None,
+        probes=("ftp",),
+        schedule="sequential",
+        runners=1,
+        duration_s=None,
+        probe_correctness={
+            "ping": module.ProbeCorrectness.CORRECT,
+            "http": module.ProbeCorrectness.CORRECT,
+            "ftp": module.ProbeCorrectness.CORRECT,
+            "telnet": module.ProbeCorrectness.CORRECT,
+        },
+        uses_extended_flags=True,
+        overrides=(),
+        probe_surfaces={"ftp": module.ProbeSurface.READWRITE},
+    )
+    state = module.ExecutionState(settings=settings, include_runner_context=False)
+
+    details = []
+    for iteration in range(1, 9):
+        context = module.ProbeRuntimeContext(config=config, state=state, protocol="ftp", runner_id=1, iteration=iteration)
+        previous = module._set_probe_context(context)
+        try:
+            outcome = module.run_ftp_probe(settings, module.ProbeCorrectness.CORRECT)
+        finally:
+            module._restore_probe_context(previous)
+        details.append(outcome.detail)
+
+    assert [detail.split()[1] for detail in details] == [
+        "op=ftp_pwd",
+        "op=ftp_nlst_root",
+        "op=ftp_list_root",
+        "op=ftp_nlst_temp",
+        "op=ftp_create_self_file",
+        "op=ftp_read_self_file",
+        "op=ftp_rename_self_file",
+        "op=ftp_delete_self_file",
     ]
 
 
@@ -976,6 +1101,78 @@ def test_telnet_session_write_audio_mixer_item_recovers_from_partial_screen(monk
     assert detail == "from=0 dB to=0 dB right_steps=0"
     assert session.last_text == "Vol UltiSid 1 0 dBVol UltiSid 2 0 dB"
     assert session.view_state == "audio_mixer"
+
+
+def test_extended_ftp_incomplete_mode_uses_surface_specific_incomplete_operations(monkeypatch):
+    module = load_module()
+    settings = module.RuntimeSettings("host", "v1/version", 80, 23, 21, "anonymous", "", 0, 1, True)
+    config = module.ExecutionConfig(
+        profile="stress",
+        probes=("ftp",),
+        schedule="sequential",
+        runners=1,
+        duration_s=120,
+        probe_correctness={
+            "ping": module.ProbeCorrectness.CORRECT,
+            "http": module.ProbeCorrectness.CORRECT,
+            "ftp": module.ProbeCorrectness.INCOMPLETE,
+            "telnet": module.ProbeCorrectness.INCOMPLETE,
+        },
+        uses_extended_flags=True,
+        overrides=(),
+        probe_surfaces={"ftp": module.ProbeSurface.READWRITE},
+    )
+    state = module.ExecutionState(settings=settings, include_runner_context=False)
+    monkeypatch.setattr(
+        module,
+        "_ftp_incomplete_operations",
+        lambda surface: (("ftp_pasv_only_abort", lambda current_settings: f"surface={surface.value}"),),
+    )
+
+    previous = module._set_probe_context(module.ProbeRuntimeContext(config=config, state=state, protocol="ftp", runner_id=1, iteration=1))
+    try:
+        outcome = module.run_ftp_probe(settings, module.ProbeCorrectness.INCOMPLETE)
+    finally:
+        module._restore_probe_context(previous)
+
+    assert outcome.result == "OK"
+    assert outcome.detail == "surface=readwrite op=ftp_pasv_only_abort surface=readwrite"
+
+
+def test_extended_telnet_incomplete_mode_uses_surface_specific_incomplete_operations(monkeypatch):
+    module = load_module()
+    settings = module.RuntimeSettings("host", "v1/version", 80, 23, 21, "anonymous", "", 0, 1, True)
+    config = module.ExecutionConfig(
+        profile="stress",
+        probes=("telnet",),
+        schedule="sequential",
+        runners=1,
+        duration_s=120,
+        probe_correctness={
+            "ping": module.ProbeCorrectness.CORRECT,
+            "http": module.ProbeCorrectness.CORRECT,
+            "ftp": module.ProbeCorrectness.INCOMPLETE,
+            "telnet": module.ProbeCorrectness.INCOMPLETE,
+        },
+        uses_extended_flags=True,
+        overrides=(),
+        probe_surfaces={"telnet": module.ProbeSurface.READWRITE},
+    )
+    state = module.ExecutionState(settings=settings, include_runner_context=False)
+    monkeypatch.setattr(
+        module,
+        "_telnet_incomplete_operations",
+        lambda surface: (("telnet_f2_abort", lambda current_settings: f"surface={surface.value}"),),
+    )
+
+    previous = module._set_probe_context(module.ProbeRuntimeContext(config=config, state=state, protocol="telnet", runner_id=1, iteration=1))
+    try:
+        outcome = module.run_telnet_probe(settings, module.ProbeCorrectness.INCOMPLETE)
+    finally:
+        module._restore_probe_context(previous)
+
+    assert outcome.result == "OK"
+    assert outcome.detail == "surface=readwrite op=telnet_f2_abort surface=readwrite"
 
 
 def test_collect_telnet_visible_ignores_subnegotiation_and_keeps_literal_iac():

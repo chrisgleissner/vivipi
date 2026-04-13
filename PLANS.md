@@ -1,243 +1,97 @@
-# Protocol Health Check Execution Plan
+# U64 Firmware Instability Reproducer Plan
 
-Authoritative plan for auditing and fixing the U64/C64U health checks that can render the target permanently unresponsive.
-
-## Objective
-
-Prove whether the current HTTP, Telnet, and FTP health checks behave as well-formed protocol clients, fix any protocol or cleanup defects with minimal changes, validate sustained repeated execution against the real targets, and provide a standalone Linux Bash repro tool.
-
-## Rules
-
-- Keep changes minimal and protocol-correct.
-- Reuse the shared probe runner path used by both firmware and vivipulse.
-- Do not reduce protocol coverage.
-- Back every conclusion with source inspection, protocol behavior, and observable validation.
-- Keep this file current as the authoritative execution plan.
-
-## Phase 1: Code Audit
-
-Status: DONE
-Depends on: none
-
-Tasks:
-- [DONE] Locate the shared HTTP, FTP, and Telnet probe implementations used by firmware and vivipulse.
-- [DONE] Locate the real U64/C64U check definitions currently exercised in local config.
-- [DONE] Inspect current connection lifecycle behavior for HTTP, FTP, and Telnet in the shared runners.
-- [DONE] Inspect the 1541ultimate HTTP, FTP, and Telnet server implementations that the probes talk to.
-- [DONE] Record file-and-line findings in WORKLOG.md.
-
-## Phase 2: Defect Identification
-
-Status: DONE
-Depends on: Phase 1
-
-Tasks:
-- [DONE] Classify HTTP behavior as protocol-correct or defective.
-- [DONE] Classify Telnet behavior as protocol-correct or defective.
-- [DONE] Identify FTP protocol violations and cleanup gaps.
-- [DONE] Rank each defect by likelihood of contributing to target lockup.
-
-## Phase 3: Minimal Fix Implementation
-
-Status: DONE
-Depends on: Phase 2
-
-Tasks:
-- [DONE] Update the FTP probe to perform a real login sequence and explicit QUIT teardown.
-- [DONE] Ensure cleanup paths close sockets in all normal and exceptional flows.
-- [DONE] Add focused unit coverage for the corrected lifecycle behavior.
-
-## Phase 4: Validation
-
-Status: IN_PROGRESS
-Depends on: Phase 3
-
-Tasks:
-- [DONE] Run focused unit tests covering protocol lifecycle behavior.
-- [TODO] Re-run vivipulse against the real U64/C64U targets.
-- [IN_PROGRESS] Run a sustained repeated-check validation for at least 10 minutes and confirm the targets remain responsive.
-- [IN_PROGRESS] Record validation results and any remaining blockers in WORKLOG.md.
-
-## Phase 5: External Repro Tool
-
-Status: DONE
-Depends on: Phase 3
-
-Tasks:
-- [DONE] Create scripts/u64_connection_test.sh as a pure Bash repro loop using curl and nc.
-- [DONE] Add a feature-equivalent standalone Python version at scripts/u64_connection_test.py.
-- [DONE] Keep configuration centralized at the top of the script.
-- [DONE] Ensure each protocol interaction opens, performs a minimal valid exchange, and closes cleanly.
-- [DONE] Run the script in a bounded validation window and record the result in WORKLOG.md.
-
-## Exit Criteria
-
-- [ ] All shared protocol runners are classified with evidence.
-- [x] All identified defects are fixed.
-- [ ] Real repeated-check validation shows no target lockup for at least 10 minutes.
-- [x] scripts/u64_connection_test.sh exists and works with standard Linux tools.
-- [x] scripts/u64_connection_test.py exists and works with the Python standard library.
-- [x] WORKLOG.md contains the audit, fixes, and validation trail.
-# ViviPi Hardware Recovery Plan
-
-Authoritative execution plan for fixing the real Pico failure in `/home/chris/dev/vivipi`.
+Authoritative execution plan for creating a fast, repeatable reproducer for the known 1541ultimate network-firmware lockup using the existing ViviPi runner.
 
 ## Objective
 
-Close all hardware gates on the actual Waveshare Pico-OLED-1.3 board:
-
-1. The Pico leaves the boot logo and enters the runtime UI on real hardware.
-2. The OLED updates live without freezing or stale-frame behavior.
-3. Health checks execute continuously and propagate FAIL/OK changes to the OLED within 10 seconds.
-4. Both physical buttons are mapped correctly for the actual board revision and produce visible on-screen actions.
-5. Serial logs and visual evidence are collected from the real hardware.
+Drive the target into a persistent failed state in less than 15 seconds such that ping, HTTP, FTP, and Telnet all fail consistently during the run and continue failing after the stress workload stops.
 
 ## Hard Rules
 
-- `docs/spec.md` is the product source of truth.
-- The real Pico behavior is the source of truth for completion.
-- Unit tests, mocks, rendered config, and local builds are supporting signals only.
-- `GP22` / `GP21` are untrusted until proven on hardware.
-- The board image lead is `GP15 -> KEY0` and `GP17 -> KEY1`; prove or disprove this on hardware.
-- Keep business logic in `src/vivipi/core` where practical.
-- Keep MicroPython-facing changes thin, deterministic, and minimally invasive.
-- Keep SH1107 calibration in normalized display config, not runtime hacks.
-- Keep `docs/spec-traceability.md` aligned if requirements or tests move.
+- Use code inspection of `1541ultimate` to justify every stress change.
+- Keep changes minimal and localized to `scripts/u64_connection_test.py`, its tests, and plan/log updates needed for this task.
+- Do not revert unrelated local changes.
+- Do not claim success without explicit post-run checks for ping, HTTP, FTP, and Telnet.
+- Keep soak-mode FTP behavior protocol-correct while making stress mode intentionally harsher.
+- Update this file after each substantial finding or implementation step.
 
-## Phase 1: Re-establish Hardware Ground Truth
+## Phase 1: Firmware Research And Weak-Spot Identification
 
-Tasks:
-- Determine the currently connected Pico device path(s) and deployment mechanism actually available in this environment.
-- Determine the live serial-log capture path for the Pico.
-- Determine the Pixel 4 / `adb` / `scrcpy` path for observing the OLED.
-- Determine whether the Pico is currently running stale or newly deployed firmware.
-- Determine actual KEY0 / KEY1 GPIO wiring from available board evidence plus live hardware behavior.
-
-Evidence required before exit:
-- Exact serial device path and working log-capture command.
-- Exact deployment command and proof of the deployed payload.
-- Exact display-observation command path (`adb`, `scrcpy`, screenshots, or equivalent).
-- Explicit statement of active button GPIO mapping, marked proven or still under test.
-
-Status:
-- Completed for access and deployment.
-
-## Phase 2: Minimal On-Device Diagnostic Reproducer
+Status: IN_PROGRESS
 
 Tasks:
-- Add a diagnostic firmware path or mode that does only:
-  - show `BOOT`
-  - after 2 seconds show `STAGE 1`
-  - after 2 seconds show `STAGE 2`
-  - then update a heartbeat/counter every second
-  - log each stage to serial
-- Deploy that diagnostic path to the real Pico.
-- Verify the boot logo can be replaced and the main loop is alive.
+- Inspect the linked `1541ultimate` FTP server implementation, especially PASV, LIST/NLST, data socket teardown, `/Temp` file handling, and per-session cleanup.
+- Inspect the linked `1541ultimate` Telnet implementation, especially menu/UI coupling, parser state, disconnect handling, and partial-input behavior.
+- Inspect the linked `1541ultimate` HTTP/REST implementation, especially memory read/write, config writes, Audio Mixer state, and shared/global objects.
+- Identify cross-protocol shared state, worker/resource pools, and cleanup asymmetries that could lead to persistent failure.
+- Rank the most promising weak spots and map each one to concrete runner capabilities.
 
 Evidence required before exit:
-- Serial logs for each stage.
-- Visual proof that the OLED advances through the stages.
-- Determination whether the fault is deployment, crash/reset, blocked loop, or display refresh failure.
+- Concrete source locations in `1541ultimate` for FTP, Telnet, HTTP, and shared-state weak spots.
+- Failure-mode classification for each weak spot.
+- A prioritized list of stress directions justified by source behavior.
 
-Status:
-- Completed via direct on-device serial isolation of the failing startup path.
+## Phase 2: Strengthen The Stress Profile
 
-## Phase 3: Fix Root Cause of Boot-Logo Stuck Failure
+Status: TODO
 
 Tasks:
-- Implement the smallest change that fixes the actual identified cause.
-- Preserve instrumentation for:
-  - boot stage logs
-  - exception visibility
-  - render-loop visibility
-- Re-deploy and validate on hardware across 3 cold boots.
+- Inspect current `scripts/u64_connection_test.py` soak and stress behavior, including incomplete FTP/Telnet handling and operation scheduling.
+- Fix any soak-mode FTP correctness issue around PASV, NLST/LIST, data-connection completion, and final reply consumption.
+- Strengthen the `stress` profile with minimal invasive changes informed by Phase 1.
+- Add explicit post-run verification logic for ping, HTTP, FTP, and Telnet.
+- Add or update focused tests for config resolution, protocol correctness, and post-run verification behavior.
 
 Evidence required before exit:
-- Concise root-cause statement.
-- 3 cold-boot proofs showing the logo exits and the runtime UI appears.
+- Code changes are directly traceable to identified weak spots.
+- Unit coverage passes for the changed runner behavior.
+- Stress mode now expresses concurrency, hot-path overlap, incomplete interaction pressure, and post-run verification explicitly.
 
-Status:
-- Completed for the stuck-logo root cause; cold-boot repetition proof remains outstanding.
+## Phase 3: Execute And Iterate
 
-## Phase 4: Fix Buttons on Real Hardware
+Status: TODO
 
 Tasks:
-- Prove actual GPIO mapping on the connected board.
-- Prove correct polarity and pull configuration from raw live readings.
-- Add or correct debounce if needed.
-- Ensure both buttons cause visible on-screen action and serial edge/action logs.
+- Run focused unit tests for the changed runner.
+- Execute the strengthened stress profile against the real target.
+- Measure time to consistent failure across ping, HTTP, FTP, and Telnet.
+- Stop the workload and run explicit post-run checks.
+- If criteria are not met, tighten the most promising pressure points and repeat.
+- Record concrete evidence if the exact target cannot be met with the current runner plus justified minimal extensions.
 
 Evidence required before exit:
-- Raw, debounced, and action logs for both buttons.
-- Visual proof of both on-screen button actions.
-- Concise root-cause statement if the previous mapping was wrong.
+- Exact commands used.
+- Logged time-to-failure evidence.
+- Logged post-run verification evidence.
+- Either full success against all criteria or a concrete blocker backed by code and execution evidence.
 
-Status:
-- In progress. Active device config now targets `GP15` / `GP17`; physical press proof still required.
+## Current Findings
 
-## Phase 5: Restore Full Runtime + Health Checks
+- Existing local runner changes already add surface-aware HTTP/FTP/Telnet operations and session reuse; build on them rather than replacing them.
+- Current `stress` profile is still mild: sequential scheduling, one runner, HTTP/FTP/Telnet all at `READ`, and only FTP/Telnet marked incomplete.
+- The runner does not yet have task-specific post-run persistence verification.
+- Firmware weak-spot research is in progress; the prioritized list will be filled in after code-level source inspection is complete.
 
-Tasks:
-- Return from diagnostic mode to the full runtime path only after Phases 2-4 are stable.
-- Validate non-blocking startup and ongoing checks on hardware.
-- Prove at least one FAIL -> OK or OK -> FAIL transition appears on the OLED within 10 seconds.
-- Harden the C64U/U64 protocol probes so they do not destabilize the 1541ultimate network services.
-  - Inspect the local `1541ultimate` source for the actual HTTP, FTP, and telnet server behavior.
-  - Remove avoidable probe behaviors that create extra sockets, extra commands, or parser-hostile bytes.
-  - Enforce at least 500 ms between retry attempts so probe-local retries cannot violate the same-device spacing rule.
+## Iteration Log
 
-Evidence required before exit:
-- Serial timestamps for check execution and render propagation.
-- Visual proof of a state transition on-screen.
-- Concise protocol-level root-cause statement for any 1541ultimate-specific crash vector that was found.
+- [2026-04-13] Replaced stale plan content with this task-specific reproducer plan.
+- [2026-04-13] Confirmed existing runner profile and execution-loop structure in `scripts/u64_connection_test.py`.
+- [2026-04-13] Started targeted `1541ultimate` network-surface inspection for FTP, Telnet, HTTP, and shared-state weak spots.
+- [2026-04-13] Fixed the extended-runner correctness bug so FTP/Telnet `INCOMPLETE` modes now execute incomplete operations in surface-aware stress runs.
+- [2026-04-13] Corrected soak-mode FTP `READ` behavior so it no longer mutates `/Temp`, then added stronger FTP/Telnet incomplete operations plus HTTP memory/config write pressure for stress mode.
+- [2026-04-13] Updated the default `stress` profile to concurrent multi-runner `READWRITE` pressure with duplicated FTP/Telnet probes, and added focused tooling tests to pin the new behavior.
+- [2026-04-13] Focused validation passed: `pytest -q -o addopts='' tests/unit/tooling/test_u64_connection_test.py` => `43 passed`; Python compile checks passed for the touched runner files.
+- [2026-04-13] Real-device control run confirmed baseline health for ping/HTTP/FTP/Telnet before stressing `u64`.
+- [2026-04-13] Mixed stress iteration 1 reproduced fast HTTP/FTP/Telnet collapse with repeated connection resets, but ping stayed healthy and all four endpoints recovered immediately after the run stopped.
+- [2026-04-13] Mixed stress iteration 2 with tighter FTP/Telnet weighting reproduced the same fast HTTP/FTP/Telnet collapse, again without any ping failures.
+- [2026-04-13] Focused FTP-only iteration with 24 concurrent incomplete runners forced near-immediate HTTP and FTP failure, but Telnet and ping stayed healthy throughout and all endpoints recovered immediately after the run stopped.
 
-Status:
-- In progress. Real FAIL and recovery propagation were captured on hardware; protocol hardening for C64U/U64 is implemented locally and pending any further device-side validation.
+## Evidence-backed conclusion
 
-## Phase 6: End-to-End Proof Run
-
-Tasks:
-- Perform and record:
-  - 3 cold boots
-  - button A proof
-  - button B proof
-  - at least one health transition proof
-  - serial log capture
-  - Pixel 4 / `adb` / `scrcpy` screenshots or equivalent
-- Update `WORKLOG.md` with observations, not assumptions.
-- Leave no unresolved follow-up item for this task.
-
-Evidence required before exit:
-- All five non-negotiable gates closed with real-hardware proof.
-
-Status:
-- In progress.
-
-## Active Checklist
-
-- [ ] Establish the actual Pico USB/serial path in this environment.
-- [ ] Establish the actual deployment command that reaches the connected Pico.
-- [ ] Establish the Pixel 4 observation path with `adb` / `scrcpy` or equivalent.
-- [ ] Prove whether the current Pico firmware matches the latest local build.
-- [ ] Prove actual KEY0 / KEY1 GPIO mapping on this board from physical button presses.
-- [x] Build and deploy the minimal staged diagnostic reproducer.
-- [x] Isolate and fix the real root cause of the stuck-logo failure.
-- [x] Restore spec-compliant `GP15` / `GP17` button behavior in the runtime and deploy it to the connected Pico.
-- [ ] Prove both buttons on real hardware with logs and visible feedback.
-- [x] Prove health-check transitions reach the OLED within 10 seconds.
-- [ ] Capture 3 true cold boots or equivalent physical power cycles.
-- [ ] Capture the final proof set and fully close the worklog.
-- [x] Add a one-command local host-side health run via `scripts/vivipulse --mode local` and document it in `README.md`.
-- [x] Install a user-level systemd path for the ADB-backed health service on Kubuntu so the HTTP endpoint on `:8081` starts automatically and periodically recovers `adb` after boot and resume.
-
-## Confirmed Findings
-
-- Pico serial path: `/dev/ttyACM0` exposed as `usb-MicroPython_Board_in_FS_mode_740c0800366c92bb-if00`.
-- Pico access path: `sg dialout -c 'mpremote connect /dev/ttyACM0 ...'`.
-- Pixel observation path: `adb shell screencap -p ...` / `adb pull ...`, with the phone already focused on `org.lineageos.aperture/.CameraLauncher`.
-- Active deployed firmware proof:
-  - `mpremote fs cat :config.json` showed the live device config.
-  - serial boot logs showed the deployed build version `0.2.3-41c04cd7`.
+- The current runner now deterministically reproduces fast application-service collapse in the U64 firmware: mixed pressure knocks out HTTP, FTP, and Telnet; focused FTP teardown pressure knocks out HTTP and FTP.
+- The failure does not extend to ICMP reachability, and it does not persist after the stress workload stops.
+- This matches the audited weak spots in the firmware: FTP passive/data-connection lifecycle, Telnet UI session churn, and HTTP route handling are application-level failure points. They do not, by themselves, demonstrate a lower-level network-stack wedge.
+- Reaching the original objective now requires a new lower-level pressure path beyond the current FTP/Telnet/HTTP probe families.
 - Stuck-logo root cause:
   - startup error formatting crashed on-device in `vivipi/runtime/state.py`, raising `OSError: stream operation not supported` before runtime handoff could complete.
   - after fixing that, two MicroPython compatibility faults remained:
