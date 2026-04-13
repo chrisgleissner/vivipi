@@ -260,6 +260,154 @@ def test_run_runner_iteration_concurrent_allows_overlap():
     assert max_active == 2
 
 
+def test_run_runner_iteration_sequential_converts_unexpected_probe_exceptions_to_failures():
+    module = load_module()
+    settings = module.RuntimeSettings("host", "v1/version", 80, 23, 21, "anonymous", "", 0, 1, True)
+    config = module.ExecutionConfig(
+        profile=None,
+        probes=("ping", "http"),
+        schedule="sequential",
+        runners=1,
+        duration_s=None,
+        probe_correctness={
+            "ping": module.ProbeCorrectness.CORRECT,
+            "http": module.ProbeCorrectness.CORRECT,
+            "ftp": module.ProbeCorrectness.CORRECT,
+            "telnet": module.ProbeCorrectness.CORRECT,
+        },
+        uses_extended_flags=True,
+        overrides=(),
+    )
+    state = module.ExecutionState(settings=settings, include_runner_context=False)
+
+    results = module.run_runner_iteration(
+        1,
+        1,
+        config,
+        settings,
+        state,
+        sleep_fn=lambda value: None,
+        probe_runners={
+            "ping": lambda settings, mode: (_ for _ in ()).throw(RuntimeError("boom")),
+            "http": lambda settings, mode: module.ProbeOutcome("OK", "HTTP 200 body_bytes=1", 2.0),
+            "ftp": lambda settings, mode: module.ProbeOutcome("OK", "NLST bytes=1", 3.0),
+            "telnet": lambda settings, mode: module.ProbeOutcome("OK", "banner_bytes=1", 4.0),
+        },
+    )
+
+    assert results[0][0] == "ping"
+    assert results[0][1].result == "FAIL"
+    assert results[0][1].detail == "ping failed: boom"
+    assert len(state.latency_samples["ping"]) == 1
+    assert len(state.latency_samples["http"]) == 1
+
+
+def test_run_runner_iteration_concurrent_converts_unexpected_probe_exceptions_to_failures_without_dropping_results():
+    module = load_module()
+    settings = module.RuntimeSettings("host", "v1/version", 80, 23, 21, "anonymous", "", 0, 1, True)
+    config = module.ExecutionConfig(
+        profile=None,
+        probes=("ping", "http"),
+        schedule="concurrent",
+        runners=1,
+        duration_s=None,
+        probe_correctness={
+            "ping": module.ProbeCorrectness.CORRECT,
+            "http": module.ProbeCorrectness.CORRECT,
+            "ftp": module.ProbeCorrectness.CORRECT,
+            "telnet": module.ProbeCorrectness.CORRECT,
+        },
+        uses_extended_flags=True,
+        overrides=(),
+    )
+    state = module.ExecutionState(settings=settings, include_runner_context=False)
+
+    results = module.run_runner_iteration(
+        1,
+        1,
+        config,
+        settings,
+        state,
+        sleep_fn=lambda value: None,
+        probe_runners={
+            "ping": lambda settings, mode: (_ for _ in ()).throw(RuntimeError("boom")),
+            "http": lambda settings, mode: module.ProbeOutcome("OK", "HTTP 200 body_bytes=1", 2.0),
+            "ftp": lambda settings, mode: module.ProbeOutcome("OK", "NLST bytes=1", 3.0),
+            "telnet": lambda settings, mode: module.ProbeOutcome("OK", "banner_bytes=1", 4.0),
+        },
+    )
+
+    assert [protocol for protocol, _ in results] == ["ping", "http"]
+    assert results[0][1].result == "FAIL"
+    assert results[0][1].detail == "ping failed: boom"
+    assert len(state.latency_samples["ping"]) == 1
+    assert len(state.latency_samples["http"]) == 1
+
+
+def test_multiple_runners_with_concurrent_probes_preserve_all_latency_samples():
+    module = load_module()
+    lock = threading.Lock()
+    per_protocol_counts = {"ping": 0, "http": 0}
+    base_latency_ms = {"ping": 1000.0, "http": 2000.0}
+
+    def make_runner(protocol):
+        def runner(settings, mode):
+            del settings, mode
+            with lock:
+                per_protocol_counts[protocol] += 1
+                call_index = per_protocol_counts[protocol]
+            return module.ProbeOutcome("OK", f"{protocol} call={call_index}", base_latency_ms[protocol] + call_index)
+
+        return runner
+
+    settings = module.RuntimeSettings("host", "v1/version", 80, 23, 21, "anonymous", "", 0, 100, False)
+    config = module.ExecutionConfig(
+        profile=None,
+        probes=("ping", "http"),
+        schedule="concurrent",
+        runners=3,
+        duration_s=None,
+        probe_correctness={
+            "ping": module.ProbeCorrectness.CORRECT,
+            "http": module.ProbeCorrectness.CORRECT,
+            "ftp": module.ProbeCorrectness.CORRECT,
+            "telnet": module.ProbeCorrectness.CORRECT,
+        },
+        uses_extended_flags=True,
+        overrides=(),
+    )
+    state = module.ExecutionState(settings=settings, include_runner_context=False)
+    stop_event = threading.Event()
+    probe_runners = {
+        "ping": make_runner("ping"),
+        "http": make_runner("http"),
+        "ftp": lambda settings, mode: module.ProbeOutcome("OK", "ftp", 3.0),
+        "telnet": lambda settings, mode: module.ProbeOutcome("OK", "telnet", 4.0),
+    }
+    threads = [
+        threading.Thread(
+            target=module.run_runner_loop,
+            args=(runner_id, config, settings, state, stop_event),
+            kwargs={
+                "sleep_fn": lambda value: None,
+                "probe_runners": probe_runners,
+                "max_iterations": 2,
+            },
+        )
+        for runner_id in (1, 2, 3)
+    ]
+
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=1)
+
+    expected_count = 3 * 2
+    assert per_protocol_counts == {"ping": expected_count, "http": expected_count}
+    assert sorted(state.latency_samples["ping"]) == [base_latency_ms["ping"] + index for index in range(1, expected_count + 1)]
+    assert sorted(state.latency_samples["http"]) == [base_latency_ms["http"] + index for index in range(1, expected_count + 1)]
+
+
 def test_multiple_runners_scale_concurrency_per_probe_type():
     module = load_module()
     barrier = threading.Barrier(2)

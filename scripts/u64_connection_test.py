@@ -839,6 +839,20 @@ def execute_probe(protocol: str, settings: RuntimeSettings, config: ExecutionCon
     return runners[protocol](settings, config.probe_correctness[protocol])
 
 
+def execute_probe_safely(
+    protocol: str,
+    settings: RuntimeSettings,
+    config: ExecutionConfig,
+    probe_runners: dict[str, callable] | None = None,
+) -> ProbeOutcome:
+    started_at = time.perf_counter_ns()
+    try:
+        return execute_probe(protocol, settings, config, probe_runners)
+    except Exception as error:
+        elapsed_ms = (time.perf_counter_ns() - started_at) / 1_000_000.0
+        return ProbeOutcome("FAIL", f"{protocol} failed: {error}", elapsed_ms)
+
+
 def run_runner_iteration(
     runner_id: int,
     iteration: int,
@@ -852,7 +866,7 @@ def run_runner_iteration(
     if config.schedule == SCHEDULE_SEQUENTIAL:
         results: list[tuple[str, ProbeOutcome]] = []
         for index, protocol in enumerate(config.probes):
-            outcome = execute_probe(protocol, settings, config, probe_runners)
+            outcome = execute_probe_safely(protocol, settings, config, probe_runners)
             results.append((protocol, outcome))
             state.emit_probe_outcome(protocol, outcome, iteration=iteration, runner_id=runner_id)
             if index < len(config.probes) - 1:
@@ -863,7 +877,7 @@ def run_runner_iteration(
     threads: list[threading.Thread] = []
 
     def worker(index: int, protocol: str) -> None:
-        ordered_results[index] = (protocol, execute_probe(protocol, settings, config, probe_runners))
+        ordered_results[index] = (protocol, execute_probe_safely(protocol, settings, config, probe_runners))
 
     for index, protocol in enumerate(config.probes):
         thread = threading.Thread(target=worker, args=(index, protocol), daemon=False)
