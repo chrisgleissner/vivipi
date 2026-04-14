@@ -97,14 +97,14 @@ HISTORICAL_CORRECTNESS_EVIDENCE = {
         ProbeCorrectness.INCOMPLETE.value: {
             "commit": "37314b1",
             "path": "src/vivipi/runtime/checks.py",
-            "summary": "Historical Pico-side FTP probe stopped after the greeting path and skipped the later passive listing and graceful teardown path.",
+            "summary": "Historical Pico-side FTP probe verified only the greeting path, then sent QUIT without login, PWD, PASV, or NLST.",
         }
     },
     "telnet": {
         ProbeCorrectness.INCOMPLETE.value: {
             "commit": "37314b1",
             "path": "src/vivipi/runtime/checks.py",
-            "summary": "Historical Pico-side Telnet runner performed only an initial read and treated blank or delayed output as connected.",
+            "summary": "Historical Pico-side Telnet runner performed a single initial read and classified login failure, banner-ready output, or a quiet connected session.",
         }
     },
 }
@@ -1119,6 +1119,23 @@ def _ftp_pasv_only_abort(settings: RuntimeSettings) -> str:
             pass
 
 
+def _ftp_greeting_only_quit(settings: RuntimeSettings) -> str:
+    ftp = ftplib.FTP()
+    try:
+        greeting = ftp.connect(settings.host, settings.ftp_port, timeout=3)
+        if not greeting.startswith("220"):
+            raise RuntimeError(f"expected FTP 220, got {greeting}")
+        goodbye = ftp.quit()
+        if not goodbye.startswith("221"):
+            raise RuntimeError(f"expected FTP 221, got {goodbye}")
+        return "ftp greeting ready"
+    finally:
+        try:
+            ftp.close()
+        except OSError:
+            pass
+
+
 def _ftp_login_only_abort(settings: RuntimeSettings) -> str:
     ftp = ftplib.FTP()
     try:
@@ -1171,7 +1188,7 @@ def _ftp_partial_stor_temp(settings: RuntimeSettings) -> str:
 
 def _ftp_incomplete_operations(surface: ProbeSurface) -> tuple[tuple[str, callable], ...]:
     if surface == ProbeSurface.SMOKE:
-        return (("ftp_login_only_abort", lambda settings: _ftp_login_only_abort(settings)),)
+        return (("ftp_greeting_only_quit", lambda settings: _ftp_greeting_only_quit(settings)),)
     operations = (
         ("ftp_pasv_only_abort", lambda settings: _ftp_pasv_only_abort(settings)),
         ("ftp_partial_list_root", lambda settings: _ftp_partial_transfer_abort(settings, "LIST .")),
@@ -1420,9 +1437,28 @@ def _telnet_abort_after_sequence(settings: RuntimeSettings, *payloads: bytes, re
         _close_telnet_socket(sock)
 
 
+def _telnet_initial_read_classify(settings: RuntimeSettings) -> str:
+    sock = _telnet_connect(settings)
+    try:
+        try:
+            initial_raw = sock.recv(4096)
+        except socket.timeout:
+            initial_raw = b""
+        transcript = _collect_telnet_visible(sock, initial_raw) if initial_raw else b""
+        if _contains_any(transcript, TELNET_FAILURE_MARKERS):
+            raise RuntimeError("login failed")
+        if transcript:
+            cleaned = transcript.decode("utf-8", "replace")
+            if _looks_like_telnet_output(cleaned):
+                return "banner ready"
+        return "connected"
+    finally:
+        _close_telnet_socket(sock)
+
+
 def _telnet_incomplete_operations(surface: ProbeSurface) -> tuple[tuple[str, callable], ...]:
     if surface == ProbeSurface.SMOKE:
-        return (("telnet_connect_abort", lambda settings: _telnet_abort_after_sequence(settings, read_initial=False)),)
+        return (("telnet_initial_read_classify", lambda settings: _telnet_initial_read_classify(settings)),)
     operations = (
         ("telnet_f2_abort", lambda settings: _telnet_abort_after_sequence(settings, TELNET_KEY_F2)),
         ("telnet_partial_f2_prefix_abort", lambda settings: _telnet_abort_after_sequence(settings, TELNET_KEY_F2[:2])),
@@ -1720,35 +1756,16 @@ def run_telnet_probe(settings: RuntimeSettings, correctness: ProbeCorrectness) -
 
 
 def run_telnet_probe_incomplete(settings: RuntimeSettings) -> ProbeOutcome:
-    sock = None
     started_at = time.perf_counter_ns()
     try:
-        sock = socket.create_connection((settings.host, settings.telnet_port), timeout=2)
-        sock.settimeout(TELNET_IDLE_TIMEOUT_S)
-        try:
-            initial_raw = sock.recv(4096)
-        except socket.timeout:
-            initial_raw = b""
-        transcript = _collect_telnet_visible(sock, initial_raw) if initial_raw else b""
-        if _contains_any(transcript, TELNET_FAILURE_MARKERS):
-            elapsed_ms = (time.perf_counter_ns() - started_at) / 1_000_000.0
-            return ProbeOutcome("FAIL", "login failed", elapsed_ms)
-        if transcript:
-            cleaned = transcript.decode("utf-8", "replace")
-            if _looks_like_telnet_output(cleaned):
-                elapsed_ms = (time.perf_counter_ns() - started_at) / 1_000_000.0
-                return ProbeOutcome("OK", "banner ready", elapsed_ms)
+        detail = _telnet_initial_read_classify(settings)
         elapsed_ms = (time.perf_counter_ns() - started_at) / 1_000_000.0
-        return ProbeOutcome("OK", "connected", elapsed_ms)
+        return ProbeOutcome("OK", detail, elapsed_ms)
     except Exception as error:
         elapsed_ms = (time.perf_counter_ns() - started_at) / 1_000_000.0
+        if str(error) == "login failed":
+            return ProbeOutcome("FAIL", "login failed", elapsed_ms)
         return ProbeOutcome("FAIL", f"telnet failed: {error}", elapsed_ms)
-    finally:
-        if sock is not None:
-            try:
-                sock.close()
-            except OSError:
-                pass
 
 
 def run_ftp_probe(settings: RuntimeSettings, correctness: ProbeCorrectness) -> ProbeOutcome:

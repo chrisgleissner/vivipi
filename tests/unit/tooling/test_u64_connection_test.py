@@ -684,12 +684,41 @@ def test_ftp_login_only_abort_closes_after_login_without_pasv():
     ]
 
 
-def test_ftp_smoke_incomplete_operations_abort_after_login():
+def test_ftp_greeting_only_quit_closes_after_greeting_and_quit():
+    module = load_module()
+    calls = []
+
+    class FakeFTP:
+        def connect(self, host, port, timeout):
+            calls.append(("connect", host, port, timeout))
+            return "220 ready"
+
+        def quit(self):
+            calls.append("quit")
+            return "221 bye"
+
+        def close(self):
+            calls.append("close")
+
+    module.ftplib.FTP = FakeFTP
+    settings = module.RuntimeSettings("host", "v1/version", 80, 23, 21, "anonymous", "", 0, 1, True)
+
+    detail = module._ftp_greeting_only_quit(settings)
+
+    assert detail == "ftp greeting ready"
+    assert calls == [
+        ("connect", "host", 21, 3),
+        "quit",
+        "close",
+    ]
+
+
+def test_ftp_smoke_incomplete_operations_match_historical_greeting_probe():
     module = load_module()
 
     operations = module._ftp_incomplete_operations(module.ProbeSurface.SMOKE)
 
-    assert [name for name, _operation in operations] == ["ftp_login_only_abort"]
+    assert [name for name, _operation in operations] == ["ftp_greeting_only_quit"]
 
 
 def test_ftp_read_surface_rotates_across_multiple_operation_names(monkeypatch):
@@ -988,6 +1017,38 @@ def test_telnet_incomplete_correctness_does_not_send_probe_bytes_and_accepts_bla
     assert outcome.detail == "connected"
     assert not any(call == ("sendall", b"\r\n") for call in calls)
     assert calls[-1] == "close"
+
+
+def test_telnet_initial_read_classify_returns_banner_ready_for_visible_text(monkeypatch):
+    module = load_module()
+    calls = []
+
+    class FakeSocket:
+        def settimeout(self, timeout):
+            calls.append(("settimeout", timeout))
+
+        def recv(self, size):
+            calls.append(("recv", size))
+            return b"READY>"
+
+        def close(self):
+            calls.append("close")
+
+    monkeypatch.setattr(module.socket, "create_connection", lambda address, timeout: FakeSocket())
+    settings = module.RuntimeSettings("host", "v1/version", 80, 23, 21, "anonymous", "", 0, 1, True)
+
+    detail = module._telnet_initial_read_classify(settings)
+
+    assert detail == "banner ready"
+    assert calls[-1] == "close"
+
+
+def test_telnet_smoke_incomplete_operations_match_historical_single_read_probe():
+    module = load_module()
+
+    operations = module._telnet_incomplete_operations(module.ProbeSurface.SMOKE)
+
+    assert [name for name, _operation in operations] == ["telnet_initial_read_classify"]
 
 
 def test_telnet_open_menu_retries_with_vt_f2_sequence():
