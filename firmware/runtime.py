@@ -161,6 +161,14 @@ def _build_executor_with_optional_trace(executor_factory, trace_sink=None):
         return executor_factory()
 
 
+def _force_serial_probe_execution(app):
+    if getattr(app, "background_workers_enabled", False):
+        # Keep direct network probes on the Pico, but avoid MicroPython worker-thread
+        # scheduling so every check completes deterministically on-device.
+        app.background_workers_enabled = False
+    return app
+
+
 def _safe_build_button_reader(button_reader_factory, buttons_config, input_controller):
     try:
         return button_reader_factory(buttons_config, input_controller=input_controller), (), ()
@@ -530,6 +538,7 @@ def build_runtime_app(
         version=version,
         build_time=build_time_value,
     )
+    app = _force_serial_probe_execution(app)
     trace_sink = None
     if not getattr(app, "background_workers_enabled", False):
         trace_sink = getattr(app, "emit_probe_trace", None)

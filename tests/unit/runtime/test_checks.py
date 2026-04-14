@@ -431,6 +431,14 @@ def test_http_helpers_cover_import_fallback_and_invalid_payloads(monkeypatch):
         runtime_checks._parse_http_response(b"HTTP/1.1 OK\r\n\r\nbody")
 
 
+def test_import_module_falls_back_without_importlib(monkeypatch):
+    http_client = SimpleNamespace(HTTPConnection=object, HTTPSConnection=object)
+    monkeypatch.setitem(sys.modules, "http.client", http_client)
+    monkeypatch.setattr(runtime_checks, "importlib", None)
+
+    assert runtime_checks._import_module("http.client") is http_client
+
+
 def test_deadline_and_error_helpers_cover_remaining_fallbacks(monkeypatch):
     monkeypatch.setattr(runtime_checks, "time", SimpleNamespace(perf_counter=lambda: 5.0))
 
@@ -586,6 +594,17 @@ def test_connect_and_socket_compat_helpers_cover_remaining_branches(monkeypatch)
 
     with pytest.raises(OSError, match="boom"):
         runtime_checks._connect_socket(AsyncSocket(second_error=OSError("boom")), ("nas.example.local", 21), 10, ("perf", 10.0))
+
+    retrying = AsyncSocket()
+
+    def retrying_connect(address):
+        retrying.connect_calls += 1
+        if retrying.connect_calls < 3:
+            raise OSError(115, "operation in progress")
+
+    retrying.connect = retrying_connect
+    runtime_checks._connect_socket(retrying, ("nas.example.local", 21), 10, ("perf", 10.0))
+    assert retrying.timeouts == [10]
 
     monkeypatch.setattr(runtime_checks, "_open_socket", lambda host, port, timeout_s, **kwargs: (_ for _ in ()).throw(TypeError("other")))
     with pytest.raises(TypeError, match="other"):
@@ -757,10 +776,10 @@ def test_telnet_chunk_compat_and_output_helpers_cover_remaining_branches(monkeyp
 
 def test_portable_ftp_runner_stdlib_paths_cover_success_and_failures(monkeypatch):
     class FakeFTP:
-        def __init__(self, *, greeting="220 Ready", login="230 Logged in", names=None, goodbye="221 Bye", close_error=None):
+        def __init__(self, *, greeting="220 Ready", login="230 Logged in", pwd="/", goodbye="221 Bye", close_error=None):
             self.greeting = greeting
             self.login_response = login
-            self.names = ["games", "demos"] if names is None else names
+            self.pwd_response = pwd
             self.goodbye = goodbye
             self.close_error = close_error
             self.calls = []
@@ -773,12 +792,9 @@ def test_portable_ftp_runner_stdlib_paths_cover_success_and_failures(monkeypatch
             self.calls.append(("login", username, password))
             return self.login_response
 
-        def set_pasv(self, enabled):
-            self.calls.append(("set_pasv", enabled))
-
-        def nlst(self, path):
-            self.calls.append(("nlst", path))
-            return self.names
+        def pwd(self):
+            self.calls.append(("pwd",))
+            return self.pwd_response
 
         def quit(self):
             self.calls.append(("quit",))
@@ -795,18 +811,18 @@ def test_portable_ftp_runner_stdlib_paths_cover_success_and_failures(monkeypatch
     success = portable_ftp_runner("ftp://nas.example.local", 10, username="admin", password="secret")
 
     assert success.ok is True
-    assert success.details == "NLST bytes=10"
+    assert success.details == "pwd=/"
     assert ftp_success.calls[:4] == [
         ("connect", "nas.example.local", 21, 10),
         ("login", "admin", "secret"),
-        ("set_pasv", True),
-        ("nlst", "."),
+        ("pwd",),
+        ("quit",),
     ]
 
-    monkeypatch.setitem(sys.modules, "ftplib", SimpleNamespace(FTP=lambda: FakeFTP(names=[])))
+    monkeypatch.setitem(sys.modules, "ftplib", SimpleNamespace(FTP=lambda: FakeFTP(pwd="")))
     empty = portable_ftp_runner("ftp://nas.example.local", 10)
     assert empty.ok is False
-    assert empty.details == "empty FTP NLST data"
+    assert empty.details == "empty FTP PWD response"
 
     monkeypatch.setitem(sys.modules, "ftplib", SimpleNamespace(FTP=lambda: FakeFTP(goodbye="500 Bad quit")))
     bad_quit = portable_ftp_runner("ftp://nas.example.local", 10)
@@ -837,66 +853,76 @@ def test_portable_ftp_runner_falls_back_to_raw_path_when_ftplib_is_missing(monke
             b"220 Ready\r\n",
             b"331 Password required\r\n",
             b"230 Logged in\r\n",
-            b"227 Entering Passive Mode (192,0,2,10,4,1)\r\n",
-            b"150 Opening data connection\r\n",
-            b"226 Closing data connection\r\n",
+            b'257 "/" is current directory\r\n',
             b"221 Bye\r\n",
         ]
     )
-    data_socket = FakeSocket([b"games\r\n", b""])
-    sockets = iter((control_socket, data_socket))
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
-    monkeypatch.setattr(runtime_checks, "_open_socket_compat", lambda *args, **kwargs: next(sockets))
+    monkeypatch.setattr(runtime_checks, "_open_socket_compat", lambda *args, **kwargs: control_socket)
     monkeypatch.setattr(runtime_checks, "_is_micropython_runtime", lambda: False)
 
     result = portable_ftp_runner("ftp://nas.example.local", 10)
 
     assert result.ok is True
-    assert result.details == "NLST bytes=5"
+    assert result.details == "pwd=/"
 
 
 def test_portable_ftp_runner_raw_path_reports_remaining_failures(monkeypatch):
-    def run_case(control_responses, data_responses=(b"games\r\n", b"")):
+    def run_case(control_responses):
         control_socket = FakeSocket(control_responses)
-        data_socket = FakeSocket(data_responses)
 
         def fake_open_socket(host, port, timeout_s, **kwargs):
-            if port == 21:
-                return control_socket
-            return data_socket
+            return control_socket
 
         monkeypatch.setattr(runtime_checks, "_open_socket", fake_open_socket)
         return portable_ftp_runner("ftp://nas.example.local", 10, trace=lambda event, **fields: None)
 
-    assert run_case([b"220 Ready\r\n", b"230 Logged in\r\n", b"500 No PASV\r\n"]).details == "expected FTP 227, got 500 No PASV"
     assert run_case([
         b"220 Ready\r\n",
         b"230 Logged in\r\n",
-        b"227 Entering Passive Mode (192,0,2,10,4,1)\r\n",
-        b"500 No listing\r\n",
-    ]).details == "expected FTP 125/150, got 500 No listing"
+        b"500 No pwd\r\n",
+    ]).details == "expected FTP 257, got 500 No pwd"
     assert run_case([
         b"220 Ready\r\n",
         b"230 Logged in\r\n",
-        b"227 Entering Passive Mode (192,0,2,10,4,1)\r\n",
-        b"150 Opening data connection\r\n",
-    ], data_responses=(b"\r\n", b""),).details == "empty FTP NLST data"
-    assert run_case([
-        b"220 Ready\r\n",
-        b"230 Logged in\r\n",
-        b"227 Entering Passive Mode (192,0,2,10,4,1)\r\n",
-        b"150 Opening data connection\r\n",
-        b"500 Transfer failed\r\n",
-    ]).details == "expected FTP 226/250, got 500 Transfer failed"
-    assert run_case([
-        b"220 Ready\r\n",
-        b"230 Logged in\r\n",
-        b"227 Entering Passive Mode (192,0,2,10,4,1)\r\n",
-        b"150 Opening data connection\r\n",
-        b"226 Closing data connection\r\n",
+        b"257 /\r\n",
         b"500 Bad quit\r\n",
     ]).details == "expected FTP 221, got 500 Bad quit"
+
+
+def test_ftp_parse_pwd_rejects_invalid_responses():
+    assert runtime_checks._ftp_parse_pwd("257 /Temp") == "/Temp"
+    assert runtime_checks._ftp_parse_pwd('257 ""') == '""'
+
+    with pytest.raises(ValueError, match="invalid FTP PWD response"):
+        runtime_checks._ftp_parse_pwd("250 not a pwd response")
+
+    with pytest.raises(ValueError, match="invalid FTP PWD response"):
+        runtime_checks._ftp_parse_pwd("257   ")
+
+
+def test_portable_ftp_runner_raw_path_skips_pass_when_user_is_already_logged_in(monkeypatch):
+    control_socket = FakeSocket(
+        [
+            b"220 Ready\r\n",
+            b"230 Logged in\r\n",
+            b"257 /Temp\r\n",
+            b"221 Bye\r\n",
+        ]
+    )
+
+    monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: control_socket)
+
+    result = portable_ftp_runner("ftp://nas.example.local", 10, trace=lambda event, **fields: None)
+
+    assert result.ok is True
+    assert result.details == "pwd=/Temp"
+    assert control_socket.sent == [
+        b"USER anonymous\r\n",
+        b"PWD\r\n",
+        b"QUIT\r\n",
+    ]
 
 
 def test_portable_telnet_runner_stdlib_and_raw_error_paths(monkeypatch):
@@ -928,16 +954,16 @@ def test_portable_telnet_runner_stdlib_and_raw_error_paths(monkeypatch):
 
     success = portable_telnet_runner("telnet://switch.example.local", 10)
     assert success.ok is True
-    assert success.details == "banner_bytes=16"
-    assert success_handle.sent == [b"\r\n"]
+    assert success.details == "visible_bytes=16"
+    assert success_handle.sent == []
     assert success_handle.closed is True
 
     empty_handle = StdlibSocket([runtime_checks.socket.timeout(), b""])
     monkeypatch.setattr(runtime_checks.socket, "create_connection", lambda address, timeout: empty_handle)
 
     empty = portable_telnet_runner("telnet://switch.example.local", 10)
-    assert empty.ok is False
-    assert empty.details == "empty telnet banner"
+    assert empty.ok is True
+    assert empty.details == "connected"
 
     class TimeoutSocket(FakeSocket):
         def recv(self, size):
@@ -946,8 +972,8 @@ def test_portable_telnet_runner_stdlib_and_raw_error_paths(monkeypatch):
     timeout_handle = TimeoutSocket([])
     monkeypatch.setattr(runtime_checks, "_open_socket", lambda host, port, timeout_s: timeout_handle)
     timeout_result = portable_telnet_runner("telnet://switch.example.local", 10, trace=lambda event, **fields: None)
-    assert timeout_result.ok is False
-    assert timeout_result.details == "empty telnet banner"
+    assert timeout_result.ok is True
+    assert timeout_result.details == "connected"
 
     class BrokenSocket(FakeSocket):
         def recv(self, size):
@@ -956,8 +982,68 @@ def test_portable_telnet_runner_stdlib_and_raw_error_paths(monkeypatch):
     broken_handle = BrokenSocket([])
     monkeypatch.setattr(runtime_checks, "_open_socket", lambda host, port, timeout_s: broken_handle)
     broken_result = portable_telnet_runner("telnet://switch.example.local", 10, trace=lambda event, **fields: None)
-    assert broken_result.ok is False
-    assert broken_result.details.startswith("reset:")
+    assert broken_result.ok is True
+    assert broken_result.details == "connected"
+
+
+def test_portable_telnet_runner_stdlib_treats_post_connect_reset_as_connected(monkeypatch):
+    class ResetSocket:
+        def __init__(self):
+            self.closed = False
+
+        def settimeout(self, value):
+            return None
+
+        def recv(self, size):
+            raise OSError("broken pipe")
+
+        def close(self):
+            self.closed = True
+
+    handle = ResetSocket()
+    monkeypatch.setattr(runtime_checks.socket, "create_connection", lambda address, timeout: handle)
+    monkeypatch.setattr(runtime_checks, "_is_micropython_runtime", lambda: False)
+
+    result = portable_telnet_runner("telnet://switch.example.local", 10)
+
+    assert result.ok is True
+    assert result.details == "connected"
+    assert handle.closed is True
+
+
+def test_portable_telnet_runner_stdlib_rejects_failure_marker(monkeypatch):
+    class FailureSocket:
+        def __init__(self):
+            self.responses = [b"Access denied\r\n", b""]
+            self.closed = False
+
+        def settimeout(self, value):
+            return None
+
+        def recv(self, size):
+            return self.responses.pop(0)
+
+        def close(self):
+            self.closed = True
+
+    handle = FailureSocket()
+    monkeypatch.setattr(runtime_checks.socket, "create_connection", lambda address, timeout: handle)
+    monkeypatch.setattr(runtime_checks, "_is_micropython_runtime", lambda: False)
+
+    result = portable_telnet_runner("telnet://switch.example.local", 10)
+
+    assert result.ok is False
+    assert result.details == "telnet failure marker present"
+    assert handle.closed is True
+
+
+def test_telnet_send_best_effort_reraises_non_timeout_errors():
+    class BrokenHandle:
+        def sendall(self, payload):
+            raise OSError("broken pipe")
+
+    with pytest.raises(OSError, match="broken pipe"):
+        runtime_checks._telnet_send_best_effort(BrokenHandle(), b"hello")
 
 
 def test_manual_http_socket_and_executor_defaults_cover_remaining_paths(monkeypatch):
@@ -1025,6 +1111,10 @@ def test_manual_http_socket_and_executor_defaults_cover_remaining_paths(monkeypa
         ("ping", "probe-start", {"timeout_s": 10}),
         ("ping", "probe-error", {"detail": "boom"}),
     ]
+
+    no_trace_executor = build_executor()
+    with pytest.raises(RuntimeError, match="boom"):
+        no_trace_executor(definitions[0], 10.0)
 
 
 def test_portable_ping_runner_uses_uping_when_available(monkeypatch):
@@ -1124,6 +1214,8 @@ def test_network_helper_functions_cover_edge_cases(monkeypatch):
     assert _classify_network_error(OSError(101, "network unreachable")) == "network"
     assert _classify_network_error(OSError("broken pipe")) == "reset"
     assert _format_network_error(OSError("broken pipe")).startswith("reset:")
+    assert runtime_checks._error_errno(Exception()) is None
+    assert runtime_checks._error_errno(Exception(115, "in progress")) == 115
     assert _runtime_optional_auth(None) is None
     assert _runtime_optional_auth("  admin  ") == "admin"
     assert _parse_socket_target("nas.example.local", 21) == ("nas.example.local", 21)
@@ -1441,26 +1533,21 @@ def test_read_until_markers_returns_buffer_when_stream_ends():
     assert _read_until_markers(handle, (b"missing",)) == b"hello world"
 
 
-def test_portable_ftp_runner_logs_in_uses_passive_listing_and_quits_cleanly(monkeypatch):
+def test_portable_ftp_runner_logs_in_uses_pwd_and_quits_cleanly(monkeypatch):
     control_socket = FakeSocket(
         [
             b"220 Ready\r\n",
             b"331 Password required\r\n",
             b"230 Logged in\r\n",
-            b"227 Entering Passive Mode (192,0,2,10,4,1)\r\n",
-            b"150 Opening data connection\r\n",
-            b"226 Closing data connection\r\n",
+            b'257 "/" is current directory\r\n',
             b"221 Goodbye\r\n",
         ]
     )
-    data_socket = FakeSocket([b"games\r\ndemos\r\n", b""])
 
     def fake_open_socket(host, port, timeout_s, **kwargs):
-        if port == 21:
-            return control_socket
-        if (host, port) == ("192.0.2.10", 1025):
-            return data_socket
-        raise AssertionError((host, port))
+        if port != 21:
+            raise AssertionError((host, port))
+        return control_socket
 
     monkeypatch.setattr("vivipi.runtime.checks._open_socket", fake_open_socket)
 
@@ -1473,16 +1560,14 @@ def test_portable_ftp_runner_logs_in_uses_passive_listing_and_quits_cleanly(monk
     )
 
     assert result.ok is True
-    assert result.details == "NLST bytes=10"
+    assert result.details == "pwd=/"
     assert control_socket.sent == [
         b"USER admin\r\n",
         b"PASS secret\r\n",
-        b"PASV\r\n",
-        b"NLST .\r\n",
+        b"PWD\r\n",
         b"QUIT\r\n",
     ]
     assert control_socket.closed is True
-    assert data_socket.closed is True
 
 
 def test_portable_http_runner_uses_manual_socket_deadline_path_on_micropython(monkeypatch):
@@ -1594,8 +1679,8 @@ def test_portable_telnet_runner_accepts_banner_output(monkeypatch):
     )
 
     assert result.ok is True
-    assert result.details == "banner_bytes=16"
-    assert handle.sent == [b"\r\n"]
+    assert result.details == "visible_bytes=16"
+    assert handle.sent == []
     assert handle.closed is True
 
 
@@ -1605,9 +1690,9 @@ def test_portable_telnet_runner_rejects_login_failure(monkeypatch):
 
     result = portable_telnet_runner("switch.example.local:23", 10, trace=lambda event, **fields: None)
 
-    assert result.ok is True
-    assert result.details == "banner_bytes=15"
-    assert handle.sent == [b"\r\n"]
+    assert result.ok is False
+    assert result.details == "telnet failure marker present"
+    assert handle.sent == []
 
 
 def test_portable_telnet_runner_rejects_blank_sessions(monkeypatch):
@@ -1616,9 +1701,9 @@ def test_portable_telnet_runner_rejects_blank_sessions(monkeypatch):
 
     result = portable_telnet_runner("switch.example.local:23", 10, trace=lambda event, **fields: None)
 
-    assert result.ok is False
-    assert result.details == "empty telnet banner"
-    assert handle.sent == [b"\r\n"]
+    assert result.ok is True
+    assert result.details == "connected"
+    assert handle.sent == []
 
 
 def test_portable_telnet_runner_stops_on_idle_timeout(monkeypatch):
@@ -1641,9 +1726,9 @@ def test_portable_telnet_runner_stops_on_idle_timeout(monkeypatch):
 
     result = portable_telnet_runner("switch.example.local:23", 10, trace=lambda event, **fields: None)
 
-    assert result.ok is False
-    assert result.details == "empty telnet banner"
-    assert handle.sent == [b"\r\n"]
+    assert result.ok is True
+    assert result.details == "connected"
+    assert handle.sent == []
 
 
 def test_portable_telnet_runner_accepts_password_prompt_as_banner(monkeypatch):
@@ -1653,8 +1738,31 @@ def test_portable_telnet_runner_accepts_password_prompt_as_banner(monkeypatch):
     result = portable_telnet_runner("switch.example.local:23", 10, password="secret", trace=lambda event, **fields: None)
 
     assert result.ok is True
-    assert result.details == "banner_bytes=17"
-    assert handle.sent == [b"\r\n", bytes((255, 254, 1))]
+    assert result.details == "visible_bytes=17"
+    assert handle.sent == [bytes((255, 254, 1))]
+
+
+def test_portable_telnet_runner_tolerates_negotiation_reply_timeout(monkeypatch):
+    class ReplyTimeoutSocket(FakeSocket):
+        def __init__(self, responses):
+            super().__init__(responses)
+            self.reply_attempts = 0
+
+        def sendall(self, data):
+            if data != b"\r\n":
+                self.reply_attempts += 1
+                raise OSError(110, "timed out")
+            super().sendall(data)
+
+    handle = ReplyTimeoutSocket([b"Password: \xff\xfb\x01", b"\r\nREADY\r\n", b""])
+    monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: handle)
+
+    result = portable_telnet_runner("switch.example.local:23", 10, trace=lambda event, **fields: None)
+
+    assert result.ok is True
+    assert result.details == "visible_bytes=17"
+    assert handle.sent == []
+    assert handle.reply_attempts == 1
 
 
 def test_portable_telnet_runner_handles_explicit_failure_text_and_socket_error(monkeypatch):
@@ -1663,8 +1771,8 @@ def test_portable_telnet_runner_handles_explicit_failure_text_and_socket_error(m
 
     failed_login = portable_telnet_runner("telnet://switch.example.local", 10, trace=lambda event, **fields: None)
 
-    assert failed_login.ok is True
-    assert failed_login.details == "banner_bytes=13"
+    assert failed_login.ok is False
+    assert failed_login.details == "telnet failure marker present"
 
     monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: (_ for _ in ()).throw(OSError("refused")))
 

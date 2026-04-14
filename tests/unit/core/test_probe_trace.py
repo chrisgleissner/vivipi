@@ -332,6 +332,62 @@ def test_probe_trace_thread_and_sequence_helpers_cover_remaining_paths(monkeypat
     assert probe_trace._request_traces(()) == ()
 
 
+def test_probe_trace_micropython_compatibility_fallbacks(monkeypatch, tmp_path):
+    class FakeTime:
+        @staticmethod
+        def gmtime(value):
+            return (2026, 4, 13, 21, 19, int(value), 0, 0)
+
+        @staticmethod
+        def ticks_ms():
+            return 4321
+
+        @staticmethod
+        def time():
+            return 99.0
+
+    monkeypatch.setattr(probe_trace, "datetime", None)
+    monkeypatch.setattr(probe_trace, "timezone", None)
+    monkeypatch.setattr(probe_trace, "time", FakeTime)
+
+    assert probe_trace._isoformat_utc(5.25) == "2026-04-13T21:19:05.250000Z"
+    assert probe_trace._monotonic_time_s() == 4.321
+    assert probe_trace._next_request_index({}, "alpha") == 1
+
+    writer_path = tmp_path / "trace.jsonl"
+    monkeypatch.setattr(probe_trace, "Path", None)
+    writer = probe_trace.ProbeTraceJsonlWriter(str(writer_path))
+    try:
+        definition = make_definition("alpha")
+        collector = ProbeTraceCollector(writer.write, source="firmware", mode="runtime")
+        collector.emit(definition, "probe-start", {"timeout_s": 10})
+    finally:
+        writer.close()
+
+    payload = json.loads(writer_path.read_text(encoding="utf-8").strip())
+    assert payload["trace_kind"] == "probe_transport"
+    assert payload["request_id"] == "alpha:1"
+
+
+def test_probe_trace_fallbacks_cover_localtime_and_time_only_paths(monkeypatch):
+    class LocalTimeOnly:
+        @staticmethod
+        def localtime(value):
+            assert value == -1
+            return (2026, 4, 13, 21, 19, 59, 0, 0)
+
+        @staticmethod
+        def time():
+            return 7.5
+
+    monkeypatch.setattr(probe_trace, "datetime", None)
+    monkeypatch.setattr(probe_trace, "timezone", None)
+    monkeypatch.setattr(probe_trace, "time", LocalTimeOnly)
+
+    assert probe_trace._isoformat_utc(-0.25) == "2026-04-13T21:19:59.750000Z"
+    assert probe_trace._monotonic_time_s() == 7.5
+
+
 def test_probe_trace_compare_skips_timing_when_probe_start_is_missing():
     reference = (
         probe_trace.ProbeTraceRecord(

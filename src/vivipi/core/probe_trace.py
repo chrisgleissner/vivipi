@@ -1,10 +1,16 @@
 from __future__ import annotations
 
-from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+try:
+    from datetime import datetime, timezone
+except ImportError:  # pragma: no cover - MicroPython fallback
+    datetime = None
+    timezone = None
 import json
-from pathlib import Path
+try:
+    from pathlib import Path
+except ImportError:  # pragma: no cover - MicroPython fallback
+    Path = None
 try:
     import threading
 except ImportError:  # pragma: no cover - MicroPython fallback
@@ -20,7 +26,33 @@ from vivipi.core.scheduler import probe_host_key
 
 
 def _isoformat_utc(value_s: float) -> str:
-    return datetime.fromtimestamp(value_s, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    if datetime is not None and timezone is not None:
+        return datetime.fromtimestamp(value_s, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+    seconds = int(value_s)
+    micros = int((value_s - seconds) * 1_000_000)
+    if micros < 0:
+        seconds -= 1
+        micros += 1_000_000
+    if hasattr(time, "gmtime"):
+        year, month, day, hour, minute, second, *_ = time.gmtime(seconds)
+    else:  # pragma: no cover - MicroPython exposes gmtime
+        year, month, day, hour, minute, second, *_ = time.localtime(seconds)
+    return f"{year:04d}-{month:02d}-{day:02d}T{hour:02d}:{minute:02d}:{second:02d}.{micros:06d}Z"
+
+
+def _monotonic_time_s() -> float:
+    if hasattr(time, "perf_counter"):
+        return float(time.perf_counter())
+    if hasattr(time, "ticks_ms"):
+        return float(time.ticks_ms()) / 1000.0
+    return float(time.time())
+
+
+def _next_request_index(indexes: dict[str, int], check_id: str) -> int:
+    next_value = int(indexes.get(check_id, 0)) + 1
+    indexes[check_id] = next_value
+    return next_value
 
 
 def _allocate_lock():
@@ -187,10 +219,10 @@ class ProbeTraceCollector:
         self.source = source
         self.mode = mode
         self.wall_time_provider = wall_time_provider or time.time
-        self.monotonic_time_provider = monotonic_time_provider or time.perf_counter
+        self.monotonic_time_provider = monotonic_time_provider or _monotonic_time_s
         self.lock = _allocate_lock()
         self.sequence = 0
-        self.request_index_by_check: dict[str, int] = defaultdict(int)
+        self.request_index_by_check: dict[str, int] = {}
         self.request_context_by_thread: dict[str, tuple[str, int]] = {}
         self.records: list[ProbeTraceRecord] = []
 
@@ -201,8 +233,7 @@ class ProbeTraceCollector:
         try:
             request_id, request_index = self.request_context_by_thread.get(thread_id, ("", 0))
             if event == "probe-start" or not request_id:
-                self.request_index_by_check[definition.identifier] += 1
-                request_index = self.request_index_by_check[definition.identifier]
+                request_index = _next_request_index(self.request_index_by_check, definition.identifier)
                 request_id = f"{definition.identifier}:{request_index}"
                 self.request_context_by_thread[thread_id] = (request_id, request_index)
             self.sequence += 1
@@ -256,9 +287,15 @@ class ProbeTraceCollector:
 
 class ProbeTraceJsonlWriter:
     def __init__(self, path: Path):
-        self.path = path
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.handle = path.open("w", encoding="utf-8")
+        resolved_path = Path(path) if Path is not None else path
+        self.path = resolved_path
+        parent = getattr(resolved_path, "parent", None)
+        if parent is not None and hasattr(parent, "mkdir"):
+            parent.mkdir(parents=True, exist_ok=True)
+        if hasattr(resolved_path, "open"):
+            self.handle = resolved_path.open("w", encoding="utf-8")
+        else:  # pragma: no cover - used only when pathlib is unavailable
+            self.handle = open(resolved_path, "w", encoding="utf-8")
 
     def write(self, record: ProbeTraceRecord):
         self.handle.write(json.dumps(record.to_dict(), sort_keys=True) + "\n")
@@ -318,9 +355,9 @@ def load_probe_trace_records(path: str | Path) -> tuple[ProbeTraceRecord, ...]:
 
 
 def _request_traces(records: tuple[ProbeTraceRecord, ...]) -> tuple[RequestTrace, ...]:
-    grouped: dict[str, list[ProbeTraceRecord]] = defaultdict(list)
+    grouped: dict[str, list[ProbeTraceRecord]] = {}
     for record in records:
-        grouped[record.request_id].append(record)
+        grouped.setdefault(record.request_id, []).append(record)
     ordered_groups = sorted(grouped.values(), key=lambda items: min(item.sequence for item in items))
     if not ordered_groups:
         return ()
