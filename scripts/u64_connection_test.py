@@ -1985,7 +1985,7 @@ def profile_execution_config(profile: str) -> ExecutionConfig:
             profile=PROFILE_STRESS,
             probes=("ftp", "telnet", "http", "ftp", "telnet", "ping"),
             schedule=SCHEDULE_CONCURRENT,
-            runners=1,
+            runners=5,
             duration_s=DEFAULT_PROFILE_DURATION_S,
             probe_correctness={
                 "ping": ProbeCorrectness.CORRECT,

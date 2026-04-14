@@ -91,7 +91,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-D",
         "--stress-duration-s",
         type=int,
-        default=120,
+        default=None,
         help="Stress duration in seconds unless full degradation is detected sooner",
     )
     parser.add_argument(
@@ -108,6 +108,7 @@ def parse_args(argv: list[str]) -> CrashCheckConfig:
     parser = build_parser()
     args, forwarded = parser.parse_known_args(argv)
     forwarded_args = tuple(argument for argument in forwarded if argument != "--")
+    stress_duration_s = args.stress_duration_s if args.stress_duration_s is not None else args.post_check_seconds[-1]
     return CrashCheckConfig(
         host=args.host,
         ftp_user=args.ftp_user,
@@ -116,7 +117,7 @@ def parse_args(argv: list[str]) -> CrashCheckConfig:
         http_port=args.http_port,
         ftp_port=args.ftp_port,
         telnet_port=args.telnet_port,
-        stress_duration_s=args.stress_duration_s,
+        stress_duration_s=stress_duration_s,
         post_check_seconds=args.post_check_seconds,
         forwarded_args=forwarded_args,
     )

@@ -667,7 +667,6 @@ def portable_ftp_runner(target: str, timeout_s: int, username: str | None = None
     deadline = _deadline_after_s(timeout_s)
 
     control_socket = None
-    data_socket = None
     try:
         control_socket = _open_socket_compat(host, port, timeout_s, deadline, trace=trace)
         code, response = _ftp_read_response(control_socket, deadline=deadline, trace=trace)
@@ -687,9 +686,6 @@ def portable_ftp_runner(target: str, timeout_s: int, username: str | None = None
 
         _ftp_command_with_deadline(control_socket, "PWD", deadline, trace=trace)
         code, response = _ftp_read_response(control_socket, deadline=deadline, trace=trace)
-
-
-
         if code != 257:
             raise RuntimeError(f"expected FTP 257, got {response}")
         working_directory = _ftp_parse_pwd(response)
