@@ -595,6 +595,17 @@ def test_connect_and_socket_compat_helpers_cover_remaining_branches(monkeypatch)
     with pytest.raises(OSError, match="boom"):
         runtime_checks._connect_socket(AsyncSocket(second_error=OSError("boom")), ("nas.example.local", 21), 10, ("perf", 10.0))
 
+    retrying = AsyncSocket()
+
+    def retrying_connect(address):
+        retrying.connect_calls += 1
+        if retrying.connect_calls < 3:
+            raise OSError(115, "operation in progress")
+
+    retrying.connect = retrying_connect
+    runtime_checks._connect_socket(retrying, ("nas.example.local", 21), 10, ("perf", 10.0))
+    assert retrying.timeouts == [10]
+
     monkeypatch.setattr(runtime_checks, "_open_socket", lambda host, port, timeout_s, **kwargs: (_ for _ in ()).throw(TypeError("other")))
     with pytest.raises(TypeError, match="other"):
         runtime_checks._open_socket_compat("nas.example.local", 21, 10, ("perf", 1.0))
@@ -882,9 +893,13 @@ def test_portable_ftp_runner_raw_path_reports_remaining_failures(monkeypatch):
 
 def test_ftp_parse_pwd_rejects_invalid_responses():
     assert runtime_checks._ftp_parse_pwd("257 /Temp") == "/Temp"
+    assert runtime_checks._ftp_parse_pwd('257 ""') == '""'
 
     with pytest.raises(ValueError, match="invalid FTP PWD response"):
         runtime_checks._ftp_parse_pwd("250 not a pwd response")
+
+    with pytest.raises(ValueError, match="invalid FTP PWD response"):
+        runtime_checks._ftp_parse_pwd("257   ")
 
 
 def test_portable_ftp_runner_raw_path_skips_pass_when_user_is_already_logged_in(monkeypatch):
@@ -1022,6 +1037,15 @@ def test_portable_telnet_runner_stdlib_rejects_failure_marker(monkeypatch):
     assert handle.closed is True
 
 
+def test_telnet_send_best_effort_reraises_non_timeout_errors():
+    class BrokenHandle:
+        def sendall(self, payload):
+            raise OSError("broken pipe")
+
+    with pytest.raises(OSError, match="broken pipe"):
+        runtime_checks._telnet_send_best_effort(BrokenHandle(), b"hello")
+
+
 def test_manual_http_socket_and_executor_defaults_cover_remaining_paths(monkeypatch):
     with pytest.raises(OSError, match="https unsupported on device"):
         runtime_checks._portable_http_runner_socket("GET", "https://example.local/health", 10)
@@ -1087,6 +1111,10 @@ def test_manual_http_socket_and_executor_defaults_cover_remaining_paths(monkeypa
         ("ping", "probe-start", {"timeout_s": 10}),
         ("ping", "probe-error", {"detail": "boom"}),
     ]
+
+    no_trace_executor = build_executor()
+    with pytest.raises(RuntimeError, match="boom"):
+        no_trace_executor(definitions[0], 10.0)
 
 
 def test_portable_ping_runner_uses_uping_when_available(monkeypatch):
@@ -1186,6 +1214,8 @@ def test_network_helper_functions_cover_edge_cases(monkeypatch):
     assert _classify_network_error(OSError(101, "network unreachable")) == "network"
     assert _classify_network_error(OSError("broken pipe")) == "reset"
     assert _format_network_error(OSError("broken pipe")).startswith("reset:")
+    assert runtime_checks._error_errno(Exception()) is None
+    assert runtime_checks._error_errno(Exception(115, "in progress")) == 115
     assert _runtime_optional_auth(None) is None
     assert _runtime_optional_auth("  admin  ") == "admin"
     assert _parse_socket_target("nas.example.local", 21) == ("nas.example.local", 21)
