@@ -369,6 +369,25 @@ def test_probe_trace_micropython_compatibility_fallbacks(monkeypatch, tmp_path):
     assert payload["request_id"] == "alpha:1"
 
 
+def test_probe_trace_fallbacks_cover_localtime_and_time_only_paths(monkeypatch):
+    class LocalTimeOnly:
+        @staticmethod
+        def localtime(value):
+            assert value == -1
+            return (2026, 4, 13, 21, 19, 59, 0, 0)
+
+        @staticmethod
+        def time():
+            return 7.5
+
+    monkeypatch.setattr(probe_trace, "datetime", None)
+    monkeypatch.setattr(probe_trace, "timezone", None)
+    monkeypatch.setattr(probe_trace, "time", LocalTimeOnly)
+
+    assert probe_trace._isoformat_utc(-0.25) == "2026-04-13T21:19:59.750000Z"
+    assert probe_trace._monotonic_time_s() == 7.5
+
+
 def test_probe_trace_compare_skips_timing_when_probe_start_is_missing():
     reference = (
         probe_trace.ProbeTraceRecord(

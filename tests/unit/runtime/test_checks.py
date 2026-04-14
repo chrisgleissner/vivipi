@@ -880,6 +880,36 @@ def test_portable_ftp_runner_raw_path_reports_remaining_failures(monkeypatch):
     ]).details == "expected FTP 221, got 500 Bad quit"
 
 
+def test_ftp_parse_pwd_rejects_invalid_responses():
+    assert runtime_checks._ftp_parse_pwd("257 /Temp") == "/Temp"
+
+    with pytest.raises(ValueError, match="invalid FTP PWD response"):
+        runtime_checks._ftp_parse_pwd("250 not a pwd response")
+
+
+def test_portable_ftp_runner_raw_path_skips_pass_when_user_is_already_logged_in(monkeypatch):
+    control_socket = FakeSocket(
+        [
+            b"220 Ready\r\n",
+            b"230 Logged in\r\n",
+            b"257 /Temp\r\n",
+            b"221 Bye\r\n",
+        ]
+    )
+
+    monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: control_socket)
+
+    result = portable_ftp_runner("ftp://nas.example.local", 10, trace=lambda event, **fields: None)
+
+    assert result.ok is True
+    assert result.details == "pwd=/Temp"
+    assert control_socket.sent == [
+        b"USER anonymous\r\n",
+        b"PWD\r\n",
+        b"QUIT\r\n",
+    ]
+
+
 def test_portable_telnet_runner_stdlib_and_raw_error_paths(monkeypatch):
     class StdlibSocket:
         def __init__(self, responses):
@@ -939,6 +969,57 @@ def test_portable_telnet_runner_stdlib_and_raw_error_paths(monkeypatch):
     broken_result = portable_telnet_runner("telnet://switch.example.local", 10, trace=lambda event, **fields: None)
     assert broken_result.ok is True
     assert broken_result.details == "connected"
+
+
+def test_portable_telnet_runner_stdlib_treats_post_connect_reset_as_connected(monkeypatch):
+    class ResetSocket:
+        def __init__(self):
+            self.closed = False
+
+        def settimeout(self, value):
+            return None
+
+        def recv(self, size):
+            raise OSError("broken pipe")
+
+        def close(self):
+            self.closed = True
+
+    handle = ResetSocket()
+    monkeypatch.setattr(runtime_checks.socket, "create_connection", lambda address, timeout: handle)
+    monkeypatch.setattr(runtime_checks, "_is_micropython_runtime", lambda: False)
+
+    result = portable_telnet_runner("telnet://switch.example.local", 10)
+
+    assert result.ok is True
+    assert result.details == "connected"
+    assert handle.closed is True
+
+
+def test_portable_telnet_runner_stdlib_rejects_failure_marker(monkeypatch):
+    class FailureSocket:
+        def __init__(self):
+            self.responses = [b"Access denied\r\n", b""]
+            self.closed = False
+
+        def settimeout(self, value):
+            return None
+
+        def recv(self, size):
+            return self.responses.pop(0)
+
+        def close(self):
+            self.closed = True
+
+    handle = FailureSocket()
+    monkeypatch.setattr(runtime_checks.socket, "create_connection", lambda address, timeout: handle)
+    monkeypatch.setattr(runtime_checks, "_is_micropython_runtime", lambda: False)
+
+    result = portable_telnet_runner("telnet://switch.example.local", 10)
+
+    assert result.ok is False
+    assert result.details == "telnet failure marker present"
+    assert handle.closed is True
 
 
 def test_manual_http_socket_and_executor_defaults_cover_remaining_paths(monkeypatch):
