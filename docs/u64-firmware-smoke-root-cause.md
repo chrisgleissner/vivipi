@@ -14,7 +14,7 @@ This note summarizes the confirmed firmware-side findings from the incomplete sm
 
 Full degradation (all network listeners and non-responsive menu button) observed on 14 April 2026 after 569 seconds:
 
-```
+```text
 99_ms=36 telnet_median_ms=46 telnet_p90_ms=52 telnet_p99_ms=62"
 2026-04-14T08:29:02Z protocol=ping result=OK detail="runner=1 iteration=6560 ping_reply_ms=0.491 latency_ms=7"
 2026-04-14T08:29:02Z protocol=http result=OK detail="runner=1 iteration=6560 surface=smoke op=get_version_smoke http_status=200 body_bytes=43 json_type=dict latency_ms=11"
@@ -46,7 +46,7 @@ Full degradation (all network listeners and non-responsive menu button) observed
 
 Post test CLI checks demonstrate non-recovery of network services:
 
-```
+```text
 chris@mickey:~/dev/vivipi$ curl u64
 curl: (7) Failed to connect to u64 port 80 after 3096 ms: Couldn't connect to server
 chris@mickey:~/dev/vivipi$ ftp u64
