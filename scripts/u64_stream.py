@@ -1,12 +1,8 @@
-#!/usr/bin/env python3
-
 from __future__ import annotations
 
-import argparse
 import enum
 import socket
 import struct
-import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -32,7 +28,6 @@ VIDEO_ENCODING = 0
 VIDEO_MAX_LINE = 512
 AUDIO_STEREO_SAMPLES_PER_PACKET = 192
 DEBUG_MAX_ENTRIES_PER_PACKET = 360
-DEFAULT_SUMMARY_INTERVAL_S = 1.0
 
 
 class StreamKind(enum.StrEnum):
@@ -51,11 +46,6 @@ STREAM_PACKET_SIZES = {
     StreamKind.VIDEO: VIDEO_PACKET_SIZE,
     StreamKind.AUDIO: AUDIO_PACKET_SIZE,
     StreamKind.DEBUG: DEBUG_PACKET_SIZE,
-}
-STREAM_HEADER_SIZES = {
-    StreamKind.VIDEO: VIDEO_HEADER_SIZE,
-    StreamKind.AUDIO: AUDIO_HEADER_SIZE,
-    StreamKind.DEBUG: DEBUG_HEADER_SIZE,
 }
 LOGGER = Callable[[str, str, str], None]
 
@@ -235,10 +225,7 @@ class StreamPacketTracker:
             if idle_at - self.last_packet_at >= self.packet_timeout_s and not self._idle_timeout_raised:
                 self.timeout_errors += 1
                 self._idle_timeout_raised = True
-                self._record_error_locked(
-                    "timeout",
-                    f"packet stall detected idle_s={idle_at - self.last_packet_at:.3f}",
-                )
+                self._record_error_locked("timeout", f"packet stall detected idle_s={idle_at - self.last_packet_at:.3f}")
 
     def snapshot(self, now: float | None = None) -> StreamSnapshot:
         current = time.monotonic() if now is None else now
@@ -281,11 +268,7 @@ class StreamPacketTracker:
         self.last_error = detail
         self._error_logs += 1
         if self._error_logs <= MAX_ERROR_LOGS or self._error_logs % ERROR_LOG_INTERVAL == 0:
-            self.logger(
-                "stream",
-                "FAIL",
-                f"kind={self.kind.value} category={category} packets={self.packets_received} detail={detail}",
-            )
+            self.logger("stream", "FAIL", f"kind={self.kind.value} category={category} packets={self.packets_received} detail={detail}")
 
     def _note_sequence_locked(self, sequence: int) -> None:
         if self.expected_sequence is None:
@@ -302,22 +285,14 @@ class StreamPacketTracker:
             self.lost_packets += missing
             self.last_sequence = sequence
             self.expected_sequence = (sequence + 1) & 0xFFFF
-            self._record_error_locked(
-                "sequence",
-                f"expected_seq={expected_sequence} got_seq={sequence} lost_packets={missing}",
-            )
+            self._record_error_locked("sequence", f"expected_seq={expected_sequence} got_seq={sequence} lost_packets={missing}")
             return
         self.reordered_packets += 1
-        self._record_error_locked(
-            "sequence",
-            f"expected_seq={expected_sequence} got_seq={sequence} reordered_or_duplicate=1",
-        )
+        self._record_error_locked("sequence", f"expected_seq={expected_sequence} got_seq={sequence} reordered_or_duplicate=1")
 
     def _note_video_packet(self, payload: bytes) -> None:
-        sequence = None
         if len(payload) >= 2:
-            sequence = struct.unpack_from("<H", payload, 0)[0]
-            self._note_sequence_locked(sequence)
+            self._note_sequence_locked(struct.unpack_from("<H", payload, 0)[0])
         if len(payload) != VIDEO_PACKET_SIZE:
             self.size_errors += 1
             self._record_error_locked("size", f"expected_bytes={VIDEO_PACKET_SIZE} got_bytes={len(payload)}")
@@ -325,7 +300,12 @@ class StreamPacketTracker:
         frame, line_field, width = struct.unpack_from("<HHH", payload, 2)
         lines_per_packet, bits_per_pixel = struct.unpack_from("<BB", payload, 8)
         encoding = struct.unpack_from("<H", payload, 10)[0]
-        if width != VIDEO_WIDTH or lines_per_packet != VIDEO_LINES_PER_PACKET or bits_per_pixel != VIDEO_BITS_PER_PIXEL or encoding != VIDEO_ENCODING:
+        if (
+            width != VIDEO_WIDTH
+            or lines_per_packet != VIDEO_LINES_PER_PACKET
+            or bits_per_pixel != VIDEO_BITS_PER_PIXEL
+            or encoding != VIDEO_ENCODING
+        ):
             self.header_errors += 1
             self._record_error_locked(
                 "header",
@@ -335,25 +315,16 @@ class StreamPacketTracker:
         is_terminal_packet = bool(line_field & 0x8000)
         if line_number % VIDEO_LINES_PER_PACKET != 0 or line_number >= VIDEO_MAX_LINE:
             self.structure_errors += 1
-            self._record_error_locked(
-                "structure",
-                f"frame={frame} line={line_number} terminal={int(is_terminal_packet)}",
-            )
+            self._record_error_locked("structure", f"frame={frame} line={line_number} terminal={int(is_terminal_packet)}")
         elif self._video_last_frame is not None:
             if frame == self._video_last_frame:
                 expected_line = self._video_last_line + VIDEO_LINES_PER_PACKET if self._video_last_line is not None else None
                 if self._video_last_terminal:
                     self.structure_errors += 1
-                    self._record_error_locked(
-                        "structure",
-                        f"frame={frame} repeated_after_terminal=1 line={line_number}",
-                    )
+                    self._record_error_locked("structure", f"frame={frame} repeated_after_terminal=1 line={line_number}")
                 elif expected_line is not None and line_number != expected_line:
                     self.structure_errors += 1
-                    self._record_error_locked(
-                        "structure",
-                        f"frame={frame} expected_line={expected_line} got_line={line_number}",
-                    )
+                    self._record_error_locked("structure", f"frame={frame} expected_line={expected_line} got_line={line_number}")
             elif frame == ((self._video_last_frame + 1) & 0xFFFF) and not self._video_last_terminal:
                 self.structure_errors += 1
                 self._record_error_locked(
@@ -384,9 +355,8 @@ class StreamPacketTracker:
             self.size_errors += 1
             self._record_error_locked("size", f"expected_min_bytes={DEBUG_HEADER_SIZE} got_bytes={len(payload)}")
             return
-        if len(payload) >= DEBUG_HEADER_SIZE:
-            sequence, reserved = struct.unpack_from("<HH", payload, 0)
-            self._note_sequence_locked(sequence)
+        sequence, reserved = struct.unpack_from("<HH", payload, 0)
+        self._note_sequence_locked(sequence)
         if len(payload) > DEBUG_PACKET_SIZE:
             self.size_errors += 1
             self._record_error_locked("size", f"expected_max_bytes={DEBUG_PACKET_SIZE} got_bytes={len(payload)}")
@@ -405,13 +375,7 @@ class StreamPacketTracker:
 
 
 class _StreamReceiver(threading.Thread):
-    def __init__(
-        self,
-        sock: socket.socket,
-        tracker: StreamPacketTracker,
-        stop_event: threading.Event,
-        allowed_sources: set[str],
-    ) -> None:
+    def __init__(self, sock: socket.socket, tracker: StreamPacketTracker, stop_event: threading.Event, allowed_sources: set[str]) -> None:
         super().__init__(daemon=True)
         self.sock = sock
         self.tracker = tracker
@@ -421,7 +385,7 @@ class _StreamReceiver(threading.Thread):
     def run(self) -> None:
         while not self.stop_event.is_set():
             try:
-                payload, _address = self.sock.recvfrom(STREAM_PACKET_SIZES[self.tracker.kind] + 64)
+                payload, address = self.sock.recvfrom(STREAM_PACKET_SIZES[self.tracker.kind] + 64)
             except socket.timeout:
                 self.tracker.note_idle()
                 continue
@@ -430,19 +394,13 @@ class _StreamReceiver(threading.Thread):
                     return
                 self.tracker.note_idle()
                 continue
-            if self.allowed_sources and _address[0] not in self.allowed_sources:
+            if self.allowed_sources and address[0] not in self.allowed_sources:
                 continue
             self.tracker.note_packet(payload)
 
 
 class StreamMonitor:
-    def __init__(
-        self,
-        settings: StreamRuntimeSettings,
-        streams: Sequence[StreamKind],
-        *,
-        logger: LOGGER | None = None,
-    ) -> None:
+    def __init__(self, settings: StreamRuntimeSettings, streams: Sequence[StreamKind], *, logger: LOGGER | None = None) -> None:
         self.settings = settings
         self.streams = tuple(streams)
         self.logger = logger or _default_logger
@@ -469,11 +427,7 @@ class StreamMonitor:
             self._sockets[kind] = sock
             self._trackers[kind] = tracker
             self._threads[kind] = receiver
-            self.logger(
-                "stream",
-                "INFO",
-                f"kind={kind.value} listening={self.local_ip}:{sock.getsockname()[1]} expected_sources={','.join(self.peer_ips)}",
-            )
+            self.logger("stream", "INFO", f"kind={kind.value} listening={self.local_ip}:{sock.getsockname()[1]} expected_sources={','.join(self.peer_ips)}")
             receiver.start()
         try:
             for kind in self.streams:
@@ -503,53 +457,3 @@ class StreamMonitor:
 
     def snapshots(self) -> tuple[StreamSnapshot, ...]:
         return tuple(self._trackers[kind].snapshot() for kind in self.streams)
-
-
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Enable and validate Ultimate-64 UDP data streams.")
-    parser.add_argument("-H", "--host", required=True, help="Target host or IP")
-    parser.add_argument("--control-port", type=int, default=DEFAULT_CONTROL_PORT, help="TCP control port")
-    parser.add_argument("--duration-s", type=float, default=5.0, help="Capture duration in seconds")
-    parser.add_argument("--summary-every-s", type=float, default=DEFAULT_SUMMARY_INTERVAL_S, help="Summary interval in seconds")
-    parser.add_argument(
-        "--stream",
-        nargs="*",
-        choices=[kind.value for kind in StreamKind],
-        default=(),
-        help="Streams to enable. Omit values to enable video, audio, and debug.",
-    )
-    parser.add_argument("--packet-timeout-s", type=float, default=DEFAULT_PACKET_TIMEOUT_S, help="Packet stall timeout.")
-    parser.add_argument("--startup-grace-s", type=float, default=DEFAULT_STARTUP_GRACE_S, help="Initial no-packet grace period.")
-    return parser
-
-
-def main(argv: Sequence[str]) -> int:
-    args = build_parser().parse_args(argv)
-    settings = StreamRuntimeSettings(
-        host=args.host,
-        control_port=args.control_port,
-        packet_timeout_s=args.packet_timeout_s,
-        startup_grace_s=args.startup_grace_s,
-    )
-    streams = parse_stream_selection(args.stream)
-    monitor = StreamMonitor(settings, streams)
-    deadline = time.monotonic() + max(args.duration_s, 0.1)
-    monitor.start()
-    try:
-        while time.monotonic() < deadline:
-            snapshots = monitor.snapshots()
-            _default_logger("stream", "INFO", " ".join(stream_summary_parts(snapshots)))
-            time.sleep(max(args.summary_every_s, 0.1))
-    finally:
-        monitor.stop()
-    final_snapshots = monitor.snapshots()
-    _default_logger("stream", "INFO", " ".join(stream_summary_parts(final_snapshots)))
-    if any(snapshot.status == "FAIL" for snapshot in final_snapshots):
-        return 1
-    if any(snapshot.packets_received == 0 for snapshot in final_snapshots):
-        return 1
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main(sys.argv[1:]))
