@@ -4,6 +4,7 @@ import importlib.util
 import socket
 import sys
 import threading
+import time
 import types
 import uuid
 from pathlib import Path
@@ -25,27 +26,29 @@ def load_module() -> types.ModuleType:
     return module
 
 
-def test_main_without_new_flags_dispatches_to_legacy(monkeypatch):
+def test_main_without_args_runs_default_soak_configuration(monkeypatch):
     module = load_module()
     captured = {}
 
-    def fake_run_legacy(settings):
+    def fake_run_extended(config, settings):
+        captured["config"] = config
         captured["settings"] = settings
         return 17
 
-    monkeypatch.setattr(module, "run_legacy", fake_run_legacy)
-    monkeypatch.setattr(module, "run_extended", lambda config, settings: pytest.fail("unexpected extended path"))
+    monkeypatch.setattr(module, "run_extended", fake_run_extended)
 
     assert module.main([]) == 17
-    assert captured["settings"].host == module.HOST
-    assert captured["settings"].delay_ms == module.INTER_CALL_DELAY_MS
+    assert captured["settings"].host == "u64"
+    assert captured["config"].profile == "soak"
+    assert captured["config"].schedule == "concurrent"
+    assert captured["config"].runners == 1
+    assert captured["config"].duration_s == 12 * 60 * 60
+    assert captured["config"].streams == ("audio", "video")
 
 
 def test_profile_main_defaults_host_to_u64_and_runs_extended(monkeypatch):
     module = load_module()
     captured = {}
-
-    monkeypatch.setattr(module, "run_legacy", lambda settings: pytest.fail("unexpected legacy path"))
 
     def fake_run_extended(config, settings):
         captured["config"] = config
@@ -56,10 +59,30 @@ def test_profile_main_defaults_host_to_u64_and_runs_extended(monkeypatch):
 
     assert module.main(["--profile", "soak"]) == 23
     assert captured["settings"].host == "u64"
-    assert captured["config"].duration_s == 120
+    assert captured["config"].duration_s == 12 * 60 * 60
 
 
-def test_soak_profile_resolves_to_legacy_safe_shape():
+def test_default_configuration_matches_soak_profile():
+    module = load_module()
+    parser = module.build_parser()
+
+    resolved = module.resolve_execution_config(parser.parse_args([]))
+
+    assert resolved.profile == "soak"
+    assert resolved.probes == ("ping", "http", "ftp", "telnet")
+    assert resolved.schedule == "concurrent"
+    assert resolved.runners == 1
+    assert resolved.duration_s == 12 * 60 * 60
+    assert resolved.probe_surfaces == {
+        "ping": module.ProbeSurface.SMOKE,
+        "http": module.ProbeSurface.READWRITE,
+        "ftp": module.ProbeSurface.READWRITE,
+        "telnet": module.ProbeSurface.READWRITE,
+    }
+    assert resolved.streams == ("audio", "video")
+
+
+def test_soak_profile_resolves_to_default_stream_shape():
     module = load_module()
     parser = module.build_parser()
 
@@ -67,15 +90,22 @@ def test_soak_profile_resolves_to_legacy_safe_shape():
 
     assert resolved.profile == "soak"
     assert resolved.probes == ("ping", "http", "ftp", "telnet")
-    assert resolved.schedule == "sequential"
+    assert resolved.schedule == "concurrent"
     assert resolved.runners == 1
-    assert resolved.duration_s == 120
+    assert resolved.duration_s == 12 * 60 * 60
     assert resolved.probe_correctness == {
         "ping": module.ProbeCorrectness.CORRECT,
         "http": module.ProbeCorrectness.CORRECT,
         "ftp": module.ProbeCorrectness.CORRECT,
         "telnet": module.ProbeCorrectness.CORRECT,
     }
+    assert resolved.probe_surfaces == {
+        "ping": module.ProbeSurface.SMOKE,
+        "http": module.ProbeSurface.READWRITE,
+        "ftp": module.ProbeSurface.READWRITE,
+        "telnet": module.ProbeSurface.READWRITE,
+    }
+    assert resolved.streams == ("audio", "video")
 
 
 def test_stress_profile_resolves_deterministically():
@@ -201,6 +231,7 @@ def test_help_output_mentions_new_flags_and_precedence():
     module = load_module()
     help_text = module.build_parser().format_help()
 
+    assert "Default: 12h soak with concurrent readwrite probes and audio+video streams." in help_text
     assert "--profile" in help_text
     assert "--probes" in help_text
     assert "--schedule" in help_text
@@ -212,11 +243,73 @@ def test_help_output_mentions_new_flags_and_precedence():
     assert "--http-mode" in help_text
     assert "--ftp-mode" in help_text
     assert "--telnet-mode" in help_text
+    assert "--stream" in help_text
     assert "override the profile" in help_text
     assert "--surface, --mode, --*-surface, and --*-mode" in help_text
     assert "correct" in help_text
     assert "incomplete" in help_text
     assert "invalid" in help_text
+
+
+def test_stream_flag_without_values_enables_all_streams():
+    module = load_module()
+    parser = module.build_parser()
+
+    resolved = module.resolve_execution_config(parser.parse_args(["--stream"]))
+
+    assert resolved.streams == ("audio", "video")
+    assert resolved.overrides == ("stream",)
+
+
+def test_stream_flag_with_explicit_values_preserves_order():
+    module = load_module()
+    parser = module.build_parser()
+
+    resolved = module.resolve_execution_config(parser.parse_args(["--stream", "video", "audio", "video"]))
+
+    assert resolved.streams == ("video", "audio")
+    assert resolved.overrides == ("stream",)
+
+
+def test_stream_flag_rejects_unsupported_debug_stream():
+    module = load_module()
+    parser = module.build_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--stream", "debug"])
+
+
+def test_iteration_summary_appends_stream_health(monkeypatch, capsys):
+    module = load_module()
+    settings = module.RuntimeSettings("host", "v1/version", 80, 23, 21, "anonymous", "", 0, 1, True)
+    state = module.ExecutionState(settings=settings, include_runner_context=False)
+
+    class FakeStreamMonitor:
+        def snapshots(self):
+            return (
+                module.u64_stream_test.StreamSnapshot(
+                    kind=module.u64_stream_test.StreamKind.VIDEO,
+                    status="OK",
+                    packets_received=12,
+                    lost_packets=0,
+                    reordered_packets=0,
+                    size_errors=0,
+                    header_errors=0,
+                    structure_errors=0,
+                    timeout_errors=0,
+                    first_packet_at=1.0,
+                    last_packet_at=2.0,
+                    last_sequence=11,
+                    last_error="",
+                ),
+            )
+
+    state.stream_monitor = FakeStreamMonitor()
+
+    state.emit_iteration_summary(time.time(), 3, 1)
+
+    output = capsys.readouterr().out
+    assert "stream_video=OK,packets:12,lost:0,reordered:0,size_errs:0,header_errs:0,structure_errs:0,timeout_errs:0" in output
 
 
 def test_run_runner_iteration_sequential_keeps_probe_order():
@@ -838,6 +931,64 @@ def test_run_extended_continues_when_ftp_temp_dir_priming_fails(monkeypatch, cap
     assert len(run_calls) == 1
     output = capsys.readouterr().out
     assert 'protocol=ftp result=INFO detail="prime_temp_dir_failed detail=[Errno 104] Connection reset by peer continuing=1"' in output
+
+
+def test_run_extended_returns_failure_when_stream_monitor_reports_failure(monkeypatch):
+    module = load_module()
+    settings = module.RuntimeSettings("host", "v1/version", 80, 23, 21, "anonymous", "", 0, 1, True)
+    config = module.ExecutionConfig(
+        profile="soak",
+        probes=("ping",),
+        schedule="sequential",
+        runners=1,
+        duration_s=1,
+        probe_correctness={
+            "ping": module.ProbeCorrectness.CORRECT,
+            "http": module.ProbeCorrectness.CORRECT,
+            "ftp": module.ProbeCorrectness.CORRECT,
+            "telnet": module.ProbeCorrectness.CORRECT,
+        },
+        uses_extended_flags=True,
+        overrides=("stream",),
+        probe_surfaces={"ping": module.ProbeSurface.SMOKE},
+        streams=("video",),
+    )
+
+    monkeypatch.setattr(module, "run_runner_loop", lambda *args, **kwargs: 0)
+
+    class FakeStreamMonitor:
+        def __init__(self, *args, **kwargs):
+            self.started = False
+            self.stopped = False
+
+        def start(self):
+            self.started = True
+
+        def stop(self):
+            self.stopped = True
+
+        def snapshots(self):
+            return (
+                module.u64_stream_test.StreamSnapshot(
+                    kind=module.u64_stream_test.StreamKind.VIDEO,
+                    status="FAIL",
+                    packets_received=10,
+                    lost_packets=1,
+                    reordered_packets=0,
+                    size_errors=0,
+                    header_errors=0,
+                    structure_errors=0,
+                    timeout_errors=0,
+                    first_packet_at=1.0,
+                    last_packet_at=2.0,
+                    last_sequence=9,
+                    last_error="lost packet",
+                ),
+            )
+
+    monkeypatch.setattr(module.u64_stream_test, "StreamMonitor", FakeStreamMonitor)
+
+    assert module.run_extended(config, settings) == 1
 
 
 def test_ftp_prime_temp_dir_seeds_known_files_without_listing(monkeypatch):

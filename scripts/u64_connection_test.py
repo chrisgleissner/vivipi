@@ -17,6 +17,14 @@ import threading
 import time
 import urllib.parse
 from dataclasses import dataclass, field, replace
+from pathlib import Path
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+import u64_stream_test  # noqa: E402
 
 
 HOST = os.getenv("HOST", "192.168.1.13")
@@ -28,8 +36,7 @@ FTP_USER = os.getenv("FTP_USER", "anonymous")
 FTP_PASS = os.getenv("FTP_PASS", "")
 INTER_CALL_DELAY_MS = int(os.getenv("INTER_CALL_DELAY_MS", "0"))
 LOG_EVERY_N_ITERATIONS = int(os.getenv("LOG_EVERY_N_ITERATIONS", "10"))
-CURRENT_ITERATION = 0
-LATENCY_SAMPLES = {"ping": [], "http": [], "ftp": [], "telnet": []}
+VERBOSE = os.getenv("VERBOSE", "").strip().lower() not in {"", "0", "false", "no"}
 TELNET_IDLE_TIMEOUT_S = 0.20
 TELNET_MAX_EMPTY_READS = 3
 SURFACE_OPERATION_RETRY_DELAYS_S = (0.05, 0.10, 0.20)
@@ -58,10 +65,13 @@ DEFAULT_SCHEDULE = "sequential"
 DEFAULT_RUNNERS = 1
 DEFAULT_PROFILE_HOST = "u64"
 DEFAULT_PROFILE_DURATION_S = 120
+DEFAULT_SOAK_DURATION_S = 12 * 60 * 60
 PROFILE_SOAK = "soak"
 PROFILE_STRESS = "stress"
 SCHEDULE_SEQUENTIAL = "sequential"
 SCHEDULE_CONCURRENT = "concurrent"
+CONNECTION_STREAM_CHOICES = (u64_stream_test.StreamKind.AUDIO, u64_stream_test.StreamKind.VIDEO)
+DEFAULT_CONNECTION_STREAMS = tuple(kind.value for kind in CONNECTION_STREAM_CHOICES)
 
 
 class ProbeCorrectness(enum.StrEnum):
@@ -109,30 +119,6 @@ HISTORICAL_CORRECTNESS_EVIDENCE = {
     },
 }
 TELNET_FAILURE_MARKERS = (b"incorrect", b"failed", b"denied", b"invalid")
-NEW_FEATURE_ARGUMENT_NAMES = (
-    "profile",
-    "probes",
-    "schedule",
-    "runners",
-    "duration_s",
-    "surface",
-    "mode",
-    "http_surface",
-    "ftp_surface",
-    "telnet_surface",
-    "ping_mode",
-    "http_mode",
-    "ftp_mode",
-    "telnet_mode",
-)
-
-
-def parse_bool(value: str) -> bool:
-    return value.strip().lower() not in {"", "0", "false", "no"}
-
-
-VERBOSE = parse_bool(os.getenv("VERBOSE", "0"))
-
 
 @dataclass(frozen=True)
 class RuntimeSettings:
@@ -159,6 +145,7 @@ class ExecutionConfig:
     uses_extended_flags: bool
     overrides: tuple[str, ...]
     probe_surfaces: dict[str, ProbeSurface] = field(default_factory=lambda: {protocol: ProbeSurface.SMOKE for protocol in DEFAULT_PROBES})
+    streams: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -177,6 +164,7 @@ class ExecutionState:
     output_lock: threading.Lock = field(default_factory=threading.Lock)
     probe_selection_lock: threading.Lock = field(default_factory=threading.Lock)
     probe_operation_counts: dict[tuple[int, str, str], int] = field(default_factory=dict)
+    stream_monitor: u64_stream_test.StreamMonitor | None = None
 
     def record_latency(self, protocol: str, elapsed_ms: float) -> None:
         with self.sample_lock:
@@ -231,6 +219,8 @@ class ExecutionState:
             parts.append(f"{protocol}_median_ms={self.percentile_ms(protocol, 50)}")
             parts.append(f"{protocol}_p90_ms={self.percentile_ms(protocol, 90)}")
             parts.append(f"{protocol}_p99_ms={self.percentile_ms(protocol, 99)}")
+        if self.stream_monitor is not None:
+            parts.extend(u64_stream_test.stream_summary_parts(self.stream_monitor.snapshots()))
         with self.output_lock:
             try:
                 print(f'{ts()} protocol=iteration result=INFO detail="{' '.join(parts)}"', flush=True)
@@ -307,34 +297,11 @@ def ts() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
-def should_log(result: str) -> bool:
-    if result == "FAIL" or VERBOSE:
-        return True
-    if LOG_EVERY_N_ITERATIONS <= 1:
-        return True
-    return CURRENT_ITERATION % LOG_EVERY_N_ITERATIONS == 0
-
-
-def should_log_iteration() -> bool:
-    if VERBOSE:
-        return True
-    if LOG_EVERY_N_ITERATIONS <= 1:
-        return True
-    return CURRENT_ITERATION % LOG_EVERY_N_ITERATIONS == 0
-
-
 def log(protocol: str, result: str, detail: str) -> None:
-    if not should_log(result):
-        return
     try:
         print(f'{ts()} protocol={protocol} result={result} detail="{detail.replace(chr(34), chr(39))}"', flush=True)
     except BrokenPipeError:
         raise SystemExit(0)
-
-
-def log_check(protocol: str, result: str, detail: str, elapsed_ms: float) -> None:
-    LATENCY_SAMPLES[protocol].append(elapsed_ms)
-    log(protocol, result, f"{detail} latency_ms={int(round(elapsed_ms))}")
 
 
 def parse_probes(value: str) -> tuple[str, ...]:
@@ -420,7 +387,7 @@ def profile_overrides_help() -> str:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Repeated U64 connectivity checks",
+        description="Repeated U64 connectivity checks. Default: 12h soak with concurrent readwrite probes and audio+video streams.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=profile_overrides_help(),
     )
@@ -462,7 +429,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--duration-s",
         type=parse_duration_s,
         default=None,
-        help="Optional total run duration in seconds. Profiles default to 120 seconds when not overridden.",
+        help="Optional total run duration in seconds. Soak defaults to 43200 (12h); stress defaults to 120.",
     )
     parser.add_argument(
         "--surface",
@@ -483,30 +450,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--http-mode", choices=[value.value for value in ProbeCorrectness], default=None, help="HTTP probe correctness.")
     parser.add_argument("--ftp-mode", choices=[value.value for value in ProbeCorrectness], default=None, help="FTP probe correctness.")
     parser.add_argument("--telnet-mode", choices=[value.value for value in ProbeCorrectness], default=None, help="Telnet probe correctness.")
+    parser.add_argument(
+        "--stream",
+        nargs="*",
+        choices=[kind.value for kind in CONNECTION_STREAM_CHOICES],
+        default=None,
+        help="Verify audio, video, or both UDP streams. Omit values to select both audio and video.",
+    )
     return parser
-
-
-def percentile_ms(protocol: str, percentile: int) -> int:
-    samples = LATENCY_SAMPLES[protocol]
-    if not samples:
-        return 0
-    ordered = sorted(samples)
-    rank = max(1, math.ceil(percentile / 100.0 * len(ordered)))
-    return int(round(ordered[rank - 1]))
-
-
-def log_iteration_summary(started_at: float, iteration: int) -> None:
-    if not should_log_iteration():
-        return
-    parts = [f"iteration={iteration}", f"runtime_s={int(time.time() - started_at)}", f"host={HOST}"]
-    for protocol in DEFAULT_PROBES:
-        parts.append(f"{protocol}_median_ms={percentile_ms(protocol, 50)}")
-        parts.append(f"{protocol}_p90_ms={percentile_ms(protocol, 90)}")
-        parts.append(f"{protocol}_p99_ms={percentile_ms(protocol, 99)}")
-    try:
-        print(f'{ts()} protocol=iteration result=INFO detail="{' '.join(parts)}"', flush=True)
-    except BrokenPipeError:
-        raise SystemExit(0)
 
 
 def sleep_ms(value: int) -> None:
@@ -1898,26 +1849,6 @@ PROBE_RUNNERS = {
 }
 
 
-def ping_check() -> None:
-    outcome = run_ping_probe(build_runtime_settings_from_globals(), ProbeCorrectness.CORRECT)
-    log_check("ping", outcome.result, outcome.detail, outcome.elapsed_ms)
-
-
-def http_check() -> None:
-    outcome = run_http_probe(build_runtime_settings_from_globals(), ProbeCorrectness.CORRECT)
-    log_check("http", outcome.result, outcome.detail, outcome.elapsed_ms)
-
-
-def telnet_check() -> None:
-    outcome = run_telnet_probe(build_runtime_settings_from_globals(), ProbeCorrectness.CORRECT)
-    log_check("telnet", outcome.result, outcome.detail, outcome.elapsed_ms)
-
-
-def ftp_check() -> None:
-    outcome = run_ftp_probe(build_runtime_settings_from_globals(), ProbeCorrectness.CORRECT)
-    log_check("ftp", outcome.result, outcome.detail, outcome.elapsed_ms)
-
-
 def build_runtime_settings(args: argparse.Namespace) -> RuntimeSettings:
     return RuntimeSettings(
         host=args.host,
@@ -1933,33 +1864,8 @@ def build_runtime_settings(args: argparse.Namespace) -> RuntimeSettings:
     )
 
 
-def build_runtime_settings_from_globals() -> RuntimeSettings:
-    return RuntimeSettings(
-        host=HOST,
-        http_path=HTTP_PATH,
-        http_port=HTTP_PORT,
-        telnet_port=TELNET_PORT,
-        ftp_port=FTP_PORT,
-        ftp_user=FTP_USER,
-        ftp_pass=FTP_PASS,
-        delay_ms=INTER_CALL_DELAY_MS,
-        log_every=LOG_EVERY_N_ITERATIONS,
-        verbose=VERBOSE,
-    )
-
-
 def default_execution_config() -> ExecutionConfig:
-    return ExecutionConfig(
-        profile=None,
-        probes=DEFAULT_PROBES,
-        schedule=DEFAULT_SCHEDULE,
-        runners=DEFAULT_RUNNERS,
-        duration_s=None,
-        probe_correctness={protocol: PROBE_CORRECTNESS_CHOICES[protocol][0] for protocol in DEFAULT_PROBES},
-        uses_extended_flags=False,
-        overrides=(),
-        probe_surfaces={protocol: ProbeSurface.SMOKE for protocol in DEFAULT_PROBES},
-    )
+    return profile_execution_config(PROFILE_SOAK)
 
 
 def profile_execution_config(profile: str) -> ExecutionConfig:
@@ -1967,18 +1873,19 @@ def profile_execution_config(profile: str) -> ExecutionConfig:
         return ExecutionConfig(
             profile=PROFILE_SOAK,
             probes=DEFAULT_PROBES,
-            schedule=SCHEDULE_SEQUENTIAL,
+            schedule=SCHEDULE_CONCURRENT,
             runners=1,
-            duration_s=DEFAULT_PROFILE_DURATION_S,
+            duration_s=DEFAULT_SOAK_DURATION_S,
             probe_correctness={protocol: PROBE_CORRECTNESS_CHOICES[protocol][0] for protocol in DEFAULT_PROBES},
             uses_extended_flags=True,
             overrides=(),
             probe_surfaces={
                 "ping": ProbeSurface.SMOKE,
-                "http": ProbeSurface.READ,
-                "ftp": ProbeSurface.READ,
-                "telnet": ProbeSurface.READ,
+                "http": ProbeSurface.READWRITE,
+                "ftp": ProbeSurface.READWRITE,
+                "telnet": ProbeSurface.READWRITE,
             },
+            streams=DEFAULT_CONNECTION_STREAMS,
         )
     if profile == PROFILE_STRESS:
         return ExecutionConfig(
@@ -2001,12 +1908,22 @@ def profile_execution_config(profile: str) -> ExecutionConfig:
                 "ftp": ProbeSurface.READWRITE,
                 "telnet": ProbeSurface.READWRITE,
             },
+            streams=(),
         )
     raise ValueError(f"unsupported profile: {profile}")
 
 
-def uses_extended_flags(args: argparse.Namespace) -> bool:
-    return any(getattr(args, name) is not None for name in NEW_FEATURE_ARGUMENT_NAMES)
+def parse_connection_stream_selection(values: tuple[str, ...] | list[str]) -> tuple[str, ...]:
+    if not values:
+        return DEFAULT_CONNECTION_STREAMS
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for raw_value in values:
+        if raw_value in seen:
+            continue
+        seen.add(raw_value)
+        ordered.append(raw_value)
+    return tuple(ordered)
 
 
 def resolve_execution_config(args: argparse.Namespace) -> ExecutionConfig:
@@ -2017,6 +1934,7 @@ def resolve_execution_config(args: argparse.Namespace) -> ExecutionConfig:
 
     probe_correctness = dict(resolved.probe_correctness)
     probe_surfaces = dict(resolved.probe_surfaces)
+    streams = tuple(resolved.streams)
     overrides: list[str] = []
 
     if args.probes is not None:
@@ -2107,6 +2025,10 @@ def resolve_execution_config(args: argparse.Namespace) -> ExecutionConfig:
         probe_correctness[protocol] = _fallback_correctness(protocol, ProbeCorrectness(raw_value))
         overrides.append(f"{protocol}-mode")
 
+    if args.stream is not None:
+        streams = parse_connection_stream_selection(args.stream)
+        overrides.append("stream")
+
     return ExecutionConfig(
         profile=resolved.profile,
         probes=resolved.probes,
@@ -2117,19 +2039,8 @@ def resolve_execution_config(args: argparse.Namespace) -> ExecutionConfig:
         uses_extended_flags=True,
         overrides=tuple(overrides),
         probe_surfaces=probe_surfaces,
+        streams=streams,
     )
-
-
-def log_startup() -> None:
-    try:
-        print(
-            f'{ts()} protocol=config result=INFO detail="host={HOST} http={HTTP_PORT}/{HTTP_PATH} '
-            f'telnet={TELNET_PORT} ftp={FTP_PORT} user={FTP_USER} sample_every={LOG_EVERY_N_ITERATIONS} '
-            f'verbose={int(VERBOSE)} call_gap_ms={INTER_CALL_DELAY_MS}"',
-            flush=True,
-        )
-    except BrokenPipeError:
-        raise SystemExit(0)
 
 
 def log_resolved_startup(settings: RuntimeSettings, config: ExecutionConfig) -> None:
@@ -2150,6 +2061,7 @@ def log_resolved_startup(settings: RuntimeSettings, config: ExecutionConfig) -> 
         f"duration_s={config.duration_s if config.duration_s is not None else 'infinite'}",
         "surfaces=" + ",".join(f"{protocol}:{config.probe_surfaces[protocol].value}" for protocol in DEFAULT_PROBES),
         "correctness=" + ",".join(f"{protocol}:{config.probe_correctness[protocol].value}" for protocol in DEFAULT_PROBES),
+        f"streams={','.join(config.streams) if config.streams else 'off'}",
     ]
     if config.profile is not None and config.overrides:
         parts.append(f"overrides={','.join(config.overrides)}")
@@ -2312,54 +2224,60 @@ def run_extended(config: ExecutionConfig, settings: RuntimeSettings) -> int:
     state = ExecutionState(settings=settings, include_runner_context=True)
     stop_event = threading.Event()
     deadline_s = None if config.duration_s is None else time.monotonic() + config.duration_s
-    if config.runners == 1:
-        run_runner_loop(1, config, settings, state, stop_event, deadline_s=deadline_s)
-        return 0
-    threads: list[threading.Thread] = []
-    for runner_id in range(1, config.runners + 1):
-        thread = threading.Thread(
-            target=run_runner_loop,
-            args=(runner_id, config, settings, state, stop_event),
-            kwargs={"deadline_s": deadline_s},
-            daemon=True,
+
+    def emit_stream_log(protocol: str, result: str, detail: str) -> None:
+        del protocol
+        with state.output_lock:
+            try:
+                print(f'{ts()} protocol=stream result={result} detail="{detail.replace(chr(34), chr(39))}"', flush=True)
+            except BrokenPipeError:
+                raise SystemExit(0)
+
+    stream_monitor = None
+    if config.streams:
+        stream_monitor = u64_stream_test.StreamMonitor(
+            u64_stream_test.StreamRuntimeSettings(host=settings.host),
+            tuple(u64_stream_test.StreamKind(stream) for stream in config.streams),
+            logger=emit_stream_log,
         )
-        thread.start()
-        threads.append(thread)
-    while True:
-        for thread in threads:
-            thread.join(timeout=0.2)
-        if not any(thread.is_alive() for thread in threads):
-            return 0
+        state.stream_monitor = stream_monitor
 
+    result = 0
 
-def run_legacy(settings: RuntimeSettings) -> int:
-    global HOST, HTTP_PATH, HTTP_PORT, TELNET_PORT, FTP_PORT, FTP_USER, FTP_PASS, INTER_CALL_DELAY_MS, LOG_EVERY_N_ITERATIONS, VERBOSE, CURRENT_ITERATION
-    HOST = settings.host
-    HTTP_PATH = settings.http_path
-    HTTP_PORT = settings.http_port
-    TELNET_PORT = settings.telnet_port
-    FTP_PORT = settings.ftp_port
-    FTP_USER = settings.ftp_user
-    FTP_PASS = settings.ftp_pass
-    INTER_CALL_DELAY_MS = settings.delay_ms
-    LOG_EVERY_N_ITERATIONS = settings.log_every
-    VERBOSE = settings.verbose
-
-    started_at = time.time()
-    iteration = 0
-    log_startup()
-    while True:
-        iteration += 1
-        CURRENT_ITERATION = iteration
-        ping_check()
-        sleep_ms(INTER_CALL_DELAY_MS)
-        http_check()
-        sleep_ms(INTER_CALL_DELAY_MS)
-        ftp_check()
-        sleep_ms(INTER_CALL_DELAY_MS)
-        telnet_check()
-        log_iteration_summary(started_at, iteration)
-        sleep_ms(INTER_CALL_DELAY_MS)
+    try:
+        if stream_monitor is not None:
+            stream_monitor.start()
+        if config.runners == 1:
+            run_runner_loop(1, config, settings, state, stop_event, deadline_s=deadline_s)
+            result = 0
+        else:
+            threads: list[threading.Thread] = []
+            for runner_id in range(1, config.runners + 1):
+                thread = threading.Thread(
+                    target=run_runner_loop,
+                    args=(runner_id, config, settings, state, stop_event),
+                    kwargs={"deadline_s": deadline_s},
+                    daemon=True,
+                )
+                thread.start()
+                threads.append(thread)
+            while True:
+                for thread in threads:
+                    thread.join(timeout=0.2)
+                if not any(thread.is_alive() for thread in threads):
+                    result = 0
+                    break
+    finally:
+        final_stream_snapshots: tuple[u64_stream_test.StreamSnapshot, ...] = ()
+        if stream_monitor is not None:
+            final_stream_snapshots = stream_monitor.snapshots()
+        if stream_monitor is not None:
+            stream_monitor.stop()
+        if final_stream_snapshots and any(
+            snapshot.status == "FAIL" or snapshot.packets_received == 0 for snapshot in final_stream_snapshots
+        ):
+            result = 1
+    return result
 
 
 def has_explicit_host(argv: list[str]) -> bool:
@@ -2378,8 +2296,6 @@ def main(argv: list[str]) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     settings = build_runtime_settings(args)
-    if not uses_extended_flags(args):
-        return run_legacy(settings)
     config = resolve_execution_config(args)
     settings = apply_profile_runtime_defaults(settings, config, argv)
     log_resolved_startup(settings, config)
