@@ -24,7 +24,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-import u64_stream_test
+import u64_stream_test  # noqa: E402
 
 
 HOST = os.getenv("HOST", "192.168.1.13")
@@ -36,8 +36,7 @@ FTP_USER = os.getenv("FTP_USER", "anonymous")
 FTP_PASS = os.getenv("FTP_PASS", "")
 INTER_CALL_DELAY_MS = int(os.getenv("INTER_CALL_DELAY_MS", "0"))
 LOG_EVERY_N_ITERATIONS = int(os.getenv("LOG_EVERY_N_ITERATIONS", "10"))
-CURRENT_ITERATION = 0
-LATENCY_SAMPLES = {"ping": [], "http": [], "ftp": [], "telnet": []}
+VERBOSE = os.getenv("VERBOSE", "").strip().lower() not in {"", "0", "false", "no"}
 TELNET_IDLE_TIMEOUT_S = 0.20
 TELNET_MAX_EMPTY_READS = 3
 SURFACE_OPERATION_RETRY_DELAYS_S = (0.05, 0.10, 0.20)
@@ -120,31 +119,6 @@ HISTORICAL_CORRECTNESS_EVIDENCE = {
     },
 }
 TELNET_FAILURE_MARKERS = (b"incorrect", b"failed", b"denied", b"invalid")
-NEW_FEATURE_ARGUMENT_NAMES = (
-    "profile",
-    "probes",
-    "schedule",
-    "runners",
-    "duration_s",
-    "surface",
-    "mode",
-    "http_surface",
-    "ftp_surface",
-    "telnet_surface",
-    "ping_mode",
-    "http_mode",
-    "ftp_mode",
-    "telnet_mode",
-    "stream",
-)
-
-
-def parse_bool(value: str) -> bool:
-    return value.strip().lower() not in {"", "0", "false", "no"}
-
-
-VERBOSE = parse_bool(os.getenv("VERBOSE", "0"))
-
 
 @dataclass(frozen=True)
 class RuntimeSettings:
@@ -323,34 +297,11 @@ def ts() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
-def should_log(result: str) -> bool:
-    if result == "FAIL" or VERBOSE:
-        return True
-    if LOG_EVERY_N_ITERATIONS <= 1:
-        return True
-    return CURRENT_ITERATION % LOG_EVERY_N_ITERATIONS == 0
-
-
-def should_log_iteration() -> bool:
-    if VERBOSE:
-        return True
-    if LOG_EVERY_N_ITERATIONS <= 1:
-        return True
-    return CURRENT_ITERATION % LOG_EVERY_N_ITERATIONS == 0
-
-
 def log(protocol: str, result: str, detail: str) -> None:
-    if not should_log(result):
-        return
     try:
         print(f'{ts()} protocol={protocol} result={result} detail="{detail.replace(chr(34), chr(39))}"', flush=True)
     except BrokenPipeError:
         raise SystemExit(0)
-
-
-def log_check(protocol: str, result: str, detail: str, elapsed_ms: float) -> None:
-    LATENCY_SAMPLES[protocol].append(elapsed_ms)
-    log(protocol, result, f"{detail} latency_ms={int(round(elapsed_ms))}")
 
 
 def parse_probes(value: str) -> tuple[str, ...]:
@@ -507,29 +458,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Verify audio, video, or both UDP streams. Omit values to select both audio and video.",
     )
     return parser
-
-
-def percentile_ms(protocol: str, percentile: int) -> int:
-    samples = LATENCY_SAMPLES[protocol]
-    if not samples:
-        return 0
-    ordered = sorted(samples)
-    rank = max(1, math.ceil(percentile / 100.0 * len(ordered)))
-    return int(round(ordered[rank - 1]))
-
-
-def log_iteration_summary(started_at: float, iteration: int) -> None:
-    if not should_log_iteration():
-        return
-    parts = [f"iteration={iteration}", f"runtime_s={int(time.time() - started_at)}", f"host={HOST}"]
-    for protocol in DEFAULT_PROBES:
-        parts.append(f"{protocol}_median_ms={percentile_ms(protocol, 50)}")
-        parts.append(f"{protocol}_p90_ms={percentile_ms(protocol, 90)}")
-        parts.append(f"{protocol}_p99_ms={percentile_ms(protocol, 99)}")
-    try:
-        print(f'{ts()} protocol=iteration result=INFO detail="{' '.join(parts)}"', flush=True)
-    except BrokenPipeError:
-        raise SystemExit(0)
 
 
 def sleep_ms(value: int) -> None:
@@ -1921,26 +1849,6 @@ PROBE_RUNNERS = {
 }
 
 
-def ping_check() -> None:
-    outcome = run_ping_probe(build_runtime_settings_from_globals(), ProbeCorrectness.CORRECT)
-    log_check("ping", outcome.result, outcome.detail, outcome.elapsed_ms)
-
-
-def http_check() -> None:
-    outcome = run_http_probe(build_runtime_settings_from_globals(), ProbeCorrectness.CORRECT)
-    log_check("http", outcome.result, outcome.detail, outcome.elapsed_ms)
-
-
-def telnet_check() -> None:
-    outcome = run_telnet_probe(build_runtime_settings_from_globals(), ProbeCorrectness.CORRECT)
-    log_check("telnet", outcome.result, outcome.detail, outcome.elapsed_ms)
-
-
-def ftp_check() -> None:
-    outcome = run_ftp_probe(build_runtime_settings_from_globals(), ProbeCorrectness.CORRECT)
-    log_check("ftp", outcome.result, outcome.detail, outcome.elapsed_ms)
-
-
 def build_runtime_settings(args: argparse.Namespace) -> RuntimeSettings:
     return RuntimeSettings(
         host=args.host,
@@ -1953,21 +1861,6 @@ def build_runtime_settings(args: argparse.Namespace) -> RuntimeSettings:
         delay_ms=args.delay_ms,
         log_every=args.log_every,
         verbose=args.verbose,
-    )
-
-
-def build_runtime_settings_from_globals() -> RuntimeSettings:
-    return RuntimeSettings(
-        host=HOST,
-        http_path=HTTP_PATH,
-        http_port=HTTP_PORT,
-        telnet_port=TELNET_PORT,
-        ftp_port=FTP_PORT,
-        ftp_user=FTP_USER,
-        ftp_pass=FTP_PASS,
-        delay_ms=INTER_CALL_DELAY_MS,
-        log_every=LOG_EVERY_N_ITERATIONS,
-        verbose=VERBOSE,
     )
 
 
@@ -2018,10 +1911,6 @@ def profile_execution_config(profile: str) -> ExecutionConfig:
             streams=(),
         )
     raise ValueError(f"unsupported profile: {profile}")
-
-
-def uses_extended_flags(args: argparse.Namespace) -> bool:
-    return any(getattr(args, name) is not None for name in NEW_FEATURE_ARGUMENT_NAMES)
 
 
 def parse_connection_stream_selection(values: tuple[str, ...] | list[str]) -> tuple[str, ...]:
@@ -2152,18 +2041,6 @@ def resolve_execution_config(args: argparse.Namespace) -> ExecutionConfig:
         probe_surfaces=probe_surfaces,
         streams=streams,
     )
-
-
-def log_startup() -> None:
-    try:
-        print(
-            f'{ts()} protocol=config result=INFO detail="host={HOST} http={HTTP_PORT}/{HTTP_PATH} '
-            f'telnet={TELNET_PORT} ftp={FTP_PORT} user={FTP_USER} sample_every={LOG_EVERY_N_ITERATIONS} '
-            f'verbose={int(VERBOSE)} call_gap_ms={INTER_CALL_DELAY_MS}"',
-            flush=True,
-        )
-    except BrokenPipeError:
-        raise SystemExit(0)
 
 
 def log_resolved_startup(settings: RuntimeSettings, config: ExecutionConfig) -> None:
@@ -2401,36 +2278,6 @@ def run_extended(config: ExecutionConfig, settings: RuntimeSettings) -> int:
         ):
             result = 1
     return result
-
-
-def run_legacy(settings: RuntimeSettings) -> int:
-    global HOST, HTTP_PATH, HTTP_PORT, TELNET_PORT, FTP_PORT, FTP_USER, FTP_PASS, INTER_CALL_DELAY_MS, LOG_EVERY_N_ITERATIONS, VERBOSE, CURRENT_ITERATION
-    HOST = settings.host
-    HTTP_PATH = settings.http_path
-    HTTP_PORT = settings.http_port
-    TELNET_PORT = settings.telnet_port
-    FTP_PORT = settings.ftp_port
-    FTP_USER = settings.ftp_user
-    FTP_PASS = settings.ftp_pass
-    INTER_CALL_DELAY_MS = settings.delay_ms
-    LOG_EVERY_N_ITERATIONS = settings.log_every
-    VERBOSE = settings.verbose
-
-    started_at = time.time()
-    iteration = 0
-    log_startup()
-    while True:
-        iteration += 1
-        CURRENT_ITERATION = iteration
-        ping_check()
-        sleep_ms(INTER_CALL_DELAY_MS)
-        http_check()
-        sleep_ms(INTER_CALL_DELAY_MS)
-        ftp_check()
-        sleep_ms(INTER_CALL_DELAY_MS)
-        telnet_check()
-        log_iteration_summary(started_at, iteration)
-        sleep_ms(INTER_CALL_DELAY_MS)
 
 
 def has_explicit_host(argv: list[str]) -> bool:

@@ -30,8 +30,6 @@ def test_main_without_args_runs_default_soak_configuration(monkeypatch):
     module = load_module()
     captured = {}
 
-    monkeypatch.setattr(module, "run_legacy", lambda settings: pytest.fail("unexpected legacy path"))
-
     def fake_run_extended(config, settings):
         captured["config"] = config
         captured["settings"] = settings
@@ -51,8 +49,6 @@ def test_main_without_args_runs_default_soak_configuration(monkeypatch):
 def test_profile_main_defaults_host_to_u64_and_runs_extended(monkeypatch):
     module = load_module()
     captured = {}
-
-    monkeypatch.setattr(module, "run_legacy", lambda settings: pytest.fail("unexpected legacy path"))
 
     def fake_run_extended(config, settings):
         captured["config"] = config
