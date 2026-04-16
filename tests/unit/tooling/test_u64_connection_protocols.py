@@ -19,6 +19,10 @@ def load_ping():
     return load_script_module("u64_ping")
 
 
+def load_connection_test():
+    return load_script_module("u64_connection_test")
+
+
 class RotatingState:
     def __init__(self):
         self.counts = {}
@@ -85,7 +89,7 @@ def test_http_surface_operations_retry_transient_transport_errors(monkeypatch):
     monkeypatch.setattr(
         module,
         "surface_operations",
-        lambda surface, *, runner_id=1, concurrent_multi_runner=False: (("flaky", flaky_operation),),
+        lambda surface, *, runner_id=1, concurrent_multi_runner=False, shared_state=None: (("flaky", flaky_operation),),
     )
     monkeypatch.setattr(module.time, "sleep", sleeps.append)
 
@@ -120,6 +124,31 @@ def test_ping_probe_uses_ping_terminology(monkeypatch):
 
     assert outcome.result == "OK"
     assert outcome.detail.startswith("ping_reply_ms=")
+
+
+def test_http_audio_mixer_write_preserves_latest_known_state(monkeypatch):
+    runtime = load_runtime()
+    connection_test = load_connection_test()
+    module = load_http()
+    settings = make_settings(runtime)
+    state = connection_test.ExecutionState(settings=settings, include_runner_context=False, random_seed=1)
+    current = {"value": "+1 dB"}
+
+    monkeypatch.setattr(module, "audio_mixer_item_state", lambda current_settings: (current["value"], ("0 dB", "+1 dB"), 123))
+
+    def fake_request_bytes(current_settings, method, path):
+        del current_settings
+        if method == "PUT":
+            current["value"] = "0 dB" if "0%20dB" in path else "+1 dB"
+            return 200, b"", {}
+        raise AssertionError((method, path))
+
+    monkeypatch.setattr(module, "request_bytes", fake_request_bytes)
+
+    detail = module.write_audio_mixer_item(settings, "0 dB", shared_state=state)
+
+    assert detail == "from=+1 dB to=0 dB"
+    assert state.get_shared_resource_value(module.AUDIO_MIXER_SHARED_STATE_KEY) == "0 dB"
 
 
 def test_ftp_normal_mode_performs_login_pasv_nlst_quit_and_close():

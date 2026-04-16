@@ -6,7 +6,7 @@ import socket
 import threading
 import time
 from dataclasses import dataclass
-from typing import Callable, Protocol
+from typing import Any, Callable, Protocol
 
 import u64_http
 from u64_connection_runtime import (
@@ -399,24 +399,32 @@ def session_extract_audio_mixer_value(session: TelnetRunnerSession, text: str) -
             return reopened, extract_audio_mixer_write_value(reopened)
 
 
-def session_read_audio_mixer_item(session: TelnetRunnerSession) -> str:
-    text = session_refresh_audio_mixer(session)
-    _text, current = session_extract_audio_mixer_value(session, text)
-    return f"current={current}"
+def session_read_audio_mixer_item(session: TelnetRunnerSession, *, shared_state: Any | None = None) -> str:
+    with u64_http.audio_mixer_shared_lock(shared_state):
+        text = session_refresh_audio_mixer(session)
+        _text, current = session_extract_audio_mixer_value(session, text)
+        normalized_current = u64_http.remember_audio_mixer_value(shared_state, current)
+        return f"current={normalized_current}"
 
 
-def session_write_audio_mixer_item(settings: RuntimeSettings, session: TelnetRunnerSession, target: str) -> str:
-    text = session_refresh_audio_mixer(session)
-    text, current = session_extract_audio_mixer_value(session, text)
-    steps = audio_mixer_write_right_steps(settings, current, target)
-    for _ in range(steps):
-        text = session_send(session, TELNET_KEY_RIGHT, view_state="audio_mixer")
-    text, updated = session_extract_audio_mixer_value(session, text)
-    if updated != u64_http.normalize_audio_mixer_value(target):
-        raise RuntimeError(f"verification mismatch expected={target} got={updated}")
-    session.last_text = text
-    session.view_state = "audio_mixer"
-    return f"from={current} to={updated} right_steps={steps}"
+def session_write_audio_mixer_item(settings: RuntimeSettings, session: TelnetRunnerSession, target: str, *, shared_state: Any | None = None) -> str:
+    with u64_http.audio_mixer_shared_lock(shared_state):
+        text = session_refresh_audio_mixer(session)
+        text, current = session_extract_audio_mixer_value(session, text)
+        normalized_current = u64_http.remember_audio_mixer_value(shared_state, current)
+        normalized_target = u64_http.normalize_audio_mixer_value(target)
+        steps = audio_mixer_write_right_steps(settings, current, target)
+        for _ in range(steps):
+            text = session_send(session, TELNET_KEY_RIGHT, view_state="audio_mixer")
+        text, updated = session_extract_audio_mixer_value(session, text)
+        normalized_updated = u64_http.remember_audio_mixer_value(shared_state, updated)
+        if normalized_updated != normalized_target:
+            raise RuntimeError(
+                f"verification mismatch expected={normalized_target} got={normalized_updated} latest_known={u64_http.latest_audio_mixer_value(shared_state) or 'unknown'}"
+            )
+        session.last_text = text
+        session.view_state = "audio_mixer"
+        return f"from={normalized_current} to={normalized_updated} right_steps={steps}"
 
 
 def abort_after_sequence(settings: RuntimeSettings, *payloads: bytes, read_initial: bool = True) -> str:
@@ -584,6 +592,7 @@ def surface_operations(
     surface: ProbeSurface,
     *,
     concurrent_multi_runner: bool = False,
+    shared_state: Any | None = None,
 ) -> tuple[tuple[str, Callable[[RuntimeSettings, TelnetRunnerSession], str]], ...]:
     read_operations = (
         ("telnet_smoke_connect", lambda settings, session: session_smoke_connect(session)),
@@ -592,22 +601,20 @@ def surface_operations(
             "telnet_open_audio_mixer",
             lambda settings, session: f"visible_bytes={len(session_open_audio_mixer(session).encode())}",
         ),
-        ("telnet_read_vol_ultisid_1", lambda settings, session: session_read_audio_mixer_item(session)),
+        ("telnet_read_vol_ultisid_1", lambda settings, session: session_read_audio_mixer_item(session, shared_state=shared_state)),
     )
     if surface == ProbeSurface.SMOKE:
         return (("telnet_smoke_connect", lambda settings, session: session_smoke_connect(session)),)
     if surface == ProbeSurface.READ:
         return read_operations
-    if concurrent_multi_runner:
-        return read_operations
     return read_operations + (
         (
             "set_vol_ultisid_1_0_db",
-            lambda settings, session: session_write_audio_mixer_item(settings, session, "0 dB"),
+            lambda settings, session: session_write_audio_mixer_item(settings, session, "0 dB", shared_state=shared_state),
         ),
         (
             "set_vol_ultisid_1_plus_1_db",
-            lambda settings, session: session_write_audio_mixer_item(settings, session, "+1 dB"),
+            lambda settings, session: session_write_audio_mixer_item(settings, session, "+1 dB", shared_state=shared_state),
         ),
     )
 
@@ -622,7 +629,7 @@ def run_probe(
         surface = context.surface
         if correctness == ProbeCorrectness.INCOMPLETE:
             if surface != ProbeSurface.SMOKE:
-                operations = surface_operations(surface, concurrent_multi_runner=_has_multiple_runners(context))
+                operations = surface_operations(surface, concurrent_multi_runner=_has_multiple_runners(context), shared_state=context.state)
                 index = select_operation_index(context, len(operations))
                 op_name, operation = operations[index]
                 return run_incomplete_surface_operation(
@@ -636,7 +643,7 @@ def run_probe(
             index = select_operation_index(context, len(operations))
             op_name, operation = operations[index]
             return run_incomplete_surface_operation("telnet", surface, op_name, operation, settings)
-        operations = surface_operations(surface, concurrent_multi_runner=_has_multiple_runners(context))
+        operations = surface_operations(surface, concurrent_multi_runner=_has_multiple_runners(context), shared_state=context.state)
         index = select_operation_index(context, len(operations))
         op_name, operation = operations[index]
         started_at = time.perf_counter_ns()

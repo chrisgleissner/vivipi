@@ -37,7 +37,7 @@ def test_execution_state_phase_shifts_operation_selection_per_runner():
     assert len(set(indices)) == 3
 
 
-def test_http_multi_runner_readwrite_uses_runner_local_memory_slots_and_skips_audio_mixer_writes():
+def test_http_multi_runner_readwrite_uses_runner_local_memory_slots_and_keeps_audio_mixer_writes():
     runtime = load_runtime()
     module = load_http()
 
@@ -58,6 +58,8 @@ def test_http_multi_runner_readwrite_uses_runner_local_memory_slots_and_skips_au
         "mem_read_debug_register",
         "mem_write_screen_space",
         "mem_write_screen_exclam",
+        "set_vol_ultisid_1_0_db",
+        "set_vol_ultisid_1_plus_1_db",
     ]
     assert [name for name, _ in runner_2_operations] == [name for name, _ in runner_1_operations]
 
@@ -70,13 +72,13 @@ def test_http_multi_runner_readwrite_uses_runner_local_memory_slots_and_skips_au
 
     module.memory_write_verify = fake_memory_write_verify
 
-    runner_1_operations[-2][1](None)
-    runner_2_operations[-2][1](None)
+    next(operation for name, operation in runner_1_operations if name == "mem_write_screen_space")(None)
+    next(operation for name, operation in runner_2_operations if name == "mem_write_screen_space")(None)
 
     assert captured_addresses == ["0x0400", "0x0401"]
 
 
-def test_telnet_multi_runner_readwrite_excludes_shared_audio_mixer_writes():
+def test_telnet_multi_runner_readwrite_keeps_shared_audio_mixer_writes():
     runtime = load_runtime()
     module = load_telnet()
 
@@ -87,6 +89,8 @@ def test_telnet_multi_runner_readwrite_excludes_shared_audio_mixer_writes():
         "telnet_open_menu",
         "telnet_open_audio_mixer",
         "telnet_read_vol_ultisid_1",
+        "set_vol_ultisid_1_0_db",
+        "set_vol_ultisid_1_plus_1_db",
     ]
 
 

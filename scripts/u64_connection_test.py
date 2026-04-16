@@ -128,6 +128,9 @@ class ExecutionState:
     output_lock: threading.Lock = field(default_factory=threading.Lock)
     probe_selection_lock: threading.Lock = field(default_factory=threading.Lock)
     probe_operation_counts: dict[tuple[int, str, str], int] = field(default_factory=dict)
+    shared_resource_registry_lock: threading.Lock = field(default_factory=threading.Lock)
+    shared_resource_locks: dict[str, threading.Lock] = field(default_factory=dict)
+    shared_resource_values: dict[str, str] = field(default_factory=dict)
     stream_monitor: u64_stream.StreamMonitor | None = None
 
     def _derived_seed(self, *parts: object) -> int:
@@ -148,6 +151,23 @@ class ExecutionState:
             offset = (runner_id - 1) % len(order)
             order = order[offset:] + order[:offset]
         return tuple(indexed_probes[position] for position in order)
+
+    def shared_resource_lock_for(self, resource_key: str) -> threading.Lock:
+        with self.shared_resource_registry_lock:
+            existing = self.shared_resource_locks.get(resource_key)
+            if existing is not None:
+                return existing
+            created = threading.Lock()
+            self.shared_resource_locks[resource_key] = created
+            return created
+
+    def get_shared_resource_value(self, resource_key: str) -> str | None:
+        with self.shared_resource_registry_lock:
+            return self.shared_resource_values.get(resource_key)
+
+    def set_shared_resource_value(self, resource_key: str, value: str) -> None:
+        with self.shared_resource_registry_lock:
+            self.shared_resource_values[resource_key] = value
 
     def record_latency(self, protocol: str, elapsed_ms: float) -> None:
         with self.sample_lock:

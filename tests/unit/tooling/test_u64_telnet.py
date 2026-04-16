@@ -13,6 +13,10 @@ def load_telnet():
     return load_script_module("u64_telnet")
 
 
+def load_connection_test():
+    return load_script_module("u64_connection_test")
+
+
 def make_settings(runtime):
     return runtime.RuntimeSettings("host", "v1/version", 80, 23, 21, "anonymous", "", 0, 1, True)
 
@@ -217,6 +221,29 @@ def test_telnet_session_write_audio_mixer_item_recovers_from_partial_screen(monk
     assert session.view_state == "audio_mixer"
 
 
+def test_telnet_session_write_audio_mixer_item_preserves_latest_known_state(monkeypatch):
+    runtime = load_runtime()
+    connection_test = load_connection_test()
+    module = load_telnet()
+    settings = make_settings(runtime)
+    state = connection_test.ExecutionState(settings=settings, include_runner_context=False, random_seed=1)
+    session = module.TelnetRunnerSession(sock=UnusedSocket(), view_state="audio_mixer", last_text="Vol UltiSid 1 +1 dB")
+
+    monkeypatch.setattr(module, "session_refresh_audio_mixer", lambda current_session: "Vol UltiSid 1 +1 dB")
+    monkeypatch.setattr(
+        module,
+        "session_extract_audio_mixer_value",
+        lambda current_session, text: (text, "+1 dB") if "+1 dB" in text else (text, "0 dB"),
+    )
+    monkeypatch.setattr(module, "audio_mixer_write_right_steps", lambda current_settings, current, target: 1)
+    monkeypatch.setattr(module, "session_send", lambda current_session, payload, *, view_state=None: "Vol UltiSid 1 0 dB")
+
+    detail = module.session_write_audio_mixer_item(settings, session, "0 dB", shared_state=state)
+
+    assert detail == "from=+1 dB to=0 dB right_steps=1"
+    assert state.get_shared_resource_value(module.u64_http.AUDIO_MIXER_SHARED_STATE_KEY) == "0 dB"
+
+
 def test_extended_telnet_incomplete_mode_treats_connection_reset_as_expected_disconnect(monkeypatch):
     runtime = load_runtime()
     module = load_telnet()
@@ -224,9 +251,13 @@ def test_extended_telnet_incomplete_mode_treats_connection_reset_as_expected_dis
 
     monkeypatch.setattr(
         module,
-        "incomplete_operations",
-        lambda surface: (("telnet_f2_abort", lambda settings: (_ for _ in ()).throw(ConnectionResetError(104, "Connection reset by peer"))),),
+        "surface_operations",
+        lambda surface, *, concurrent_multi_runner=False, shared_state=None: ((
+            "telnet_read_vol_ultisid_1",
+            lambda settings, session: (_ for _ in ()).throw(ConnectionResetError(104, "Connection reset by peer")),
+        ),),
     )
+    monkeypatch.setattr(module, "get_session", lambda settings, runner_id: UnusedSocket())
 
     context = runtime.ProbeExecutionContext(
         protocol="telnet",
@@ -238,7 +269,7 @@ def test_extended_telnet_incomplete_mode_treats_connection_reset_as_expected_dis
     outcome = module.run_probe(make_settings(runtime), runtime.ProbeCorrectness.INCOMPLETE, context=context)
 
     assert outcome.result == "OK"
-    assert outcome.detail == "surface=readwrite op=telnet_f2_abort expected_disconnect_after_abort"
+    assert outcome.detail == "surface=readwrite op=telnet_read_vol_ultisid_1 expected_disconnect_after_abort"
 
 
 def test_collect_telnet_visible_ignores_subnegotiation_and_keeps_literal_iac():
