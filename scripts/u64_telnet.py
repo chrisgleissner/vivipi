@@ -474,6 +474,12 @@ def incomplete_operations(surface: ProbeSurface) -> tuple[tuple[str, Callable[[R
     )
 
 
+def _has_multiple_runners(context: ProbeExecutionContext | None) -> bool:
+    if context is None or context.state is None:
+        return False
+    return getattr(context.state, "runner_count", 1) > 1
+
+
 def reset_to_home(sock) -> None:
     for _ in range(2):
         sock.sendall(TELNET_KEY_ESC)
@@ -576,6 +582,8 @@ def exit_menu(sock) -> str:
 
 def surface_operations(
     surface: ProbeSurface,
+    *,
+    concurrent_multi_runner: bool = False,
 ) -> tuple[tuple[str, Callable[[RuntimeSettings, TelnetRunnerSession], str]], ...]:
     read_operations = (
         ("telnet_smoke_connect", lambda settings, session: session_smoke_connect(session)),
@@ -589,6 +597,8 @@ def surface_operations(
     if surface == ProbeSurface.SMOKE:
         return (("telnet_smoke_connect", lambda settings, session: session_smoke_connect(session)),)
     if surface == ProbeSurface.READ:
+        return read_operations
+    if concurrent_multi_runner:
         return read_operations
     return read_operations + (
         (
@@ -615,7 +625,7 @@ def run_probe(
             index = select_operation_index(context, len(operations))
             op_name, operation = operations[index]
             return run_incomplete_surface_operation("telnet", surface, op_name, operation, settings)
-        operations = surface_operations(surface)
+        operations = surface_operations(surface, concurrent_multi_runner=_has_multiple_runners(context))
         index = select_operation_index(context, len(operations))
         op_name, operation = operations[index]
         started_at = time.perf_counter_ns()

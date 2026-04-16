@@ -51,17 +51,27 @@ def forget_self_file(path: str) -> None:
         _FTP_TRACKED_FILES.discard(path)
 
 
-def known_self_files() -> tuple[str, ...]:
+def _runner_file_prefix(runner_id: int | None = None) -> str:
+    if runner_id is None:
+        return FTP_SELF_FILE_PREFIX
+    return f"{FTP_SELF_FILE_PREFIX}r{runner_id}_"
+
+
+def known_self_files(file_prefix: str = FTP_SELF_FILE_PREFIX) -> tuple[str, ...]:
     with _FTP_TRACKING_LOCK:
-        return tuple(sorted(_FTP_TRACKED_FILES))
+        return tuple(sorted(path for path in _FTP_TRACKED_FILES if path.rsplit("/", 1)[-1].startswith(file_prefix)))
 
 
-def next_self_file_path() -> str:
+def next_self_file_path(file_prefix: str = FTP_SELF_FILE_PREFIX) -> str:
     global _FTP_SELF_FILE_COUNTER
     with _FTP_TRACKING_LOCK:
         _FTP_SELF_FILE_COUNTER += 1
         counter = _FTP_SELF_FILE_COUNTER
-    return f"{FTP_TEMP_DIR}/{FTP_SELF_FILE_PREFIX}{os.getpid()}_{counter}.txt"
+    return f"{FTP_TEMP_DIR}/{file_prefix}{os.getpid()}_{counter}.txt"
+
+
+def partial_self_file_path(file_prefix: str = FTP_SELF_FILE_PREFIX) -> str:
+    return f"{FTP_TEMP_DIR}/{file_prefix}{os.getpid()}_partial.txt"
 
 
 def cleanup_self_files() -> None:
@@ -133,20 +143,28 @@ def collect_temp_entries_if_available(ftp: ftplib.FTP) -> tuple[str, ...]:
         return ()
 
 
-def readable_self_files(entries: tuple[str, ...]) -> tuple[str, ...]:
+def readable_self_files(entries: tuple[str, ...], file_prefix: str = FTP_SELF_FILE_PREFIX) -> tuple[str, ...]:
     candidates = []
     for entry in entries:
         basename = entry.rsplit("/", 1)[-1]
-        if basename.startswith(FTP_SELF_FILE_PREFIX):
+        if basename.startswith(file_prefix):
             candidates.append(entry if "/" in entry else f"{FTP_TEMP_DIR}/{entry}")
     return tuple(sorted(candidates))
 
 
-def pick_known_self_file(entries: tuple[str, ...]) -> str | None:
-    readable = readable_self_files(entries)
+def delete_readable_self_files(ftp: ftplib.FTP, entries: tuple[str, ...], file_prefix: str = FTP_SELF_FILE_PREFIX) -> tuple[str, ...]:
+    deleted = []
+    for path in readable_self_files(entries, file_prefix=file_prefix):
+        ftp.delete(path)
+        deleted.append(path)
+    return tuple(deleted)
+
+
+def pick_known_self_file(entries: tuple[str, ...], file_prefix: str = FTP_SELF_FILE_PREFIX) -> str | None:
+    readable = readable_self_files(entries, file_prefix=file_prefix)
     if readable:
         return readable[0]
-    owned = known_self_files()
+    owned = known_self_files(file_prefix=file_prefix)
     if owned:
         return owned[0]
     return None
@@ -164,26 +182,33 @@ def list_lines(ftp: ftplib.FTP, path: str) -> int:
     return len(lines)
 
 
-def seed_self_file(settings: RuntimeSettings, ftp: ftplib.FTP, ordinal: int) -> str:
-    path = next_self_file_path()
-    payload_bytes = f"{FTP_SELF_FILE_PREFIX}{os.getpid()}_{ordinal}\n".encode("utf-8")
+def seed_self_file(settings: RuntimeSettings, ftp: ftplib.FTP, ordinal: int, *, file_prefix: str = FTP_SELF_FILE_PREFIX) -> str:
+    path = next_self_file_path(file_prefix=file_prefix)
+    payload_bytes = f"{file_prefix}{os.getpid()}_{ordinal}\n".encode("utf-8")
     ftp.storbinary(f"STOR {path}", io.BytesIO(payload_bytes))
     track_self_file(settings, path)
     return path
 
 
-def ensure_small_self_files(settings: RuntimeSettings, ftp: ftplib.FTP, minimum_count: int = 2) -> tuple[str, ...]:
-    readable = list(readable_self_files(collect_temp_entries_if_available(ftp)))
+def ensure_small_self_files(
+    settings: RuntimeSettings,
+    ftp: ftplib.FTP,
+    minimum_count: int = 2,
+    *,
+    file_prefix: str = FTP_SELF_FILE_PREFIX,
+) -> tuple[str, ...]:
+    readable = list(readable_self_files(collect_temp_entries_if_available(ftp), file_prefix=file_prefix))
     for path in readable:
         track_self_file(settings, path)
     while len(readable) < minimum_count:
-        readable.append(seed_self_file(settings, ftp, len(readable) + 1))
+        readable.append(seed_self_file(settings, ftp, len(readable) + 1, file_prefix=file_prefix))
     return tuple(sorted(readable))
 
 
 def prime_temp_dir(settings: RuntimeSettings, minimum_count: int = 1) -> tuple[str, ...]:
     ftp = connect(settings)
     try:
+        delete_readable_self_files(ftp, collect_temp_entries_if_available(ftp))
         return tuple(seed_self_file(settings, ftp, ordinal) for ordinal in range(1, minimum_count + 1))
     finally:
         close(ftp)
@@ -209,8 +234,8 @@ def list_temp_entries(settings: RuntimeSettings, ftp: ftplib.FTP) -> str:
     return f"entries={len(entries)} path={FTP_TEMP_DIR}"
 
 
-def read_small_self_file(settings: RuntimeSettings, ftp: ftplib.FTP, index: int) -> str:
-    readable = ensure_small_self_files(settings, ftp, minimum_count=index + 1)
+def read_small_self_file(settings: RuntimeSettings, ftp: ftplib.FTP, index: int, *, file_prefix: str = FTP_SELF_FILE_PREFIX) -> str:
+    readable = ensure_small_self_files(settings, ftp, minimum_count=index + 1, file_prefix=file_prefix)
     path = readable[index]
     byte_count = retr_binary(ftp, path)
     if byte_count < 1:
@@ -218,29 +243,29 @@ def read_small_self_file(settings: RuntimeSettings, ftp: ftplib.FTP, index: int)
     return f"path={path} bytes={byte_count}"
 
 
-def create_self_file(settings: RuntimeSettings, ftp: ftplib.FTP) -> str:
-    path = next_self_file_path()
-    payload = io.BytesIO(f"{FTP_SELF_FILE_PREFIX}{os.getpid()}\n".encode("utf-8"))
+def create_self_file(settings: RuntimeSettings, ftp: ftplib.FTP, *, file_prefix: str = FTP_SELF_FILE_PREFIX) -> str:
+    path = next_self_file_path(file_prefix=file_prefix)
+    payload = io.BytesIO(f"{file_prefix}{os.getpid()}\n".encode("utf-8"))
     ftp.storbinary(f"STOR {path}", payload)
     track_self_file(settings, path)
     return f"path={path} bytes={payload.getbuffer().nbytes}"
 
 
-def rename_self_file(settings: RuntimeSettings, ftp: ftplib.FTP) -> str:
-    owned = known_self_files()
+def rename_self_file(settings: RuntimeSettings, ftp: ftplib.FTP, *, file_prefix: str = FTP_SELF_FILE_PREFIX) -> str:
+    owned = known_self_files(file_prefix=file_prefix)
     if not owned:
         return "skip=no_self_file"
     source = owned[0]
-    target = next_self_file_path()
+    target = next_self_file_path(file_prefix=file_prefix)
     ftp.rename(source, target)
     forget_self_file(source)
     track_self_file(settings, target)
     return f"from={source} to={target}"
 
 
-def delete_self_file(settings: RuntimeSettings, ftp: ftplib.FTP) -> str:
+def delete_self_file(settings: RuntimeSettings, ftp: ftplib.FTP, *, file_prefix: str = FTP_SELF_FILE_PREFIX) -> str:
     del settings
-    owned = known_self_files()
+    owned = known_self_files(file_prefix=file_prefix)
     if not owned:
         return "skip=no_self_file"
     path = owned[0]
@@ -330,13 +355,19 @@ def partial_transfer_abort(
             pass
 
 
-def partial_stor_temp(settings: RuntimeSettings) -> str:
-    path = next_self_file_path()
+def partial_stor_temp(settings: RuntimeSettings, *, file_prefix: str = FTP_SELF_FILE_PREFIX) -> str:
+    path = partial_self_file_path(file_prefix=file_prefix)
     track_self_file(settings, path)
     return partial_transfer_abort(settings, f"STOR {path}", payload=b"vivipi-partial\n")
 
 
-def incomplete_operations(surface: ProbeSurface) -> tuple[tuple[str, Callable[[RuntimeSettings], str]], ...]:
+def incomplete_operations(
+    surface: ProbeSurface,
+    *,
+    runner_id: int = 1,
+    concurrent_multi_runner: bool = False,
+) -> tuple[tuple[str, Callable[[RuntimeSettings], str]], ...]:
+    file_prefix = _runner_file_prefix(runner_id) if concurrent_multi_runner else FTP_SELF_FILE_PREFIX
     if surface == ProbeSurface.SMOKE:
         return (("ftp_greeting_only_quit", greeting_only_quit),)
     operations = (
@@ -348,15 +379,25 @@ def incomplete_operations(surface: ProbeSurface) -> tuple[tuple[str, Callable[[R
     if surface == ProbeSurface.READ:
         return operations
     return operations + (
-        ("ftp_partial_stor_temp", partial_stor_temp),
+        ("ftp_partial_stor_temp", lambda settings: partial_stor_temp(settings, file_prefix=file_prefix)),
         ("ftp_pasv_only_abort", pasv_only_abort),
         ("ftp_partial_list_root", lambda settings: partial_transfer_abort(settings, "LIST .")),
     )
 
 
+def _has_multiple_runners(context: ProbeExecutionContext | None) -> bool:
+    if context is None or context.state is None:
+        return False
+    return getattr(context.state, "runner_count", 1) > 1
+
+
 def surface_operations(
     surface: ProbeSurface,
+    *,
+    runner_id: int = 1,
+    concurrent_multi_runner: bool = False,
 ) -> tuple[tuple[str, Callable[[RuntimeSettings, ftplib.FTP], str]], ...]:
+    file_prefix = _runner_file_prefix(runner_id) if concurrent_multi_runner else FTP_SELF_FILE_PREFIX
     read_operations = (
         ("ftp_pwd", lambda settings, ftp: f"pwd={ftp.pwd()}"),
         ("ftp_nlst_root", lambda settings, ftp: f"entries={len(tuple(ftp.nlst('.')))} path=."),
@@ -368,10 +409,10 @@ def surface_operations(
     if surface == ProbeSurface.READ:
         return read_operations
     return read_operations + (
-        ("ftp_create_self_file", create_self_file),
-        ("ftp_read_self_file", lambda settings, ftp: read_small_self_file(settings, ftp, 0)),
-        ("ftp_rename_self_file", rename_self_file),
-        ("ftp_delete_self_file", delete_self_file),
+        ("ftp_create_self_file", lambda settings, ftp: create_self_file(settings, ftp, file_prefix=file_prefix)),
+        ("ftp_read_self_file", lambda settings, ftp: read_small_self_file(settings, ftp, 0, file_prefix=file_prefix)),
+        ("ftp_rename_self_file", lambda settings, ftp: rename_self_file(settings, ftp, file_prefix=file_prefix)),
+        ("ftp_delete_self_file", lambda settings, ftp: delete_self_file(settings, ftp, file_prefix=file_prefix)),
     )
 
 
@@ -386,11 +427,19 @@ def run_probe(
             return run_probe_invalid(settings)
         surface = context.surface
         if correctness == ProbeCorrectness.INCOMPLETE:
-            operations = incomplete_operations(surface)
+            operations = incomplete_operations(
+                surface,
+                runner_id=context.runner_id,
+                concurrent_multi_runner=_has_multiple_runners(context),
+            )
             index = select_operation_index(context, len(operations))
             op_name, operation = operations[index]
             return run_incomplete_surface_operation("ftp", surface, op_name, operation, settings)
-        operations = surface_operations(surface)
+        operations = surface_operations(
+            surface,
+            runner_id=context.runner_id,
+            concurrent_multi_runner=_has_multiple_runners(context),
+        )
         index = select_operation_index(context, len(operations))
         op_name, operation = operations[index]
         started_at = time.perf_counter_ns()

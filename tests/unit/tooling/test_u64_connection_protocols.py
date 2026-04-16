@@ -82,7 +82,11 @@ def test_http_surface_operations_retry_transient_transport_errors(monkeypatch):
             raise ConnectionResetError(104, "Connection reset by peer")
         return "http_status=200 body_bytes=43"
 
-    monkeypatch.setattr(module, "surface_operations", lambda surface: (("flaky", flaky_operation),))
+    monkeypatch.setattr(
+        module,
+        "surface_operations",
+        lambda surface, *, runner_id=1, concurrent_multi_runner=False: (("flaky", flaky_operation),),
+    )
     monkeypatch.setattr(module.time, "sleep", sleeps.append)
 
     context = runtime.ProbeExecutionContext(
@@ -298,3 +302,48 @@ def test_try_ftp_prime_temp_dir_swallows_failures_and_logs(monkeypatch):
 
     assert module.try_prime_temp_dir(make_settings(runtime), log_fn=logs.append) == ()
     assert logs == ["prime_temp_dir_failed detail=timed out continuing=1"]
+
+
+def test_ftp_partial_stor_temp_reuses_bounded_temp_path(monkeypatch):
+    runtime = load_runtime()
+    module = load_ftp()
+    settings = make_settings(runtime)
+    calls = []
+
+    monkeypatch.setattr(module, "track_self_file", lambda current_settings, path: calls.append(("track", path)))
+    monkeypatch.setattr(module, "partial_transfer_abort", lambda current_settings, command, **kwargs: calls.append(("stor", command)) or command)
+
+    first = module.partial_stor_temp(settings)
+    second = module.partial_stor_temp(settings)
+
+    assert first == second
+    assert calls == [
+        ("track", first.removeprefix("STOR ")),
+        ("stor", first),
+        ("track", second.removeprefix("STOR ")),
+        ("stor", second),
+    ]
+
+
+def test_ftp_prime_temp_dir_deletes_stale_self_files_before_seeding(monkeypatch):
+    runtime = load_runtime()
+    module = load_ftp()
+    settings = make_settings(runtime)
+    calls = []
+    ftp = object()
+
+    monkeypatch.setattr(module, "connect", lambda current_settings: ftp)
+    monkeypatch.setattr(module, "close", lambda current_ftp: calls.append(("close", current_ftp)))
+    monkeypatch.setattr(module, "collect_temp_entries_if_available", lambda current_ftp: ("/Temp/u64test_old.txt", "/Temp/keep.txt"))
+    monkeypatch.setattr(module, "delete_readable_self_files", lambda current_ftp, entries, file_prefix=module.FTP_SELF_FILE_PREFIX: calls.append(("delete", current_ftp, entries, file_prefix)) or ("/Temp/u64test_old.txt",))
+    monkeypatch.setattr(module, "seed_self_file", lambda current_settings, current_ftp, ordinal: calls.append(("seed", ordinal)) or f"/Temp/u64test_seed_{ordinal}.txt")
+
+    seeded = module.prime_temp_dir(settings, minimum_count=2)
+
+    assert seeded == ("/Temp/u64test_seed_1.txt", "/Temp/u64test_seed_2.txt")
+    assert calls == [
+        ("delete", ftp, ("/Temp/u64test_old.txt", "/Temp/keep.txt"), module.FTP_SELF_FILE_PREFIX),
+        ("seed", 1),
+        ("seed", 2),
+        ("close", ftp),
+    ]

@@ -111,6 +111,7 @@ class ExecutionConfig:
 class ExecutionState:
     settings: RuntimeSettings
     include_runner_context: bool
+    runner_count: int = 1
     latency_samples: dict[str, list[float]] = field(default_factory=lambda: {protocol: [] for protocol in DEFAULT_PROBES})
     sample_lock: threading.Lock = field(default_factory=threading.Lock)
     output_lock: threading.Lock = field(default_factory=threading.Lock)
@@ -138,6 +139,8 @@ class ExecutionState:
         with self.probe_selection_lock:
             counter = self.probe_operation_counts.get(key, 0)
             self.probe_operation_counts[key] = counter + 1
+        if self.runner_count > 1:
+            return (counter + runner_id - 1) % pool_size
         return counter % pool_size
 
     def emit_log(self, protocol: str, result: str, detail: str, *, iteration: int, runner_id: int) -> None:
@@ -591,7 +594,7 @@ def run_runner_loop(
 def run_extended(config: ExecutionConfig, settings: RuntimeSettings) -> int:
     if "ftp" in config.probes and config.probe_surfaces.get("ftp", ProbeSurface.SMOKE) in (ProbeSurface.READ, ProbeSurface.READWRITE):
         u64_ftp.try_prime_temp_dir(settings, log_fn=lambda detail: log("ftp", "INFO", detail))
-    state = ExecutionState(settings=settings, include_runner_context=True)
+    state = ExecutionState(settings=settings, include_runner_context=True, runner_count=config.runners)
     stop_event = threading.Event()
     deadline_s = None if config.duration_s is None else time.monotonic() + config.duration_s
 

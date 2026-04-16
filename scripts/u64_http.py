@@ -21,6 +21,8 @@ HTTP_AUDIO_MIXER_CATEGORY_PATH = "/v1/configs/Audio%20Mixer"
 HTTP_VOLUME_ULTISID_1_PATH = f"{HTTP_AUDIO_MIXER_CATEGORY_PATH}/Vol%20UltiSid%201"
 AUDIO_MIXER_WRITE_ITEM = "Vol UltiSid 1"
 AUDIO_MIXER_WRITE_TARGET_VALUES = ("0 dB", "+1 dB")
+SCREEN_RAM_BASE_ADDRESS = 0x0400
+SCREEN_RAM_RUNNER_SLOT_COUNT = 40
 
 
 def request_path(http_path: str) -> str:
@@ -202,7 +204,18 @@ def memory_write_verify(settings: RuntimeSettings, address: str, data_hex: str) 
     return f"http_status={write_status} verified=0x{value:02X}"
 
 
-def surface_operations(surface: ProbeSurface) -> tuple[tuple[str, callable], ...]:
+def _runner_screen_address(runner_id: int) -> str:
+    slot = (runner_id - 1) % SCREEN_RAM_RUNNER_SLOT_COUNT
+    return f"0x{SCREEN_RAM_BASE_ADDRESS + slot:04X}"
+
+
+def _has_multiple_runners(context: ProbeExecutionContext | None) -> bool:
+    if context is None or context.state is None:
+        return False
+    return getattr(context.state, "runner_count", 1) > 1
+
+
+def surface_operations(surface: ProbeSurface, *, runner_id: int = 1, concurrent_multi_runner: bool = False) -> tuple[tuple[str, callable], ...]:
     read_operations = (
         ("get_version", lambda settings: generic_read(settings, "/v1/version")),
         ("get_info", lambda settings: generic_read(settings, "/v1/info")),
@@ -220,9 +233,14 @@ def surface_operations(surface: ProbeSurface) -> tuple[tuple[str, callable], ...
         return (("get_version_smoke", lambda settings: generic_read(settings, "/v1/version")),)
     if surface == ProbeSurface.READ:
         return read_operations
-    return read_operations + (
-        ("mem_write_screen_space", lambda settings: memory_write_verify(settings, "0x0400", "20")),
-        ("mem_write_screen_exclam", lambda settings: memory_write_verify(settings, "0x0400", "21")),
+    screen_address = _runner_screen_address(runner_id)
+    operations = read_operations + (
+        ("mem_write_screen_space", lambda settings: memory_write_verify(settings, screen_address, "20")),
+        ("mem_write_screen_exclam", lambda settings: memory_write_verify(settings, screen_address, "21")),
+    )
+    if concurrent_multi_runner:
+        return operations
+    return operations + (
         ("set_vol_ultisid_1_0_db", lambda settings: write_audio_mixer_item(settings, "0 dB")),
         ("set_vol_ultisid_1_plus_1_db", lambda settings: write_audio_mixer_item(settings, "+1 dB")),
     )
@@ -230,7 +248,11 @@ def surface_operations(surface: ProbeSurface) -> tuple[tuple[str, callable], ...
 
 def run_probe(settings: RuntimeSettings, correctness, *, context: ProbeExecutionContext | None = None) -> ProbeOutcome:
     if context is not None:
-        operations = surface_operations(context.surface)
+        operations = surface_operations(
+            context.surface,
+            runner_id=context.runner_id,
+            concurrent_multi_runner=_has_multiple_runners(context),
+        )
         index = select_operation_index(context, len(operations))
         op_name, operation = operations[index]
         started_at = time.perf_counter_ns()
