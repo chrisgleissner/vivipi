@@ -25,6 +25,7 @@ from u64_connection_runtime import (
 
 TELNET_IDLE_TIMEOUT_S = 0.20
 TELNET_POST_DATA_IDLE_TIMEOUT_S = 0.03
+TELNET_COMMAND_RESPONSE_TIMEOUT_S = 0.15
 TELNET_MAX_EMPTY_READS = 3
 IAC = 255
 DONT = 254
@@ -231,15 +232,25 @@ def collect_visible(handle: TelnetSocket, chunk: bytes) -> bytes:
     return bytes(visible)
 
 
-def read_until_idle(sock: TelnetSocket, *, max_empty_reads: int | None = None) -> str:
+def read_until_idle(
+    sock: TelnetSocket,
+    *,
+    max_empty_reads: int | None = None,
+    initial_timeout_s: float | None = None,
+    quiet_timeout_s: float | None = None,
+) -> str:
     if max_empty_reads is None:
         max_empty_reads = TELNET_MAX_EMPTY_READS
+    if initial_timeout_s is None:
+        initial_timeout_s = TELNET_IDLE_TIMEOUT_S
+    if quiet_timeout_s is None:
+        quiet_timeout_s = TELNET_POST_DATA_IDLE_TIMEOUT_S
     use_select = callable(getattr(sock, "fileno", None))
     visible = bytearray()
     empty_reads = 0
     saw_data = False
     while empty_reads < max_empty_reads:
-        timeout_s = TELNET_POST_DATA_IDLE_TIMEOUT_S if saw_data else TELNET_IDLE_TIMEOUT_S
+        timeout_s = quiet_timeout_s if saw_data else initial_timeout_s
         if use_select:
             if not _wait_for_readable(sock, timeout_s):
                 break
@@ -279,8 +290,8 @@ def open_menu(sock) -> str:
     last_text = ""
     for _ in range(2):
         sock.sendall(TELNET_KEY_F2)
-        text = read_until_idle(sock)
-        last_text = text
+        text = read_until_idle(sock, initial_timeout_s=TELNET_IDLE_TIMEOUT_S)
+        last_text = text or last_text
         lowered = text.lower()
         if "audio mixer" in lowered and "speaker settings" in lowered:
             return f"visible_bytes={len(text.encode())}"
@@ -317,14 +328,27 @@ def session_read(
     *,
     max_empty_reads: int = 1,
     view_state: str | None = None,
+    initial_timeout_s: float | None = None,
+    quiet_timeout_s: float | None = None,
 ) -> str:
-    text = read_until_idle(session.sock, max_empty_reads=max_empty_reads)
+    text = read_until_idle(
+        session.sock,
+        max_empty_reads=max_empty_reads,
+        initial_timeout_s=initial_timeout_s,
+        quiet_timeout_s=quiet_timeout_s,
+    )
     return session_capture(session, text, view_state=view_state)
 
 
-def session_send(session: TelnetRunnerSession, payload: bytes, *, view_state: str | None = None) -> str:
+def session_send(
+    session: TelnetRunnerSession,
+    payload: bytes,
+    *,
+    view_state: str | None = None,
+    initial_timeout_s: float = TELNET_COMMAND_RESPONSE_TIMEOUT_S,
+) -> str:
     session.sock.sendall(payload)
-    return session_read(session, max_empty_reads=1, view_state=view_state)
+    return session_read(session, max_empty_reads=1, view_state=view_state, initial_timeout_s=initial_timeout_s)
 
 
 def session_has_menu(session: TelnetRunnerSession) -> bool:
@@ -359,7 +383,7 @@ def session_open_menu(session: TelnetRunnerSession) -> str:
     session_read(session, max_empty_reads=1, view_state=session.view_state)
     last_text = session.last_text
     for _ in range(2):
-        text = session_send(session, TELNET_KEY_F2)
+        text = session_send(session, TELNET_KEY_F2, initial_timeout_s=TELNET_IDLE_TIMEOUT_S)
         last_text = text or last_text
         if text and session_has_menu(session):
             session.view_state = "menu"
@@ -546,12 +570,18 @@ def reset_to_home(sock) -> None:
             continue
 
 
-def send_and_read(sock, payload: bytes, *, require_change: bool = False) -> str:
-    before = normalize_text(read_until_idle(sock)) if require_change else ""
+def send_and_read(
+    sock,
+    payload: bytes,
+    *,
+    require_change: bool = False,
+    initial_timeout_s: float = TELNET_COMMAND_RESPONSE_TIMEOUT_S,
+) -> str:
+    before = normalize_text(read_until_idle(sock, initial_timeout_s=initial_timeout_s)) if require_change else ""
     last_text = ""
     for _ in range(2):
         sock.sendall(payload)
-        text = read_until_idle(sock)
+        text = read_until_idle(sock, initial_timeout_s=initial_timeout_s)
         last_text = text
         if not require_change:
             return text

@@ -239,7 +239,8 @@ def test_telnet_session_open_audio_mixer_uses_down_after_f2_menu(monkeypatch):
 
     monkeypatch.setattr(module, "session_read", lambda current_session, **kwargs: "")
 
-    def fake_send(current_session, payload, *, view_state=None):
+    def fake_send(current_session, payload, *, view_state=None, initial_timeout_s=None):
+        del initial_timeout_s
         calls.append(payload)
         if payload == module.TELNET_KEY_F2:
             current_session.last_text = menu_text
