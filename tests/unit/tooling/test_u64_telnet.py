@@ -166,7 +166,7 @@ def test_read_until_idle_uses_socket_readiness_checks(monkeypatch):
             return self.responses.pop(0)
 
     sock = FakeSocket()
-    readiness = [([sock], [], []), ([sock], [], []), ([], [], [])]
+    readiness = [([sock], [], []), ([sock], [], []), ([], [], []), ([], [], []), ([], [], [])]
 
     def fake_select(readers, writers, errors, timeout):
         waits.append(timeout)
@@ -180,7 +180,41 @@ def test_read_until_idle_uses_socket_readiness_checks(monkeypatch):
     text = module.read_until_idle(sock)
 
     assert text == "READY>menu"
-    assert waits == [module.TELNET_IDLE_TIMEOUT_S, module.TELNET_POST_DATA_IDLE_TIMEOUT_S, module.TELNET_POST_DATA_IDLE_TIMEOUT_S]
+    assert waits == [
+        module.TELNET_IDLE_TIMEOUT_S,
+        module.TELNET_POST_DATA_IDLE_TIMEOUT_S,
+        module.TELNET_POST_DATA_IDLE_TIMEOUT_S,
+        module.TELNET_POST_DATA_IDLE_TIMEOUT_S,
+        module.TELNET_POST_DATA_IDLE_TIMEOUT_S,
+    ]
+
+
+def test_read_until_idle_preserves_max_empty_reads_with_select(monkeypatch):
+    module = load_telnet()
+    waits = []
+
+    class FakeSocket:
+        def fileno(self):
+            return 7
+
+        def recv(self, size):
+            raise AssertionError("recv should not be called when select reports no data")
+
+    sock = FakeSocket()
+
+    def fake_select(readers, writers, errors, timeout):
+        waits.append(timeout)
+        assert readers == [sock]
+        assert writers == []
+        assert errors == []
+        return ([], [], [])
+
+    monkeypatch.setattr(module.select, "select", fake_select)
+
+    text = module.read_until_idle(sock, max_empty_reads=2)
+
+    assert text == ""
+    assert waits == [module.TELNET_IDLE_TIMEOUT_S, module.TELNET_IDLE_TIMEOUT_S]
 
 
 def test_telnet_smoke_incomplete_operations_match_historical_probe():

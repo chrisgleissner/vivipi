@@ -253,7 +253,8 @@ def read_until_idle(
         timeout_s = quiet_timeout_s if saw_data else initial_timeout_s
         if use_select:
             if not _wait_for_readable(sock, timeout_s):
-                break
+                empty_reads += 1
+                continue
         else:
             # Fallback for test doubles and sockets without a selectable file descriptor.
             settimeout = getattr(sock, "settimeout", None)
