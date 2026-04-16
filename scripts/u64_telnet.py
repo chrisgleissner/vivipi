@@ -407,6 +407,25 @@ def session_read_audio_mixer_item(session: TelnetRunnerSession, *, shared_state:
         return f"current={normalized_current}"
 
 
+def audio_mixer_write_right_steps(settings: RuntimeSettings, current: str, target: str) -> int:
+    _current_value, values, _body_bytes = u64_http.audio_mixer_item_state(settings)
+    normalized_values = tuple(u64_http.normalize_audio_mixer_value(value) for value in values)
+    normalized_current = u64_http.normalize_audio_mixer_value(current)
+    normalized_target = u64_http.normalize_audio_mixer_value(target)
+    if normalized_current not in normalized_values:
+        raise RuntimeError(f"unsupported Audio Mixer write current value: {current}")
+    if normalized_target not in normalized_values:
+        raise RuntimeError(f"unsupported Audio Mixer write target value: {target}")
+    current_index = normalized_values.index(normalized_current)
+    target_index = normalized_values.index(normalized_target)
+    return (target_index - current_index) % len(normalized_values)
+
+
+def authoritative_audio_mixer_value(settings: RuntimeSettings, *, shared_state: Any | None = None) -> str:
+    current, _values, _body_bytes = u64_http.audio_mixer_item_state(settings)
+    return u64_http.remember_audio_mixer_value(shared_state, current)
+
+
 def session_write_audio_mixer_item(settings: RuntimeSettings, session: TelnetRunnerSession, target: str, *, shared_state: Any | None = None) -> str:
     with u64_http.audio_mixer_shared_lock(shared_state):
         text = session_refresh_audio_mixer(session)
@@ -419,8 +438,13 @@ def session_write_audio_mixer_item(settings: RuntimeSettings, session: TelnetRun
         text, updated = session_extract_audio_mixer_value(session, text)
         normalized_updated = u64_http.remember_audio_mixer_value(shared_state, updated)
         if normalized_updated != normalized_target:
+            normalized_authoritative = authoritative_audio_mixer_value(settings, shared_state=shared_state)
+            session.view_state = "unknown"
+            session.menu_focus = "unknown"
+            if normalized_authoritative == normalized_target:
+                return f"from={normalized_current} to={normalized_authoritative} right_steps={steps}"
             raise RuntimeError(
-                f"verification mismatch expected={normalized_target} got={normalized_updated} latest_known={u64_http.latest_audio_mixer_value(shared_state) or 'unknown'}"
+                f"verification mismatch expected={normalized_target} got={normalized_updated} authoritative={normalized_authoritative} latest_known={u64_http.latest_audio_mixer_value(shared_state) or 'unknown'}"
             )
         session.last_text = text
         session.view_state = "audio_mixer"
@@ -537,20 +561,6 @@ def extract_audio_mixer_write_value(text: str) -> str:
 def focus_audio_mixer_write_item(sock) -> tuple[str, str]:
     text = open_audio_mixer(sock)
     return text, extract_audio_mixer_write_value(text)
-
-
-def audio_mixer_write_right_steps(settings: RuntimeSettings, current: str, target: str) -> int:
-    _current_value, values, _body_bytes = u64_http.audio_mixer_item_state(settings)
-    normalized_values = tuple(u64_http.normalize_audio_mixer_value(value) for value in values)
-    normalized_current = u64_http.normalize_audio_mixer_value(current)
-    normalized_target = u64_http.normalize_audio_mixer_value(target)
-    if normalized_current not in normalized_values:
-        raise RuntimeError(f"unsupported Audio Mixer write current value: {current}")
-    if normalized_target not in normalized_values:
-        raise RuntimeError(f"unsupported Audio Mixer write target value: {target}")
-    current_index = normalized_values.index(normalized_current)
-    target_index = normalized_values.index(normalized_target)
-    return (target_index - current_index) % len(normalized_values)
 
 
 def read_audio_mixer_item(sock) -> str:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import enum
+import http.client
 import socket
 import time
 from dataclasses import dataclass
@@ -79,11 +80,19 @@ def select_operation_index(context: ProbeExecutionContext | None, operation_coun
 def is_retryable_surface_error(error: Exception) -> bool:
     if isinstance(error, (ConnectionResetError, BrokenPipeError, TimeoutError, socket.timeout)):
         return True
+    if isinstance(error, (http.client.IncompleteRead, http.client.RemoteDisconnected, http.client.ResponseNotReady)):
+        return True
     if isinstance(error, OSError) and getattr(error, "errno", None) in {104, 110, 111}:
         return True
     if isinstance(error, RuntimeError):
         detail = str(error).lower()
-        return "empty telnet text" in detail or "timed out" in detail or "missing audio mixer write value" in detail
+        return (
+            "empty telnet text" in detail
+            or "timed out" in detail
+            or "missing audio mixer write value" in detail
+            or "missing telnet text" in detail
+            or "verification mismatch" in detail
+        )
     return False
 
 

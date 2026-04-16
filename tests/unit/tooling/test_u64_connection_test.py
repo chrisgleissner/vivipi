@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+import http.client
 
 import pytest
 
@@ -10,6 +11,10 @@ from tests.unit.tooling._script_loader import load_script_module
 
 def load_module():
     return load_script_module("u64_connection_test")
+
+
+def load_runtime_module():
+    return load_script_module("u64_connection_runtime")
 
 
 def make_settings(module):
@@ -261,6 +266,24 @@ def test_probe_iteration_sequence_randomizes_per_iteration_with_stable_seed():
     assert sorted(first) == ["ftp", "http", "ping", "telnet"]
     assert sorted(second) == ["ftp", "http", "ping", "telnet"]
     assert first != second
+
+
+def test_retryable_surface_error_includes_http_incomplete_read():
+    module = load_runtime_module()
+
+    assert module.is_retryable_surface_error(http.client.IncompleteRead(b"", 211))
+
+
+def test_retryable_surface_error_includes_telnet_marker_miss():
+    module = load_runtime_module()
+
+    assert module.is_retryable_surface_error(RuntimeError("missing telnet text: Audio Mixer, Speaker Settings"))
+
+
+def test_retryable_surface_error_includes_verification_mismatch():
+    module = load_runtime_module()
+
+    assert module.is_retryable_surface_error(RuntimeError("verification mismatch expected=+1 dB got=0 dB authoritative=0 dB latest_known=0 dB"))
 
 
 def test_run_runner_iteration_sequential_uses_randomized_probe_order():
