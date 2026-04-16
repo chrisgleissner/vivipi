@@ -472,7 +472,10 @@ def log_resolved_startup(settings: RuntimeSettings, config: ExecutionConfig) -> 
     ]
     if config.profile is not None and config.overrides:
         parts.append(f"overrides={','.join(config.overrides)}")
-    print(f'{ts()} protocol=config result=INFO detail="{' '.join(parts)}"', flush=True)
+    try:
+        print(f'{ts()} protocol=config result=INFO detail="{' '.join(parts)}"', flush=True)
+    except BrokenPipeError:
+        raise SystemExit(0)
 
 
 def execute_probe(

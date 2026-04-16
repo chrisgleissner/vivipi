@@ -1,14 +1,8 @@
 from __future__ import annotations
 
 import socket
-import sys
-from pathlib import Path
 
-TEST_DIR = Path(__file__).resolve().parent
-if str(TEST_DIR) not in sys.path:
-    sys.path.insert(0, str(TEST_DIR))
-
-from _script_loader import load_script_module
+from tests.unit.tooling._script_loader import load_script_module
 
 
 def load_runtime():
@@ -32,6 +26,17 @@ class RotatingState:
         counter = self.counts.get(key, 0)
         self.counts[key] = counter + 1
         return counter % pool_size
+
+
+class UnusedSocket:
+    def sendall(self, payload: bytes) -> None:
+        return None
+
+    def recv(self, size: int) -> bytes:
+        return b""
+
+    def close(self) -> None:
+        return None
 
 
 def test_telnet_normal_mode_sends_newline_drains_banner_and_closes(monkeypatch):
@@ -169,7 +174,7 @@ def test_telnet_session_open_audio_mixer_uses_down_after_f2_menu(monkeypatch):
     menu_text = "-- Audio / Video -- Video Configuration Audio Mixer Speaker Settings"
     down_text = "Video Configuration Audio Mixer"
     audio_text = "Vol UltiSid 1 0 dB"
-    session = module.TelnetRunnerSession(sock=object())
+    session = module.TelnetRunnerSession(sock=UnusedSocket())
 
     monkeypatch.setattr(module, "session_read", lambda current_session, **kwargs: "")
 
@@ -199,7 +204,7 @@ def test_telnet_session_open_audio_mixer_uses_down_after_f2_menu(monkeypatch):
 def test_telnet_session_write_audio_mixer_item_recovers_from_partial_screen(monkeypatch):
     runtime = load_runtime()
     module = load_telnet()
-    session = module.TelnetRunnerSession(sock=object(), view_state="audio_mixer", last_text="Vol UltiSid 1")
+    session = module.TelnetRunnerSession(sock=UnusedSocket(), view_state="audio_mixer", last_text="Vol UltiSid 1")
 
     monkeypatch.setattr(module, "session_refresh_audio_mixer", lambda current_session: "Vol UltiSid 1")
     monkeypatch.setattr(module, "session_read", lambda current_session, **kwargs: " 0 dBVol UltiSid 2 0 dB")

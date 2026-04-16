@@ -6,7 +6,7 @@ import socket
 import threading
 import time
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Protocol
 
 import u64_http
 from u64_connection_runtime import (
@@ -41,9 +41,17 @@ TELNET_FAILURE_MARKERS = (b"incorrect", b"failed", b"denied", b"invalid")
 AUDIO_MIXER_WRITE_VALUE_PATTERN = re.compile(r"Vol UltiSid 1\s+(OFF|[+-]?\d+ dB|\d+ dB)")
 
 
+class TelnetSocket(Protocol):
+    def sendall(self, data: bytes) -> None: ...
+
+    def recv(self, bufsize: int) -> bytes: ...
+
+    def close(self) -> None: ...
+
+
 @dataclass
 class TelnetRunnerSession:
-    sock: object
+    sock: TelnetSocket
     view_state: str = "unknown"
     last_text: str = ""
     menu_focus: str = "unknown"
@@ -62,7 +70,9 @@ def register_cleanup() -> None:
             _TELNET_CLEANUP_REGISTERED = True
 
 
-def close_socket(sock) -> None:
+def close_socket(sock: TelnetSocket | None) -> None:
+    if sock is None:
+        return
     try:
         sock.close()
     except OSError:
@@ -166,13 +176,13 @@ def strip_vt_text(value: bytes) -> str:
     return " ".join("".join(cleaned).split())
 
 
-def connect(settings: RuntimeSettings):
+def connect(settings: RuntimeSettings) -> TelnetSocket:
     sock = socket.create_connection((settings.host, settings.telnet_port), timeout=2)
     sock.settimeout(TELNET_IDLE_TIMEOUT_S)
     return sock
 
 
-def collect_visible(handle, chunk: bytes) -> bytes:
+def collect_visible(handle: TelnetSocket, chunk: bytes) -> bytes:
     visible = bytearray()
     index = 0
     while index < len(chunk):
@@ -208,7 +218,7 @@ def collect_visible(handle, chunk: bytes) -> bytes:
     return bytes(visible)
 
 
-def read_until_idle(sock, *, max_empty_reads: int | None = None) -> str:
+def read_until_idle(sock: TelnetSocket, *, max_empty_reads: int | None = None) -> str:
     if max_empty_reads is None:
         max_empty_reads = TELNET_MAX_EMPTY_READS
     visible = bytearray()
