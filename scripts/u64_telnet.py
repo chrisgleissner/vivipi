@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 import re
+import select
 import socket
 import threading
 import time
@@ -23,6 +24,7 @@ from u64_connection_runtime import (
 
 
 TELNET_IDLE_TIMEOUT_S = 0.20
+TELNET_POST_DATA_IDLE_TIMEOUT_S = 0.03
 TELNET_MAX_EMPTY_READS = 3
 IAC = 255
 DONT = 254
@@ -182,6 +184,17 @@ def connect(settings: RuntimeSettings) -> TelnetSocket:
     return sock
 
 
+def _wait_for_readable(sock: TelnetSocket, timeout_s: float) -> bool:
+    fileno = getattr(sock, "fileno", None)
+    if not callable(fileno):
+        return False
+    try:
+        ready, _write_ready, _error_ready = select.select([sock], [], [], timeout_s)
+    except (OSError, TypeError, ValueError):
+        return False
+    return bool(ready)
+
+
 def collect_visible(handle: TelnetSocket, chunk: bytes) -> bytes:
     visible = bytearray()
     index = 0
@@ -221,9 +234,20 @@ def collect_visible(handle: TelnetSocket, chunk: bytes) -> bytes:
 def read_until_idle(sock: TelnetSocket, *, max_empty_reads: int | None = None) -> str:
     if max_empty_reads is None:
         max_empty_reads = TELNET_MAX_EMPTY_READS
+    use_select = callable(getattr(sock, "fileno", None))
     visible = bytearray()
     empty_reads = 0
+    saw_data = False
     while empty_reads < max_empty_reads:
+        timeout_s = TELNET_POST_DATA_IDLE_TIMEOUT_S if saw_data else TELNET_IDLE_TIMEOUT_S
+        if use_select:
+            if not _wait_for_readable(sock, timeout_s):
+                break
+        else:
+            # Fallback for test doubles and sockets without a selectable file descriptor.
+            settimeout = getattr(sock, "settimeout", None)
+            if callable(settimeout):
+                settimeout(timeout_s)
         try:
             chunk = sock.recv(4096)
         except socket.timeout:
@@ -231,6 +255,7 @@ def read_until_idle(sock: TelnetSocket, *, max_empty_reads: int | None = None) -
             continue
         if not chunk:
             break
+        saw_data = True
         empty_reads = 0
         visible.extend(collect_visible(sock, chunk))
     text = strip_vt_text(bytes(visible))
