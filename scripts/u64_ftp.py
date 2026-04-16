@@ -154,6 +154,15 @@ def close(ftp: ftplib.FTP | None) -> None:
             pass
 
 
+def close_without_quit(ftp: ftplib.FTP | None) -> None:
+    if ftp is None:
+        return
+    try:
+        ftp.close()
+    except OSError:
+        pass
+
+
 def collect_temp_entries(ftp: ftplib.FTP) -> tuple[str, ...]:
     try:
         return tuple(ftp.nlst(FTP_TEMP_DIR))
@@ -470,6 +479,18 @@ def surface_operations(
     )
 
 
+def run_incomplete_surface_probe(
+    settings: RuntimeSettings,
+    operation: Callable[[RuntimeSettings, ftplib.FTP], str],
+) -> str:
+    ftp = None
+    try:
+        ftp = connect(settings)
+        return operation(settings, ftp)
+    finally:
+        close_without_quit(ftp)
+
+
 def run_probe(
     settings: RuntimeSettings,
     correctness: ProbeCorrectness,
@@ -481,6 +502,21 @@ def run_probe(
             return run_probe_invalid(settings)
         surface = context.surface
         if correctness == ProbeCorrectness.INCOMPLETE:
+            if surface != ProbeSurface.SMOKE:
+                operations = surface_operations(
+                    surface,
+                    runner_id=context.runner_id,
+                    concurrent_multi_runner=_has_multiple_runners(context),
+                )
+                index = select_operation_index(context, len(operations))
+                op_name, operation = operations[index]
+                return run_incomplete_surface_operation(
+                    "ftp",
+                    surface,
+                    op_name,
+                    lambda current_settings: run_incomplete_surface_probe(current_settings, operation),
+                    settings,
+                )
             operations = incomplete_operations(
                 surface,
                 runner_id=context.runner_id,

@@ -567,6 +567,17 @@ def execute_probe_safely(
         return ProbeOutcome("FAIL", f"{protocol} failed: {error}", elapsed_ms)
 
 
+def ordered_probe_reports(
+    results: tuple[tuple[int, str, ProbeOutcome], ...],
+) -> tuple[tuple[str, ProbeOutcome], ...]:
+    protocol_rank = {protocol: index for index, protocol in enumerate(DEFAULT_PROBES)}
+    ordered = sorted(
+        results,
+        key=lambda item: (protocol_rank.get(item[1], len(DEFAULT_PROBES)), item[0]),
+    )
+    return tuple((protocol, outcome) for _index, protocol, outcome in ordered)
+
+
 def run_runner_iteration(
     runner_id: int,
     iteration: int,
@@ -579,20 +590,23 @@ def run_runner_iteration(
 ) -> tuple[tuple[str, ProbeOutcome], ...]:
     sequence = state.probe_iteration_sequence(config.probes, runner_id, iteration)
     if config.schedule == SCHEDULE_SEQUENTIAL:
-        results: list[tuple[str, ProbeOutcome]] = []
-        for index, (_original_index, protocol) in enumerate(sequence):
+        results: list[tuple[int, str, ProbeOutcome]] = []
+        for sequence_index, (original_index, protocol) in enumerate(sequence):
             outcome = execute_probe_safely(protocol, settings, config, probe_runners, state=state, runner_id=runner_id, iteration=iteration)
-            results.append((protocol, outcome))
-            state.emit_probe_outcome(protocol, outcome, iteration=iteration, runner_id=runner_id)
-            if index < len(sequence) - 1:
+            results.append((original_index, protocol, outcome))
+            if sequence_index < len(sequence) - 1:
                 sleep_fn(settings.delay_ms)
-        return tuple(results)
+        reported_results = ordered_probe_reports(tuple(results))
+        for protocol, outcome in reported_results:
+            state.emit_probe_outcome(protocol, outcome, iteration=iteration, runner_id=runner_id)
+        return reported_results
 
-    ordered_results: list[tuple[str, ProbeOutcome] | None] = [None] * len(config.probes)
+    ordered_results: list[tuple[int, str, ProbeOutcome] | None] = [None] * len(config.probes)
     threads: list[threading.Thread] = []
 
     def worker(index: int, protocol: str) -> None:
         ordered_results[index] = (
+            index,
             protocol,
             execute_probe_safely(protocol, settings, config, probe_runners, state=state, runner_id=runner_id, iteration=iteration),
         )
@@ -604,9 +618,10 @@ def run_runner_iteration(
     for thread in threads:
         thread.join()
     results = tuple(ordered_results[index] for index, _protocol in sequence if ordered_results[index] is not None)
-    for protocol, outcome in results:
+    reported_results = ordered_probe_reports(results)
+    for protocol, outcome in reported_results:
         state.emit_probe_outcome(protocol, outcome, iteration=iteration, runner_id=runner_id)
-    return results
+    return reported_results
 
 
 def run_runner_loop(

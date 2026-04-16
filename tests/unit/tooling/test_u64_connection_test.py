@@ -334,6 +334,39 @@ def test_run_runner_iteration_concurrent_allows_overlap():
     assert max_active == 2
 
 
+def test_run_runner_iteration_concurrent_reports_in_default_protocol_order():
+    module = load_module()
+    settings = make_settings(module)
+    config = make_config(module, probes=("ping", "http", "ftp", "telnet"), schedule="concurrent")
+    state = module.ExecutionState(settings=settings, include_runner_context=False, random_seed=11)
+    emitted = []
+
+    state.emit_probe_outcome = lambda protocol, outcome, *, iteration, runner_id: emitted.append(protocol)
+
+    def make_runner(name):
+        def runner(current_settings, mode, *, context=None):
+            del current_settings, mode, context
+            return module.ProbeOutcome("OK", name, 1.0)
+
+        return runner
+
+    sequence = [protocol for _index, protocol in state.probe_iteration_sequence(config.probes, 1, 1)]
+
+    results = module.run_runner_iteration(
+        1,
+        1,
+        config,
+        settings,
+        state,
+        sleep_fn=lambda value: None,
+        probe_runners={protocol: make_runner(protocol) for protocol in ("ping", "http", "ftp", "telnet")},
+    )
+
+    assert sequence != ["ping", "http", "ftp", "telnet"]
+    assert emitted == ["ping", "http", "ftp", "telnet"]
+    assert [protocol for protocol, _outcome in results] == ["ping", "http", "ftp", "telnet"]
+
+
 def test_run_runner_iteration_converts_unexpected_exceptions_to_failures():
     module = load_module()
     settings = make_settings(module)

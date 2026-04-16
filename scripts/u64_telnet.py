@@ -621,6 +621,17 @@ def run_probe(
     if context is not None:
         surface = context.surface
         if correctness == ProbeCorrectness.INCOMPLETE:
+            if surface != ProbeSurface.SMOKE:
+                operations = surface_operations(surface, concurrent_multi_runner=_has_multiple_runners(context))
+                index = select_operation_index(context, len(operations))
+                op_name, operation = operations[index]
+                return run_incomplete_surface_operation(
+                    "telnet",
+                    surface,
+                    op_name,
+                    lambda current_settings: _run_incomplete_surface_operation(current_settings, context.runner_id, operation),
+                    settings,
+                )
             operations = incomplete_operations(surface)
             index = select_operation_index(context, len(operations))
             op_name, operation = operations[index]
@@ -689,3 +700,15 @@ def run_probe_incomplete(settings: RuntimeSettings) -> ProbeOutcome:
         if str(error) == "login failed":
             return ProbeOutcome("FAIL", "login failed", elapsed_ms)
         return ProbeOutcome("FAIL", f"telnet failed: {error}", elapsed_ms)
+
+
+def _run_incomplete_surface_operation(
+    settings: RuntimeSettings,
+    runner_id: int,
+    operation: Callable[[RuntimeSettings, TelnetRunnerSession], str],
+) -> str:
+    try:
+        session = get_session(settings, runner_id)
+        return operation(settings, session)
+    finally:
+        drop_session(runner_id)
