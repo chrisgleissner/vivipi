@@ -126,6 +126,97 @@ def test_telnet_initial_read_classify_returns_banner_ready(monkeypatch):
     assert calls[-1] == "close"
 
 
+def test_read_until_idle_switches_to_short_post_data_timeout():
+    module = load_telnet()
+    timeouts = []
+
+    class FakeSocket:
+        def __init__(self):
+            self.responses = [b"READY>", socket.timeout()]
+
+        def settimeout(self, timeout):
+            timeouts.append(timeout)
+
+        def recv(self, size):
+            del size
+            response = self.responses.pop(0)
+            if isinstance(response, BaseException):
+                raise response
+            return response
+
+    text = module.read_until_idle(FakeSocket(), max_empty_reads=1)
+
+    assert text == "READY>"
+    assert timeouts == [module.TELNET_IDLE_TIMEOUT_S, module.TELNET_POST_DATA_IDLE_TIMEOUT_S]
+
+
+def test_read_until_idle_uses_socket_readiness_checks(monkeypatch):
+    module = load_telnet()
+    waits = []
+
+    class FakeSocket:
+        def __init__(self):
+            self.responses = [b"READY>", b"menu"]
+
+        def fileno(self):
+            return 7
+
+        def recv(self, size):
+            del size
+            return self.responses.pop(0)
+
+    sock = FakeSocket()
+    readiness = [([sock], [], []), ([sock], [], []), ([], [], []), ([], [], []), ([], [], [])]
+
+    def fake_select(readers, writers, errors, timeout):
+        waits.append(timeout)
+        assert readers == [sock]
+        assert writers == []
+        assert errors == []
+        return readiness.pop(0)
+
+    monkeypatch.setattr(module.select, "select", fake_select)
+
+    text = module.read_until_idle(sock)
+
+    assert text == "READY>menu"
+    assert waits == [
+        module.TELNET_IDLE_TIMEOUT_S,
+        module.TELNET_POST_DATA_IDLE_TIMEOUT_S,
+        module.TELNET_POST_DATA_IDLE_TIMEOUT_S,
+        module.TELNET_POST_DATA_IDLE_TIMEOUT_S,
+        module.TELNET_POST_DATA_IDLE_TIMEOUT_S,
+    ]
+
+
+def test_read_until_idle_preserves_max_empty_reads_with_select(monkeypatch):
+    module = load_telnet()
+    waits = []
+
+    class FakeSocket:
+        def fileno(self):
+            return 7
+
+        def recv(self, size):
+            raise AssertionError("recv should not be called when select reports no data")
+
+    sock = FakeSocket()
+
+    def fake_select(readers, writers, errors, timeout):
+        waits.append(timeout)
+        assert readers == [sock]
+        assert writers == []
+        assert errors == []
+        return ([], [], [])
+
+    monkeypatch.setattr(module.select, "select", fake_select)
+
+    text = module.read_until_idle(sock, max_empty_reads=2)
+
+    assert text == ""
+    assert waits == [module.TELNET_IDLE_TIMEOUT_S, module.TELNET_IDLE_TIMEOUT_S]
+
+
 def test_telnet_smoke_incomplete_operations_match_historical_probe():
     runtime = load_runtime()
     module = load_telnet()
@@ -182,7 +273,8 @@ def test_telnet_session_open_audio_mixer_uses_down_after_f2_menu(monkeypatch):
 
     monkeypatch.setattr(module, "session_read", lambda current_session, **kwargs: "")
 
-    def fake_send(current_session, payload, *, view_state=None):
+    def fake_send(current_session, payload, *, view_state=None, initial_timeout_s=None):
+        del initial_timeout_s
         calls.append(payload)
         if payload == module.TELNET_KEY_F2:
             current_session.last_text = menu_text
