@@ -3,6 +3,8 @@ from __future__ import annotations
 import threading
 import time
 
+import pytest
+
 from tests.unit.tooling._script_loader import load_script_module
 
 
@@ -145,6 +147,55 @@ def test_explicit_high_value_overrides_can_reenable_write_surface_with_single_st
     }
     assert resolved.streams == ("video",)
     assert resolved.overrides == ("schedule", "duration-s", "surface", "stream")
+
+
+def test_validate_execution_config_rejects_concurrent_http_readwrite_runner_overflow():
+    module = load_module()
+
+    config = module.ExecutionConfig(
+        profile="custom",
+        probes=("http",),
+        schedule=module.SCHEDULE_CONCURRENT,
+        runners=module.u64_http.SCREEN_RAM_RUNNER_SLOT_COUNT + 1,
+        duration_s=60,
+        probe_correctness={protocol: module.ProbeCorrectness.CORRECT for protocol in module.DEFAULT_PROBES},
+        uses_extended_flags=True,
+        overrides=(),
+        probe_surfaces={
+            "ping": module.ProbeSurface.SMOKE,
+            "http": module.ProbeSurface.READWRITE,
+            "ftp": module.ProbeSurface.READWRITE,
+            "telnet": module.ProbeSurface.READWRITE,
+        },
+        streams=(),
+    )
+
+    with pytest.raises(ValueError, match="supports at most"):
+        module.validate_execution_config(config)
+
+
+def test_validate_execution_config_allows_large_runner_count_without_http_readwrite():
+    module = load_module()
+
+    config = module.ExecutionConfig(
+        profile="custom",
+        probes=("ftp",),
+        schedule=module.SCHEDULE_CONCURRENT,
+        runners=module.u64_http.SCREEN_RAM_RUNNER_SLOT_COUNT + 1,
+        duration_s=60,
+        probe_correctness={protocol: module.ProbeCorrectness.CORRECT for protocol in module.DEFAULT_PROBES},
+        uses_extended_flags=True,
+        overrides=(),
+        probe_surfaces={
+            "ping": module.ProbeSurface.SMOKE,
+            "http": module.ProbeSurface.READ,
+            "ftp": module.ProbeSurface.READWRITE,
+            "telnet": module.ProbeSurface.READWRITE,
+        },
+        streams=(),
+    )
+
+    module.validate_execution_config(config)
 
 
 def test_help_output_mentions_restored_default_shape():

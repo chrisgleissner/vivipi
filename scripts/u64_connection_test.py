@@ -453,6 +453,19 @@ def resolve_execution_config(args: argparse.Namespace) -> ExecutionConfig:
     )
 
 
+def validate_execution_config(config: ExecutionConfig) -> None:
+    if config.schedule != SCHEDULE_CONCURRENT:
+        return
+    if config.runners <= u64_http.SCREEN_RAM_RUNNER_SLOT_COUNT:
+        return
+    if config.probe_surfaces.get("http") != ProbeSurface.READWRITE:
+        return
+    raise ValueError(
+        "concurrent HTTP readwrite probing supports at most "
+        f"{u64_http.SCREEN_RAM_RUNNER_SLOT_COUNT} runners; got {config.runners}"
+    )
+
+
 def log_resolved_startup(settings: RuntimeSettings, config: ExecutionConfig) -> None:
     profile_name = config.profile or "custom"
     parts = [
@@ -659,7 +672,11 @@ def main(argv: list[str]) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     settings = build_runtime_settings(args)
-    config = resolve_execution_config(args)
+    try:
+        config = resolve_execution_config(args)
+        validate_execution_config(config)
+    except ValueError as error:
+        parser.error(str(error))
     settings = apply_profile_runtime_defaults(settings, config, argv)
     log_resolved_startup(settings, config)
     return run_extended(config, settings)

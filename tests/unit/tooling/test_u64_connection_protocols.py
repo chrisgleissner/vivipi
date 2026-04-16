@@ -347,3 +347,21 @@ def test_ftp_prime_temp_dir_deletes_stale_self_files_before_seeding(monkeypatch)
         ("seed", 2),
         ("close", ftp),
     ]
+
+
+def test_delete_readable_self_files_forgets_deleted_paths(monkeypatch):
+    module = load_ftp()
+    deleted = []
+    forgotten = []
+
+    class FakeFTP:
+        def delete(self, path):
+            deleted.append(path)
+
+    monkeypatch.setattr(module, "forget_self_file", lambda path: forgotten.append(path))
+
+    removed = module.delete_readable_self_files(FakeFTP(), ("/Temp/u64test_old.txt", "/Temp/keep.txt"))
+
+    assert removed == ("/Temp/u64test_old.txt",)
+    assert deleted == ["/Temp/u64test_old.txt"]
+    assert forgotten == ["/Temp/u64test_old.txt"]

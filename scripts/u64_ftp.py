@@ -156,6 +156,7 @@ def delete_readable_self_files(ftp: ftplib.FTP, entries: tuple[str, ...], file_p
     deleted = []
     for path in readable_self_files(entries, file_prefix=file_prefix):
         ftp.delete(path)
+        forget_self_file(path)
         deleted.append(path)
     return tuple(deleted)
 
