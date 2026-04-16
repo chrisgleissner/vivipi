@@ -5,6 +5,8 @@ import json
 import re
 import time
 import urllib.parse
+from contextlib import nullcontext
+from typing import Any
 
 from u64_connection_runtime import (
     ProbeExecutionContext,
@@ -21,6 +23,9 @@ HTTP_AUDIO_MIXER_CATEGORY_PATH = "/v1/configs/Audio%20Mixer"
 HTTP_VOLUME_ULTISID_1_PATH = f"{HTTP_AUDIO_MIXER_CATEGORY_PATH}/Vol%20UltiSid%201"
 AUDIO_MIXER_WRITE_ITEM = "Vol UltiSid 1"
 AUDIO_MIXER_WRITE_TARGET_VALUES = ("0 dB", "+1 dB")
+AUDIO_MIXER_SHARED_STATE_KEY = "u64.audio_mixer.vol_ultisid_1"
+SCREEN_RAM_BASE_ADDRESS = 0x0400
+SCREEN_RAM_RUNNER_SLOT_COUNT = 40
 
 
 def request_path(http_path: str) -> str:
@@ -133,6 +138,28 @@ def resolve_audio_mixer_value(values: tuple[str, ...], target: str) -> str:
     raise RuntimeError(f"unsupported target value: {target}")
 
 
+def audio_mixer_shared_lock(shared_state: Any | None):
+    if shared_state is None or not hasattr(shared_state, "shared_resource_lock_for"):
+        return nullcontext()
+    return shared_state.shared_resource_lock_for(AUDIO_MIXER_SHARED_STATE_KEY)
+
+
+def remember_audio_mixer_value(shared_state: Any | None, value: str) -> str:
+    normalized = normalize_audio_mixer_value(value)
+    if shared_state is not None and hasattr(shared_state, "set_shared_resource_value"):
+        shared_state.set_shared_resource_value(AUDIO_MIXER_SHARED_STATE_KEY, normalized)
+    return normalized
+
+
+def latest_audio_mixer_value(shared_state: Any | None) -> str | None:
+    if shared_state is None or not hasattr(shared_state, "get_shared_resource_value"):
+        return None
+    value = shared_state.get_shared_resource_value(AUDIO_MIXER_SHARED_STATE_KEY)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return normalize_audio_mixer_value(value)
+
+
 def audio_mixer_item_state(settings: RuntimeSettings) -> tuple[str, tuple[str, ...], int]:
     _status, payload, body_bytes = json_request(settings, "GET", HTTP_VOLUME_ULTISID_1_PATH)
     category_payload = payload.get("Audio Mixer") if isinstance(payload, dict) else None
@@ -153,25 +180,31 @@ def audio_mixer_item_state(settings: RuntimeSettings) -> tuple[str, tuple[str, .
     return current, normalized_values, body_bytes
 
 
-def read_audio_mixer_item(settings: RuntimeSettings) -> str:
-    current, values, body_bytes = audio_mixer_item_state(settings)
-    return f"body_bytes={body_bytes} current={normalize_audio_mixer_value(current)} options={len(values)}"
+def read_audio_mixer_item(settings: RuntimeSettings, *, shared_state: Any | None = None) -> str:
+    with audio_mixer_shared_lock(shared_state):
+        current, values, body_bytes = audio_mixer_item_state(settings)
+        normalized_current = remember_audio_mixer_value(shared_state, current)
+        return f"body_bytes={body_bytes} current={normalized_current} options={len(values)}"
 
 
-def write_audio_mixer_item(settings: RuntimeSettings, target: str) -> str:
-    current, values, _body_bytes = audio_mixer_item_state(settings)
-    resolved_target = resolve_audio_mixer_value(values, target)
-    if current != resolved_target:
-        encoded_target = urllib.parse.quote(resolved_target, safe="")
-        status, _body, _headers = request_bytes(settings, "PUT", f"{HTTP_VOLUME_ULTISID_1_PATH}?value={encoded_target}")
-        if not 200 <= status < 300:
-            raise RuntimeError(f"expected HTTP 2xx, got {status}")
-    updated, _updated_values, _body_bytes = audio_mixer_item_state(settings)
-    if normalize_audio_mixer_value(updated) != normalize_audio_mixer_value(resolved_target):
-        raise RuntimeError(
-            f"verification mismatch expected={normalize_audio_mixer_value(resolved_target)} got={normalize_audio_mixer_value(updated)}"
-        )
-    return f"from={normalize_audio_mixer_value(current)} to={normalize_audio_mixer_value(updated)}"
+def write_audio_mixer_item(settings: RuntimeSettings, target: str, *, shared_state: Any | None = None) -> str:
+    with audio_mixer_shared_lock(shared_state):
+        current, values, _body_bytes = audio_mixer_item_state(settings)
+        normalized_current = remember_audio_mixer_value(shared_state, current)
+        resolved_target = resolve_audio_mixer_value(values, target)
+        normalized_target = normalize_audio_mixer_value(resolved_target)
+        if normalized_current != normalized_target:
+            encoded_target = urllib.parse.quote(resolved_target, safe="")
+            status, _body, _headers = request_bytes(settings, "PUT", f"{HTTP_VOLUME_ULTISID_1_PATH}?value={encoded_target}")
+            if not 200 <= status < 300:
+                raise RuntimeError(f"expected HTTP 2xx, got {status}")
+        updated, _updated_values, _body_bytes = audio_mixer_item_state(settings)
+        normalized_updated = remember_audio_mixer_value(shared_state, updated)
+        if normalized_updated != normalized_target:
+            raise RuntimeError(
+                f"verification mismatch expected={normalized_target} got={normalized_updated} latest_known={latest_audio_mixer_value(shared_state) or 'unknown'}"
+            )
+        return f"from={normalized_current} to={normalized_updated}"
 
 
 def memory_read(settings: RuntimeSettings, address: str, length: int) -> str:
@@ -202,13 +235,30 @@ def memory_write_verify(settings: RuntimeSettings, address: str, data_hex: str) 
     return f"http_status={write_status} verified=0x{value:02X}"
 
 
-def surface_operations(surface: ProbeSurface) -> tuple[tuple[str, callable], ...]:
+def _runner_screen_address(runner_id: int) -> str:
+    slot = (runner_id - 1) % SCREEN_RAM_RUNNER_SLOT_COUNT
+    return f"0x{SCREEN_RAM_BASE_ADDRESS + slot:04X}"
+
+
+def _has_multiple_runners(context: ProbeExecutionContext | None) -> bool:
+    if context is None or context.state is None:
+        return False
+    return getattr(context.state, "runner_count", 1) > 1
+
+
+def surface_operations(
+    surface: ProbeSurface,
+    *,
+    runner_id: int = 1,
+    concurrent_multi_runner: bool = False,
+    shared_state: Any | None = None,
+) -> tuple[tuple[str, callable], ...]:
     read_operations = (
         ("get_version", lambda settings: generic_read(settings, "/v1/version")),
         ("get_info", lambda settings: generic_read(settings, "/v1/info")),
         ("get_configs", lambda settings: generic_read(settings, "/v1/configs")),
         ("get_config_audio_mixer", lambda settings: generic_read(settings, HTTP_AUDIO_MIXER_CATEGORY_PATH)),
-        ("get_vol_ultisid_1", lambda settings: read_audio_mixer_item(settings)),
+        ("get_vol_ultisid_1", lambda settings: read_audio_mixer_item(settings, shared_state=shared_state)),
         ("get_drives", lambda settings: generic_read(settings, "/v1/drives")),
         ("get_files_temp", lambda settings: generic_read(settings, "/v1/files?path=/Temp")),
         ("mem_read_zero_page", lambda settings: memory_read(settings, "0x0000", 16)),
@@ -220,17 +270,24 @@ def surface_operations(surface: ProbeSurface) -> tuple[tuple[str, callable], ...
         return (("get_version_smoke", lambda settings: generic_read(settings, "/v1/version")),)
     if surface == ProbeSurface.READ:
         return read_operations
-    return read_operations + (
-        ("mem_write_screen_space", lambda settings: memory_write_verify(settings, "0x0400", "20")),
-        ("mem_write_screen_exclam", lambda settings: memory_write_verify(settings, "0x0400", "21")),
-        ("set_vol_ultisid_1_0_db", lambda settings: write_audio_mixer_item(settings, "0 dB")),
-        ("set_vol_ultisid_1_plus_1_db", lambda settings: write_audio_mixer_item(settings, "+1 dB")),
+    screen_address = _runner_screen_address(runner_id)
+    operations = read_operations + (
+        ("mem_write_screen_space", lambda settings: memory_write_verify(settings, screen_address, "20")),
+        ("mem_write_screen_exclam", lambda settings: memory_write_verify(settings, screen_address, "21")),
+        ("set_vol_ultisid_1_0_db", lambda settings: write_audio_mixer_item(settings, "0 dB", shared_state=shared_state)),
+        ("set_vol_ultisid_1_plus_1_db", lambda settings: write_audio_mixer_item(settings, "+1 dB", shared_state=shared_state)),
     )
+    return operations
 
 
 def run_probe(settings: RuntimeSettings, correctness, *, context: ProbeExecutionContext | None = None) -> ProbeOutcome:
     if context is not None:
-        operations = surface_operations(context.surface)
+        operations = surface_operations(
+            context.surface,
+            runner_id=context.runner_id,
+            concurrent_multi_runner=_has_multiple_runners(context),
+            shared_state=context.state,
+        )
         index = select_operation_index(context, len(operations))
         op_name, operation = operations[index]
         started_at = time.perf_counter_ns()

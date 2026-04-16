@@ -19,6 +19,10 @@ def load_ping():
     return load_script_module("u64_ping")
 
 
+def load_connection_test():
+    return load_script_module("u64_connection_test")
+
+
 class RotatingState:
     def __init__(self):
         self.counts = {}
@@ -82,7 +86,11 @@ def test_http_surface_operations_retry_transient_transport_errors(monkeypatch):
             raise ConnectionResetError(104, "Connection reset by peer")
         return "http_status=200 body_bytes=43"
 
-    monkeypatch.setattr(module, "surface_operations", lambda surface: (("flaky", flaky_operation),))
+    monkeypatch.setattr(
+        module,
+        "surface_operations",
+        lambda surface, *, runner_id=1, concurrent_multi_runner=False, shared_state=None: (("flaky", flaky_operation),),
+    )
     monkeypatch.setattr(module.time, "sleep", sleeps.append)
 
     context = runtime.ProbeExecutionContext(
@@ -116,6 +124,31 @@ def test_ping_probe_uses_ping_terminology(monkeypatch):
 
     assert outcome.result == "OK"
     assert outcome.detail.startswith("ping_reply_ms=")
+
+
+def test_http_audio_mixer_write_preserves_latest_known_state(monkeypatch):
+    runtime = load_runtime()
+    connection_test = load_connection_test()
+    module = load_http()
+    settings = make_settings(runtime)
+    state = connection_test.ExecutionState(settings=settings, include_runner_context=False, random_seed=1)
+    current = {"value": "+1 dB"}
+
+    monkeypatch.setattr(module, "audio_mixer_item_state", lambda current_settings: (current["value"], ("0 dB", "+1 dB"), 123))
+
+    def fake_request_bytes(current_settings, method, path):
+        del current_settings
+        if method == "PUT":
+            current["value"] = "0 dB" if "0%20dB" in path else "+1 dB"
+            return 200, b"", {}
+        raise AssertionError((method, path))
+
+    monkeypatch.setattr(module, "request_bytes", fake_request_bytes)
+
+    detail = module.write_audio_mixer_item(settings, "0 dB", shared_state=state)
+
+    assert detail == "from=+1 dB to=0 dB"
+    assert state.get_shared_resource_value(module.AUDIO_MIXER_SHARED_STATE_KEY) == "0 dB"
 
 
 def test_ftp_normal_mode_performs_login_pasv_nlst_quit_and_close():
@@ -298,3 +331,102 @@ def test_try_ftp_prime_temp_dir_swallows_failures_and_logs(monkeypatch):
 
     assert module.try_prime_temp_dir(make_settings(runtime), log_fn=logs.append) == ()
     assert logs == ["prime_temp_dir_failed detail=timed out continuing=1"]
+
+
+def test_ftp_partial_stor_temp_reuses_bounded_temp_path(monkeypatch):
+    runtime = load_runtime()
+    module = load_ftp()
+    settings = make_settings(runtime)
+    calls = []
+
+    monkeypatch.setattr(module, "track_self_file", lambda current_settings, path: calls.append(("track", path)))
+    monkeypatch.setattr(module, "partial_transfer_abort", lambda current_settings, command, **kwargs: calls.append(("stor", command)) or command)
+
+    first = module.partial_stor_temp(settings)
+    second = module.partial_stor_temp(settings)
+
+    assert first == second
+    assert calls == [
+        ("track", first.removeprefix("STOR ")),
+        ("stor", first),
+        ("track", second.removeprefix("STOR ")),
+        ("stor", second),
+    ]
+
+
+def test_ftp_readwrite_surface_uploads_and_downloads_tiny_and_large_files(monkeypatch):
+    runtime = load_runtime()
+    module = load_ftp()
+    settings = make_settings(runtime)
+    stored_payloads: dict[str, bytes] = {}
+
+    class FakeFTP:
+        def storbinary(self, command, payload):
+            path = command.removeprefix("STOR ")
+            stored_payloads[path] = payload.read()
+
+        def retrbinary(self, command, callback):
+            path = command.removeprefix("RETR ")
+            callback(stored_payloads[path])
+
+        def nlst(self, path):
+            assert path == module.FTP_TEMP_DIR
+            return list(stored_payloads)
+
+    monkeypatch.setattr(module, "track_self_file", lambda current_settings, path: None)
+
+    ftp = FakeFTP()
+    operations = dict(module.surface_operations(runtime.ProbeSurface.READWRITE))
+
+    tiny_upload = operations["ftp_upload_tiny_self_file"](settings, ftp)
+    tiny_download = operations["ftp_download_tiny_self_file"](settings, ftp)
+    large_upload = operations["ftp_upload_large_self_file"](settings, ftp)
+    large_download = operations["ftp_download_large_self_file"](settings, ftp)
+
+    assert tiny_upload.endswith("bytes=1")
+    assert tiny_download.endswith("bytes=1")
+    assert large_upload.endswith(f"bytes={module.FTP_LARGE_FILE_SIZE_BYTES}")
+    assert large_download.endswith(f"bytes={module.FTP_LARGE_FILE_SIZE_BYTES}")
+    assert sorted(len(payload) for payload in stored_payloads.values()) == [1, module.FTP_LARGE_FILE_SIZE_BYTES]
+
+
+def test_ftp_prime_temp_dir_deletes_stale_self_files_before_seeding(monkeypatch):
+    runtime = load_runtime()
+    module = load_ftp()
+    settings = make_settings(runtime)
+    calls = []
+    ftp = object()
+
+    monkeypatch.setattr(module, "connect", lambda current_settings: ftp)
+    monkeypatch.setattr(module, "close", lambda current_ftp: calls.append(("close", current_ftp)))
+    monkeypatch.setattr(module, "collect_temp_entries_if_available", lambda current_ftp: ("/Temp/u64test_old.txt", "/Temp/keep.txt"))
+    monkeypatch.setattr(module, "delete_readable_self_files", lambda current_ftp, entries, file_prefix=module.FTP_SELF_FILE_PREFIX: calls.append(("delete", current_ftp, entries, file_prefix)) or ("/Temp/u64test_old.txt",))
+    monkeypatch.setattr(module, "seed_self_file", lambda current_settings, current_ftp, ordinal: calls.append(("seed", ordinal)) or f"/Temp/u64test_seed_{ordinal}.txt")
+
+    seeded = module.prime_temp_dir(settings, minimum_count=2)
+
+    assert seeded == ("/Temp/u64test_seed_1.txt", "/Temp/u64test_seed_2.txt")
+    assert calls == [
+        ("delete", ftp, ("/Temp/u64test_old.txt", "/Temp/keep.txt"), module.FTP_SELF_FILE_PREFIX),
+        ("seed", 1),
+        ("seed", 2),
+        ("close", ftp),
+    ]
+
+
+def test_delete_readable_self_files_forgets_deleted_paths(monkeypatch):
+    module = load_ftp()
+    deleted = []
+    forgotten = []
+
+    class FakeFTP:
+        def delete(self, path):
+            deleted.append(path)
+
+    monkeypatch.setattr(module, "forget_self_file", lambda path: forgotten.append(path))
+
+    removed = module.delete_readable_self_files(FakeFTP(), ("/Temp/u64test_old.txt", "/Temp/keep.txt"))
+
+    assert removed == ("/Temp/u64test_old.txt",)
+    assert deleted == ["/Temp/u64test_old.txt"]
+    assert forgotten == ["/Temp/u64test_old.txt"]

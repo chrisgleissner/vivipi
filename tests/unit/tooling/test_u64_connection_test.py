@@ -2,12 +2,19 @@ from __future__ import annotations
 
 import threading
 import time
+import http.client
+
+import pytest
 
 from tests.unit.tooling._script_loader import load_script_module
 
 
 def load_module():
     return load_script_module("u64_connection_test")
+
+
+def load_runtime_module():
+    return load_script_module("u64_connection_runtime")
 
 
 def make_settings(module):
@@ -147,6 +154,55 @@ def test_explicit_high_value_overrides_can_reenable_write_surface_with_single_st
     assert resolved.overrides == ("schedule", "duration-s", "surface", "stream")
 
 
+def test_validate_execution_config_rejects_concurrent_http_readwrite_runner_overflow():
+    module = load_module()
+
+    config = module.ExecutionConfig(
+        profile="custom",
+        probes=("http",),
+        schedule=module.SCHEDULE_CONCURRENT,
+        runners=module.u64_http.SCREEN_RAM_RUNNER_SLOT_COUNT + 1,
+        duration_s=60,
+        probe_correctness={protocol: module.ProbeCorrectness.CORRECT for protocol in module.DEFAULT_PROBES},
+        uses_extended_flags=True,
+        overrides=(),
+        probe_surfaces={
+            "ping": module.ProbeSurface.SMOKE,
+            "http": module.ProbeSurface.READWRITE,
+            "ftp": module.ProbeSurface.READWRITE,
+            "telnet": module.ProbeSurface.READWRITE,
+        },
+        streams=(),
+    )
+
+    with pytest.raises(ValueError, match="supports at most"):
+        module.validate_execution_config(config)
+
+
+def test_validate_execution_config_allows_large_runner_count_without_http_readwrite():
+    module = load_module()
+
+    config = module.ExecutionConfig(
+        profile="custom",
+        probes=("ftp",),
+        schedule=module.SCHEDULE_CONCURRENT,
+        runners=module.u64_http.SCREEN_RAM_RUNNER_SLOT_COUNT + 1,
+        duration_s=60,
+        probe_correctness={protocol: module.ProbeCorrectness.CORRECT for protocol in module.DEFAULT_PROBES},
+        uses_extended_flags=True,
+        overrides=(),
+        probe_surfaces={
+            "ping": module.ProbeSurface.SMOKE,
+            "http": module.ProbeSurface.READ,
+            "ftp": module.ProbeSurface.READWRITE,
+            "telnet": module.ProbeSurface.READWRITE,
+        },
+        streams=(),
+    )
+
+    module.validate_execution_config(config)
+
+
 def test_help_output_mentions_restored_default_shape():
     module = load_module()
 
@@ -189,12 +245,53 @@ def test_iteration_summary_appends_stream_health(capsys):
     assert "stream_video=OK,packets:12,lost:0,reordered:0,size_errs:0,header_errs:0,structure_errs:0,timeout_errs:0" in output
 
 
-def test_run_runner_iteration_sequential_keeps_probe_order():
+def test_operation_selection_avoids_fixed_log_cadence_aliasing():
+    module = load_module()
+    state = module.ExecutionState(settings=make_settings(module), include_runner_context=False, random_seed=7)
+
+    indices = [state.next_probe_operation_index("telnet", 1, module.ProbeSurface.READWRITE, 5) for _ in range(30)]
+
+    assert set(indices[:5]) == {0, 1, 2, 3, 4}
+    assert set(indices[5:10]) == {0, 1, 2, 3, 4}
+    assert len({indices[iteration - 1] for iteration in (10, 20, 30)}) == 3
+
+
+def test_probe_iteration_sequence_randomizes_per_iteration_with_stable_seed():
+    module = load_module()
+    state = module.ExecutionState(settings=make_settings(module), include_runner_context=False, random_seed=11)
+
+    first = [protocol for _index, protocol in state.probe_iteration_sequence(("ping", "http", "ftp", "telnet"), 1, 1)]
+    second = [protocol for _index, protocol in state.probe_iteration_sequence(("ping", "http", "ftp", "telnet"), 1, 2)]
+
+    assert sorted(first) == ["ftp", "http", "ping", "telnet"]
+    assert sorted(second) == ["ftp", "http", "ping", "telnet"]
+    assert first != second
+
+
+def test_retryable_surface_error_includes_http_incomplete_read():
+    module = load_runtime_module()
+
+    assert module.is_retryable_surface_error(http.client.IncompleteRead(b"", 211))
+
+
+def test_retryable_surface_error_includes_telnet_marker_miss():
+    module = load_runtime_module()
+
+    assert module.is_retryable_surface_error(RuntimeError("missing telnet text: Audio Mixer, Speaker Settings"))
+
+
+def test_retryable_surface_error_includes_verification_mismatch():
+    module = load_runtime_module()
+
+    assert module.is_retryable_surface_error(RuntimeError("verification mismatch expected=+1 dB got=0 dB authoritative=0 dB latest_known=0 dB"))
+
+
+def test_run_runner_iteration_sequential_uses_randomized_probe_order():
     module = load_module()
     calls = []
     settings = make_settings(module)
     config = make_config(module, probes=("ping", "http", "ftp", "telnet"))
-    state = module.ExecutionState(settings=settings, include_runner_context=False)
+    state = module.ExecutionState(settings=settings, include_runner_context=False, random_seed=11)
 
     def make_runner(name):
         def runner(current_settings, mode, *, context=None):
@@ -208,12 +305,13 @@ def test_run_runner_iteration_sequential_keeps_probe_order():
 
     module.run_runner_iteration(1, 1, config, settings, state, sleep_fn=lambda value: None, probe_runners=probe_runners)
 
-    assert calls == [
-        ("ping", module.ProbeCorrectness.CORRECT, "smoke"),
-        ("http", module.ProbeCorrectness.CORRECT, "readwrite"),
+    assert sorted(calls) == [
         ("ftp", module.ProbeCorrectness.CORRECT, "readwrite"),
+        ("http", module.ProbeCorrectness.CORRECT, "readwrite"),
+        ("ping", module.ProbeCorrectness.CORRECT, "smoke"),
         ("telnet", module.ProbeCorrectness.CORRECT, "readwrite"),
     ]
+    assert [protocol for protocol, _mode, _surface in calls] != ["ping", "http", "ftp", "telnet"]
 
 
 def test_run_runner_iteration_concurrent_allows_overlap():
@@ -259,11 +357,44 @@ def test_run_runner_iteration_concurrent_allows_overlap():
     assert max_active == 2
 
 
+def test_run_runner_iteration_concurrent_reports_in_default_protocol_order():
+    module = load_module()
+    settings = make_settings(module)
+    config = make_config(module, probes=("ping", "http", "ftp", "telnet"), schedule="concurrent")
+    state = module.ExecutionState(settings=settings, include_runner_context=False, random_seed=11)
+    emitted = []
+
+    state.emit_probe_outcome = lambda protocol, outcome, *, iteration, runner_id: emitted.append(protocol)
+
+    def make_runner(name):
+        def runner(current_settings, mode, *, context=None):
+            del current_settings, mode, context
+            return module.ProbeOutcome("OK", name, 1.0)
+
+        return runner
+
+    sequence = [protocol for _index, protocol in state.probe_iteration_sequence(config.probes, 1, 1)]
+
+    results = module.run_runner_iteration(
+        1,
+        1,
+        config,
+        settings,
+        state,
+        sleep_fn=lambda value: None,
+        probe_runners={protocol: make_runner(protocol) for protocol in ("ping", "http", "ftp", "telnet")},
+    )
+
+    assert sequence != ["ping", "http", "ftp", "telnet"]
+    assert emitted == ["ping", "http", "ftp", "telnet"]
+    assert [protocol for protocol, _outcome in results] == ["ping", "http", "ftp", "telnet"]
+
+
 def test_run_runner_iteration_converts_unexpected_exceptions_to_failures():
     module = load_module()
     settings = make_settings(module)
     config = make_config(module, probes=("ping", "http"), schedule="concurrent")
-    state = module.ExecutionState(settings=settings, include_runner_context=False)
+    state = module.ExecutionState(settings=settings, include_runner_context=False, random_seed=5)
 
     results = module.run_runner_iteration(
         1,
@@ -280,9 +411,10 @@ def test_run_runner_iteration_converts_unexpected_exceptions_to_failures():
         },
     )
 
-    assert [protocol for protocol, _ in results] == ["ping", "http"]
-    assert results[0][1].result == "FAIL"
-    assert results[0][1].detail == "ping failed: boom"
+    result_by_protocol = {protocol: outcome for protocol, outcome in results}
+    assert set(result_by_protocol) == {"ping", "http"}
+    assert result_by_protocol["ping"].result == "FAIL"
+    assert result_by_protocol["ping"].detail == "ping failed: boom"
 
 
 def test_multiple_runners_preserve_all_latency_samples():
