@@ -325,6 +325,42 @@ def test_ftp_partial_stor_temp_reuses_bounded_temp_path(monkeypatch):
     ]
 
 
+def test_ftp_readwrite_surface_uploads_and_downloads_tiny_and_large_files(monkeypatch):
+    runtime = load_runtime()
+    module = load_ftp()
+    settings = make_settings(runtime)
+    stored_payloads: dict[str, bytes] = {}
+
+    class FakeFTP:
+        def storbinary(self, command, payload):
+            path = command.removeprefix("STOR ")
+            stored_payloads[path] = payload.read()
+
+        def retrbinary(self, command, callback):
+            path = command.removeprefix("RETR ")
+            callback(stored_payloads[path])
+
+        def nlst(self, path):
+            assert path == module.FTP_TEMP_DIR
+            return list(stored_payloads)
+
+    monkeypatch.setattr(module, "track_self_file", lambda current_settings, path: None)
+
+    ftp = FakeFTP()
+    operations = dict(module.surface_operations(runtime.ProbeSurface.READWRITE))
+
+    tiny_upload = operations["ftp_upload_tiny_self_file"](settings, ftp)
+    tiny_download = operations["ftp_download_tiny_self_file"](settings, ftp)
+    large_upload = operations["ftp_upload_large_self_file"](settings, ftp)
+    large_download = operations["ftp_download_large_self_file"](settings, ftp)
+
+    assert tiny_upload.endswith("bytes=1")
+    assert tiny_download.endswith("bytes=1")
+    assert large_upload.endswith(f"bytes={module.FTP_LARGE_FILE_SIZE_BYTES}")
+    assert large_download.endswith(f"bytes={module.FTP_LARGE_FILE_SIZE_BYTES}")
+    assert sorted(len(payload) for payload in stored_payloads.values()) == [1, module.FTP_LARGE_FILE_SIZE_BYTES]
+
+
 def test_ftp_prime_temp_dir_deletes_stale_self_files_before_seeding(monkeypatch):
     runtime = load_runtime()
     module = load_ftp()

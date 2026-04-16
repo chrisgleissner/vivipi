@@ -30,11 +30,11 @@ def make_settings(runtime):
 def test_execution_state_phase_shifts_operation_selection_per_runner():
     runtime = load_runtime()
     module = load_connection_test()
-    state = module.ExecutionState(settings=make_settings(runtime), include_runner_context=False, runner_count=3)
+    state = module.ExecutionState(settings=make_settings(runtime), include_runner_context=False, runner_count=3, random_seed=13)
 
     indices = [state.next_probe_operation_index("ftp", runner_id, runtime.ProbeSurface.READWRITE, 6) for runner_id in (1, 2, 3)]
 
-    assert indices == [0, 1, 2]
+    assert len(set(indices)) == 3
 
 
 def test_http_multi_runner_readwrite_uses_runner_local_memory_slots_and_skips_audio_mixer_writes():
@@ -107,9 +107,16 @@ def test_ftp_multi_runner_readwrite_uses_runner_specific_self_file_prefixes(monk
 
     monkeypatch.setattr(module, "track_self_file", lambda current_settings, path: None)
 
-    for name, operation in (runner_1_operations[-4], runner_2_operations[-4]):
-        assert name == "ftp_create_self_file"
+    for name, operation in (
+        next(item for item in runner_1_operations if item[0] == "ftp_upload_tiny_self_file"),
+        next(item for item in runner_1_operations if item[0] == "ftp_upload_large_self_file"),
+        next(item for item in runner_2_operations if item[0] == "ftp_upload_tiny_self_file"),
+        next(item for item in runner_2_operations if item[0] == "ftp_upload_large_self_file"),
+    ):
+        assert name in {"ftp_upload_tiny_self_file", "ftp_upload_large_self_file"}
         operation(settings, fake_ftp)
 
     assert captured_paths[0].startswith(f"{module.FTP_TEMP_DIR}/{module.FTP_SELF_FILE_PREFIX}r1_")
-    assert captured_paths[1].startswith(f"{module.FTP_TEMP_DIR}/{module.FTP_SELF_FILE_PREFIX}r2_")
+    assert captured_paths[1].startswith(f"{module.FTP_TEMP_DIR}/{module.FTP_SELF_FILE_PREFIX}r1_")
+    assert captured_paths[2].startswith(f"{module.FTP_TEMP_DIR}/{module.FTP_SELF_FILE_PREFIX}r2_")
+    assert captured_paths[3].startswith(f"{module.FTP_TEMP_DIR}/{module.FTP_SELF_FILE_PREFIX}r2_")

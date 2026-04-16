@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import math
 import os
+import random
 import sys
 import threading
 import time
@@ -53,6 +55,7 @@ SCHEDULE_SEQUENTIAL = "sequential"
 SCHEDULE_CONCURRENT = "concurrent"
 CONNECTION_STREAM_CHOICES = (u64_stream.StreamKind.AUDIO, u64_stream.StreamKind.VIDEO)
 DEFAULT_CONNECTION_STREAMS = tuple(kind.value for kind in CONNECTION_STREAM_CHOICES)
+PROBE_RANDOM_SEED_ENV = "VIVIPI_CONNECTION_TEST_RANDOM_SEED"
 
 PROBE_SURFACE_CHOICES = {
     "ping": (ProbeSurface.SMOKE,),
@@ -93,6 +96,13 @@ PROBE_RUNNERS = {
 }
 
 
+def default_probe_random_seed() -> int:
+    raw_value = os.getenv(PROBE_RANDOM_SEED_ENV, "").strip()
+    if raw_value:
+        return int(raw_value, 0)
+    return int.from_bytes(os.urandom(8), "big")
+
+
 @dataclass(frozen=True)
 class ExecutionConfig:
     profile: str | None
@@ -112,12 +122,32 @@ class ExecutionState:
     settings: RuntimeSettings
     include_runner_context: bool
     runner_count: int = 1
+    random_seed: int = field(default_factory=default_probe_random_seed)
     latency_samples: dict[str, list[float]] = field(default_factory=lambda: {protocol: [] for protocol in DEFAULT_PROBES})
     sample_lock: threading.Lock = field(default_factory=threading.Lock)
     output_lock: threading.Lock = field(default_factory=threading.Lock)
     probe_selection_lock: threading.Lock = field(default_factory=threading.Lock)
     probe_operation_counts: dict[tuple[int, str, str], int] = field(default_factory=dict)
     stream_monitor: u64_stream.StreamMonitor | None = None
+
+    def _derived_seed(self, *parts: object) -> int:
+        digest = hashlib.blake2b(digest_size=16)
+        digest.update(str(self.random_seed).encode("utf-8"))
+        for part in parts:
+            digest.update(b"\0")
+            digest.update(str(part).encode("utf-8"))
+        return int.from_bytes(digest.digest(), "big")
+
+    def probe_iteration_sequence(self, probes: tuple[str, ...], runner_id: int, iteration: int) -> tuple[tuple[int, str], ...]:
+        indexed_probes = list(enumerate(probes))
+        if len(indexed_probes) < 2:
+            return tuple(indexed_probes)
+        order = list(range(len(indexed_probes)))
+        random.Random(self._derived_seed("probe-sequence", iteration, len(indexed_probes), ",".join(probes))).shuffle(order)
+        if self.runner_count > 1:
+            offset = (runner_id - 1) % len(order)
+            order = order[offset:] + order[:offset]
+        return tuple(indexed_probes[position] for position in order)
 
     def record_latency(self, protocol: str, elapsed_ms: float) -> None:
         with self.sample_lock:
@@ -139,9 +169,13 @@ class ExecutionState:
         with self.probe_selection_lock:
             counter = self.probe_operation_counts.get(key, 0)
             self.probe_operation_counts[key] = counter + 1
+        cycle = counter // pool_size
+        position = counter % pool_size
+        permutation = list(range(pool_size))
+        random.Random(self._derived_seed("probe-operation", protocol, surface.value, pool_size, cycle)).shuffle(permutation)
         if self.runner_count > 1:
-            return (counter + runner_id - 1) % pool_size
-        return counter % pool_size
+            position = (position + runner_id - 1) % pool_size
+        return permutation[position]
 
     def emit_log(self, protocol: str, result: str, detail: str, *, iteration: int, runner_id: int) -> None:
         if result != "FAIL" and not self.settings.verbose and self.settings.log_every > 1 and iteration % self.settings.log_every != 0:
@@ -543,13 +577,14 @@ def run_runner_iteration(
     sleep_fn=sleep_ms,
     probe_runners: dict[str, Callable] | None = None,
 ) -> tuple[tuple[str, ProbeOutcome], ...]:
+    sequence = state.probe_iteration_sequence(config.probes, runner_id, iteration)
     if config.schedule == SCHEDULE_SEQUENTIAL:
         results: list[tuple[str, ProbeOutcome]] = []
-        for index, protocol in enumerate(config.probes):
+        for index, (_original_index, protocol) in enumerate(sequence):
             outcome = execute_probe_safely(protocol, settings, config, probe_runners, state=state, runner_id=runner_id, iteration=iteration)
             results.append((protocol, outcome))
             state.emit_probe_outcome(protocol, outcome, iteration=iteration, runner_id=runner_id)
-            if index < len(config.probes) - 1:
+            if index < len(sequence) - 1:
                 sleep_fn(settings.delay_ms)
         return tuple(results)
 
@@ -562,13 +597,13 @@ def run_runner_iteration(
             execute_probe_safely(protocol, settings, config, probe_runners, state=state, runner_id=runner_id, iteration=iteration),
         )
 
-    for index, protocol in enumerate(config.probes):
+    for index, protocol in sequence:
         thread = threading.Thread(target=worker, args=(index, protocol), daemon=False)
         thread.start()
         threads.append(thread)
     for thread in threads:
         thread.join()
-    results = tuple(item for item in ordered_results if item is not None)
+    results = tuple(ordered_results[index] for index, _protocol in sequence if ordered_results[index] is not None)
     for protocol, outcome in results:
         state.emit_probe_outcome(protocol, outcome, iteration=iteration, runner_id=runner_id)
     return results

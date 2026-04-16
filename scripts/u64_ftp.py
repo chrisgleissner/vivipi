@@ -23,6 +23,8 @@ from u64_connection_runtime import (
 
 FTP_TEMP_DIR = "/Temp"
 FTP_SELF_FILE_PREFIX = "u64test_"
+FTP_TINY_FILE_SIZE_BYTES = 1
+FTP_LARGE_FILE_SIZE_BYTES = 256 * 1024
 
 _FTP_TRACKING_LOCK = threading.Lock()
 _FTP_TRACKED_FILES: set[str] = set()
@@ -62,16 +64,39 @@ def known_self_files(file_prefix: str = FTP_SELF_FILE_PREFIX) -> tuple[str, ...]
         return tuple(sorted(path for path in _FTP_TRACKED_FILES if path.rsplit("/", 1)[-1].startswith(file_prefix)))
 
 
-def next_self_file_path(file_prefix: str = FTP_SELF_FILE_PREFIX) -> str:
+def next_self_file_path(file_prefix: str = FTP_SELF_FILE_PREFIX, *, tag: str = "data") -> str:
     global _FTP_SELF_FILE_COUNTER
     with _FTP_TRACKING_LOCK:
         _FTP_SELF_FILE_COUNTER += 1
         counter = _FTP_SELF_FILE_COUNTER
-    return f"{FTP_TEMP_DIR}/{file_prefix}{os.getpid()}_{counter}.txt"
+    return f"{FTP_TEMP_DIR}/{file_prefix}{tag}_{os.getpid()}_{counter}.bin"
 
 
 def partial_self_file_path(file_prefix: str = FTP_SELF_FILE_PREFIX) -> str:
     return f"{FTP_TEMP_DIR}/{file_prefix}{os.getpid()}_partial.txt"
+
+
+def self_file_payload(size_bytes: int) -> bytes:
+    if size_bytes < 1:
+        raise ValueError("size_bytes must be >= 1")
+    pattern = b"vivipi-ftp-payload"
+    repeats, remainder = divmod(size_bytes, len(pattern))
+    return pattern * repeats + pattern[:remainder]
+
+
+def self_file_size_tag(size_bytes: int) -> str:
+    if size_bytes == FTP_TINY_FILE_SIZE_BYTES:
+        label = "tiny"
+    elif size_bytes == FTP_LARGE_FILE_SIZE_BYTES:
+        label = "large"
+    else:
+        label = f"{size_bytes}b"
+    return f"{label}_{size_bytes}b"
+
+
+def path_matches_self_file_size(path: str, size_bytes: int) -> bool:
+    basename = path.rsplit("/", 1)[-1]
+    return f"{self_file_size_tag(size_bytes)}_" in basename
 
 
 def cleanup_self_files() -> None:
@@ -184,7 +209,7 @@ def list_lines(ftp: ftplib.FTP, path: str) -> int:
 
 
 def seed_self_file(settings: RuntimeSettings, ftp: ftplib.FTP, ordinal: int, *, file_prefix: str = FTP_SELF_FILE_PREFIX) -> str:
-    path = next_self_file_path(file_prefix=file_prefix)
+    path = next_self_file_path(file_prefix=file_prefix, tag=f"seed_{ordinal}")
     payload_bytes = f"{file_prefix}{os.getpid()}_{ordinal}\n".encode("utf-8")
     ftp.storbinary(f"STOR {path}", io.BytesIO(payload_bytes))
     track_self_file(settings, path)
@@ -236,20 +261,46 @@ def list_temp_entries(settings: RuntimeSettings, ftp: ftplib.FTP) -> str:
 
 
 def read_small_self_file(settings: RuntimeSettings, ftp: ftplib.FTP, index: int, *, file_prefix: str = FTP_SELF_FILE_PREFIX) -> str:
-    readable = ensure_small_self_files(settings, ftp, minimum_count=index + 1, file_prefix=file_prefix)
-    path = readable[index]
-    byte_count = retr_binary(ftp, path)
-    if byte_count < 1:
-        raise RuntimeError(f"empty FTP self file: {path}")
-    return f"path={path} bytes={byte_count}"
+    del index
+    return download_self_file(settings, ftp, FTP_TINY_FILE_SIZE_BYTES, file_prefix=file_prefix)
 
 
 def create_self_file(settings: RuntimeSettings, ftp: ftplib.FTP, *, file_prefix: str = FTP_SELF_FILE_PREFIX) -> str:
-    path = next_self_file_path(file_prefix=file_prefix)
-    payload = io.BytesIO(f"{file_prefix}{os.getpid()}\n".encode("utf-8"))
-    ftp.storbinary(f"STOR {path}", payload)
+    return upload_self_file(settings, ftp, FTP_TINY_FILE_SIZE_BYTES, file_prefix=file_prefix)
+
+
+def store_self_file(settings: RuntimeSettings, ftp: ftplib.FTP, size_bytes: int, *, file_prefix: str = FTP_SELF_FILE_PREFIX) -> tuple[str, int]:
+    path = next_self_file_path(file_prefix=file_prefix, tag=self_file_size_tag(size_bytes))
+    payload_bytes = self_file_payload(size_bytes)
+    ftp.storbinary(f"STOR {path}", io.BytesIO(payload_bytes))
     track_self_file(settings, path)
-    return f"path={path} bytes={payload.getbuffer().nbytes}"
+    return path, len(payload_bytes)
+
+
+def ensure_self_file(settings: RuntimeSettings, ftp: ftplib.FTP, size_bytes: int, *, file_prefix: str = FTP_SELF_FILE_PREFIX) -> str:
+    readable = readable_self_files(collect_temp_entries_if_available(ftp), file_prefix=file_prefix)
+    for path in readable:
+        if path_matches_self_file_size(path, size_bytes):
+            track_self_file(settings, path)
+            return path
+    for path in known_self_files(file_prefix=file_prefix):
+        if path_matches_self_file_size(path, size_bytes):
+            return path
+    path, _byte_count = store_self_file(settings, ftp, size_bytes, file_prefix=file_prefix)
+    return path
+
+
+def upload_self_file(settings: RuntimeSettings, ftp: ftplib.FTP, size_bytes: int, *, file_prefix: str = FTP_SELF_FILE_PREFIX) -> str:
+    path, byte_count = store_self_file(settings, ftp, size_bytes, file_prefix=file_prefix)
+    return f"path={path} bytes={byte_count}"
+
+
+def download_self_file(settings: RuntimeSettings, ftp: ftplib.FTP, size_bytes: int, *, file_prefix: str = FTP_SELF_FILE_PREFIX) -> str:
+    path = ensure_self_file(settings, ftp, size_bytes, file_prefix=file_prefix)
+    byte_count = retr_binary(ftp, path)
+    if byte_count != size_bytes:
+        raise RuntimeError(f"size mismatch for {path}: expected={size_bytes} got={byte_count}")
+    return f"path={path} bytes={byte_count}"
 
 
 def rename_self_file(settings: RuntimeSettings, ftp: ftplib.FTP, *, file_prefix: str = FTP_SELF_FILE_PREFIX) -> str:
@@ -410,8 +461,10 @@ def surface_operations(
     if surface == ProbeSurface.READ:
         return read_operations
     return read_operations + (
-        ("ftp_create_self_file", lambda settings, ftp: create_self_file(settings, ftp, file_prefix=file_prefix)),
-        ("ftp_read_self_file", lambda settings, ftp: read_small_self_file(settings, ftp, 0, file_prefix=file_prefix)),
+        ("ftp_upload_tiny_self_file", lambda settings, ftp: upload_self_file(settings, ftp, FTP_TINY_FILE_SIZE_BYTES, file_prefix=file_prefix)),
+        ("ftp_download_tiny_self_file", lambda settings, ftp: download_self_file(settings, ftp, FTP_TINY_FILE_SIZE_BYTES, file_prefix=file_prefix)),
+        ("ftp_upload_large_self_file", lambda settings, ftp: upload_self_file(settings, ftp, FTP_LARGE_FILE_SIZE_BYTES, file_prefix=file_prefix)),
+        ("ftp_download_large_self_file", lambda settings, ftp: download_self_file(settings, ftp, FTP_LARGE_FILE_SIZE_BYTES, file_prefix=file_prefix)),
         ("ftp_rename_self_file", lambda settings, ftp: rename_self_file(settings, ftp, file_prefix=file_prefix)),
         ("ftp_delete_self_file", lambda settings, ftp: delete_self_file(settings, ftp, file_prefix=file_prefix)),
     )
