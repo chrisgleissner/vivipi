@@ -28,7 +28,7 @@ def make_config(module, *, probes=("ping", "http"), schedule="sequential", runne
         schedule=schedule,
         runners=runners,
         duration_s=None,
-        probe_correctness={protocol: module.ProbeCorrectness.CORRECT for protocol in module.DEFAULT_PROBES},
+        probe_correctness={protocol: module.ProbeCorrectness.COMPLETE for protocol in module.DEFAULT_PROBES},
         uses_extended_flags=True,
         overrides=(),
         probe_surfaces={
@@ -78,8 +78,8 @@ def test_stress_profile_resolves_deterministically():
     assert resolved.runners == 5
     assert resolved.duration_s == 120
     assert resolved.probe_correctness == {
-        "ping": module.ProbeCorrectness.CORRECT,
-        "http": module.ProbeCorrectness.CORRECT,
+        "ping": module.ProbeCorrectness.COMPLETE,
+        "http": module.ProbeCorrectness.COMPLETE,
         "ftp": module.ProbeCorrectness.INCOMPLETE,
         "telnet": module.ProbeCorrectness.INCOMPLETE,
     }
@@ -105,10 +105,24 @@ def test_global_surface_and_mode_apply_with_fallbacks():
         "telnet": module.ProbeSurface.READWRITE,
     }
     assert resolved.probe_correctness == {
-        "ping": module.ProbeCorrectness.CORRECT,
-        "http": module.ProbeCorrectness.CORRECT,
+        "ping": module.ProbeCorrectness.COMPLETE,
+        "http": module.ProbeCorrectness.COMPLETE,
         "ftp": module.ProbeCorrectness.INVALID,
         "telnet": module.ProbeCorrectness.INCOMPLETE,
+    }
+
+
+def test_global_open_mode_applies_with_fallbacks():
+    module = load_module()
+    parser = module.build_parser()
+
+    resolved = module.resolve_execution_config(parser.parse_args(["--mode", "open"]))
+
+    assert resolved.probe_correctness == {
+        "ping": module.ProbeCorrectness.COMPLETE,
+        "http": module.ProbeCorrectness.COMPLETE,
+        "ftp": module.ProbeCorrectness.OPEN,
+        "telnet": module.ProbeCorrectness.OPEN,
     }
 
 
@@ -163,7 +177,7 @@ def test_validate_execution_config_rejects_concurrent_http_readwrite_runner_over
         schedule=module.SCHEDULE_CONCURRENT,
         runners=module.u64_http.SCREEN_RAM_RUNNER_SLOT_COUNT + 1,
         duration_s=60,
-        probe_correctness={protocol: module.ProbeCorrectness.CORRECT for protocol in module.DEFAULT_PROBES},
+        probe_correctness={protocol: module.ProbeCorrectness.COMPLETE for protocol in module.DEFAULT_PROBES},
         uses_extended_flags=True,
         overrides=(),
         probe_surfaces={
@@ -188,7 +202,7 @@ def test_validate_execution_config_allows_large_runner_count_without_http_readwr
         schedule=module.SCHEDULE_CONCURRENT,
         runners=module.u64_http.SCREEN_RAM_RUNNER_SLOT_COUNT + 1,
         duration_s=60,
-        probe_correctness={protocol: module.ProbeCorrectness.CORRECT for protocol in module.DEFAULT_PROBES},
+        probe_correctness={protocol: module.ProbeCorrectness.COMPLETE for protocol in module.DEFAULT_PROBES},
         uses_extended_flags=True,
         overrides=(),
         probe_surfaces={
@@ -209,6 +223,7 @@ def test_help_output_mentions_restored_default_shape():
     help_text = module.build_parser().format_help()
 
     assert "Default: 12h soak with concurrent readwrite probes and audio+video streams." in help_text
+    assert "Correctness degradation: complete (finish and close cleanly), open (finish and skip orderly teardown), incomplete (abort before completion), invalid (send malformed or unsupported input)." in help_text
     assert "./u64_connection_test.py --profile stress --runners 4" in help_text
     assert "./u64_connection_test.py --profile soak --probes ping,http" in help_text
 
@@ -306,10 +321,10 @@ def test_run_runner_iteration_sequential_uses_randomized_probe_order():
     module.run_runner_iteration(1, 1, config, settings, state, sleep_fn=lambda value: None, probe_runners=probe_runners)
 
     assert sorted(calls) == [
-        ("ftp", module.ProbeCorrectness.CORRECT, "readwrite"),
-        ("http", module.ProbeCorrectness.CORRECT, "readwrite"),
-        ("ping", module.ProbeCorrectness.CORRECT, "smoke"),
-        ("telnet", module.ProbeCorrectness.CORRECT, "readwrite"),
+        ("ftp", module.ProbeCorrectness.COMPLETE, "readwrite"),
+        ("http", module.ProbeCorrectness.COMPLETE, "readwrite"),
+        ("ping", module.ProbeCorrectness.COMPLETE, "smoke"),
+        ("telnet", module.ProbeCorrectness.COMPLETE, "readwrite"),
     ]
     assert [protocol for protocol, _mode, _surface in calls] != ["ping", "http", "ftp", "telnet"]
 
@@ -472,7 +487,7 @@ def test_run_extended_primes_temp_dir_for_ftp_read_surface(monkeypatch):
         schedule="sequential",
         runners=1,
         duration_s=1,
-        probe_correctness={protocol: module.ProbeCorrectness.CORRECT for protocol in module.DEFAULT_PROBES},
+        probe_correctness={protocol: module.ProbeCorrectness.COMPLETE for protocol in module.DEFAULT_PROBES},
         uses_extended_flags=True,
         overrides=(),
         probe_surfaces={"ftp": module.ProbeSurface.READ},
@@ -495,7 +510,7 @@ def test_run_extended_returns_failure_when_stream_monitor_reports_failure(monkey
         schedule="sequential",
         runners=1,
         duration_s=1,
-        probe_correctness={protocol: module.ProbeCorrectness.CORRECT for protocol in module.DEFAULT_PROBES},
+        probe_correctness={protocol: module.ProbeCorrectness.COMPLETE for protocol in module.DEFAULT_PROBES},
         uses_extended_flags=True,
         overrides=("stream",),
         probe_surfaces={"ping": module.ProbeSurface.SMOKE},
@@ -541,5 +556,7 @@ def test_run_extended_returns_failure_when_stream_monitor_reports_failure(monkey
 def test_historical_correctness_mapping_is_pinned_to_git_evidence():
     module = load_module()
 
+    assert module.HISTORICAL_CORRECTNESS_EVIDENCE["ftp"]["open"]["commit"] == "f0ef5db"
     assert module.HISTORICAL_CORRECTNESS_EVIDENCE["ftp"]["incomplete"]["commit"] == "37314b1"
+    assert module.HISTORICAL_CORRECTNESS_EVIDENCE["telnet"]["open"]["commit"] == "f0ef5db"
     assert module.HISTORICAL_CORRECTNESS_EVIDENCE["telnet"]["incomplete"]["commit"] == "37314b1"

@@ -335,8 +335,20 @@ def close_without_quit(ftp: ftplib.FTP | None) -> None:
         return
     try:
         ftp.close()
-    except OSError:
+    except (OSError, AttributeError):
         pass
+
+
+def run_open_surface_probe(
+    settings: RuntimeSettings,
+    operation: Callable[[RuntimeSettings, ftplib.FTP], str],
+) -> str:
+    ftp = None
+    try:
+        ftp = connect(settings)
+        return operation(settings, ftp)
+    finally:
+        close_without_quit(ftp)
 
 
 def collect_temp_entries(ftp: ftplib.FTP) -> tuple[str, ...]:
@@ -732,18 +744,6 @@ def surface_operations(
     )
 
 
-def run_incomplete_surface_probe(
-    settings: RuntimeSettings,
-    operation: Callable[[RuntimeSettings, ftplib.FTP], str],
-) -> str:
-    ftp = None
-    try:
-        ftp = connect(settings)
-        return operation(settings, ftp)
-    finally:
-        close_without_quit(ftp)
-
-
 def run_probe(
     settings: RuntimeSettings,
     correctness: ProbeCorrectness,
@@ -754,6 +754,22 @@ def run_probe(
         if correctness == ProbeCorrectness.INVALID:
             return run_probe_invalid(settings)
         surface = context.surface
+        if correctness == ProbeCorrectness.OPEN:
+            operations = surface_operations(
+                surface,
+                runner_id=context.runner_id,
+                concurrent_multi_runner=_has_multiple_runners(context),
+                shared_state=context.state,
+            )
+            index = select_operation_index(context, len(operations))
+            op_name, operation = operations[index]
+            return run_incomplete_surface_operation(
+                "ftp",
+                surface,
+                op_name,
+                lambda current_settings: run_open_surface_probe(current_settings, operation),
+                settings,
+            )
         if correctness == ProbeCorrectness.INCOMPLETE:
             operations = incomplete_operations(
                 surface,
@@ -788,6 +804,8 @@ def run_probe(
             elapsed_ms = (time.perf_counter_ns() - started_at) / 1_000_000.0
             return ProbeOutcome("FAIL", surface_detail(surface, op_name, str(error)), elapsed_ms)
 
+    if correctness == ProbeCorrectness.OPEN:
+        return run_probe_open(settings)
     if correctness == ProbeCorrectness.INCOMPLETE:
         return run_probe_incomplete(settings)
     if correctness == ProbeCorrectness.INVALID:
@@ -845,6 +863,29 @@ def run_probe_incomplete(settings: RuntimeSettings) -> ProbeOutcome:
             ftp.close()
         except OSError:
             pass
+
+
+def run_probe_open(settings: RuntimeSettings) -> ProbeOutcome:
+    ftp = ftplib.FTP()
+    started_at = time.perf_counter_ns()
+    try:
+        greeting = ftp.connect(settings.host, settings.ftp_port, timeout=8)
+        if not greeting.startswith("220"):
+            raise RuntimeError(f"expected FTP 220, got {greeting}")
+        login = ftp.login(settings.ftp_user, settings.ftp_pass)
+        if not login.startswith("230"):
+            raise RuntimeError(f"expected FTP 230, got {login}")
+        ftp.set_pasv(True)
+        names = ftp.nlst(".")
+        if not names:
+            raise RuntimeError("empty FTP NLST data")
+        elapsed_ms = (time.perf_counter_ns() - started_at) / 1_000_000.0
+        return ProbeOutcome("OK", f"NLST bytes={sum(len(name) for name in names)}", elapsed_ms)
+    except Exception as error:
+        elapsed_ms = (time.perf_counter_ns() - started_at) / 1_000_000.0
+        return ProbeOutcome("FAIL", f"ftp failed: {error}", elapsed_ms)
+    finally:
+        close_without_quit(ftp)
 
 
 def run_probe_invalid(settings: RuntimeSettings) -> ProbeOutcome:

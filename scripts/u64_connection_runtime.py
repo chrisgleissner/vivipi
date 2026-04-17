@@ -10,7 +10,8 @@ from typing import Any, Callable
 
 
 class ProbeCorrectness(enum.StrEnum):
-    CORRECT = "correct"
+    COMPLETE = "complete"
+    OPEN = "open"
     INCOMPLETE = "incomplete"
     INVALID = "invalid"
 
