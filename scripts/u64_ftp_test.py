@@ -29,8 +29,8 @@ DEFAULT_FTP_PASS = ""
 DEFAULT_PASSIVE = True
 DEFAULT_TIMEOUT_S = 10
 DEFAULT_REMOTE_DIR = "/USB2/test/FTP"
-DEFAULT_SIZES = "20K,200K"
-DEFAULT_TARGET_BYTES = "600K"
+DEFAULT_SIZES = "20K,200K,1M"
+DEFAULT_TARGET_BYTES = "1M"
 DEFAULT_CONCURRENCY = 3
 DEFAULT_MODE = "both"
 DEFAULT_VERIFY = True
@@ -985,11 +985,21 @@ def build_stage_record(stage: StageResult) -> dict:
     }
 
 
-def _is_interactive_stdout() -> bool:
+def _is_interactive_stream(stream: object | None) -> bool:
     try:
-        return bool(sys.stdout.isatty())
+        return bool(stream is not None and stream.isatty())
     except (AttributeError, ValueError):
         return False
+
+
+def _select_progress_stream():
+    stderr = getattr(sys, "stderr", None)
+    if _is_interactive_stream(stderr):
+        return stderr
+    stdout = getattr(sys, "stdout", None)
+    if _is_interactive_stream(stdout):
+        return stdout
+    return None
 
 
 def run_ops_stage(args: argparse.Namespace, emitter: Emitter, filenames: list[str]) -> OpsResult:
@@ -1227,8 +1237,8 @@ def run_ops_stage(args: argparse.Namespace, emitter: Emitter, filenames: list[st
 
 
 def run(args: argparse.Namespace) -> int:
-    progress_enabled = args.format == "text" and _is_interactive_stdout()
-    progress = ProgressBar(enabled=progress_enabled)
+    progress_stream = _select_progress_stream() if args.format == "text" else None
+    progress = ProgressBar(enabled=progress_stream is not None, stream=progress_stream)
     emitter = Emitter(json_mode=(args.format == "json"), progress=progress)
     config_dict = emit_config(args, emitter)
 

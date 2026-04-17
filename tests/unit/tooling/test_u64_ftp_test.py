@@ -673,25 +673,29 @@ def test_progress_bar_disabled_when_stdout_is_not_tty():
 
     # run_main redirects stdout to a StringIO which is not a TTY, so the
     # progress bar must be fully suppressed and output must stay line-oriented.
-    exit_code, output = run_main(
-        module,
-        [
-            "-H",
-            "fake",
-            "--sizes",
-            "1K",
-            "--target-bytes",
-            "2K",
-            "--concurrency",
-            "1",
-            "--mode",
-            "single",
-        ],
-    )
+    stderr = io.StringIO()
+    with contextlib.redirect_stderr(stderr):
+        exit_code, output = run_main(
+            module,
+            [
+                "-H",
+                "fake",
+                "--sizes",
+                "1K",
+                "--target-bytes",
+                "2K",
+                "--concurrency",
+                "1",
+                "--mode",
+                "single",
+            ],
+        )
 
     assert exit_code == 0
     assert "\r" not in output
     assert "\x1b[" not in output
+    assert "\r" not in stderr.getvalue()
+    assert "\x1b[" not in stderr.getvalue()
 
 
 def test_progress_bar_renders_single_line_when_tty_enabled():
@@ -705,7 +709,7 @@ def test_progress_bar_renders_single_line_when_tty_enabled():
             return True
 
     fake_stdout = FakeTTY()
-    with contextlib.redirect_stdout(fake_stdout):
+    with contextlib.redirect_stdout(fake_stdout), contextlib.redirect_stderr(io.StringIO()):
         exit_code = module.main(
             [
                 "-H",
@@ -733,6 +737,42 @@ def test_progress_bar_renders_single_line_when_tty_enabled():
     assert "protocol=stage result=START" in output
     assert "protocol=stage result=END" in output
     assert "protocol=summary result=OK" in output
+
+
+def test_progress_bar_prefers_tty_stderr_when_stdout_is_not_interactive():
+    module = load_module()
+    state = install_fake_ftp(module)
+    state.ensure_dir("/USB2/test")
+    state.ensure_dir("/USB2/test/FTP")
+
+    class FakeTTY(io.StringIO):
+        def isatty(self):
+            return True
+
+    fake_stdout = io.StringIO()
+    fake_stderr = FakeTTY()
+    with contextlib.redirect_stdout(fake_stdout), contextlib.redirect_stderr(fake_stderr):
+        exit_code = module.main(
+            [
+                "-H",
+                "fake",
+                "--sizes",
+                "1K",
+                "--target-bytes",
+                "4K",
+                "--concurrency",
+                "1",
+                "--mode",
+                "single",
+            ]
+        )
+
+    assert exit_code == 0
+    assert "protocol=config result=INFO" in fake_stdout.getvalue()
+    assert "protocol=summary result=OK" in fake_stdout.getvalue()
+    assert "\r" not in fake_stdout.getvalue()
+    assert "\r" in fake_stderr.getvalue()
+    assert "\x1b[2K" in fake_stderr.getvalue()
 
 
 def test_progress_bar_tick_counts_failures_separately():
@@ -1126,7 +1166,9 @@ def test_worker_loop_abort_paths_and_helper_formatters(monkeypatch):
             raise ValueError("bad stdout")
 
     monkeypatch.setattr(module.sys, "stdout", BadStdout())
-    assert module._is_interactive_stdout() is False
+    monkeypatch.setattr(module.sys, "stderr", io.StringIO())
+    assert module._is_interactive_stream(module.sys.stdout) is False
+    assert module._select_progress_stream() is None
     assert module._format_bytes_short(2 * 1024 * 1024 * 1024) == "2G"
     assert module._format_bytes_short(2 * 1024 * 1024) == "2M"
     assert module._format_bytes_short(1537) == "1537"
