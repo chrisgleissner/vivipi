@@ -312,7 +312,11 @@ def test_telnet_session_write_audio_mixer_item_recovers_from_partial_screen(monk
     read_responses = iter([" 0 dBVol UltiSid 2 0 dB", ""])
     monkeypatch.setattr(module, "session_read", lambda current_session, **kwargs: next(read_responses, ""))
     monkeypatch.setattr(module, "audio_mixer_picker_sequence", lambda settings, current, target: (module.TELNET_KEY_DOWN, 0))
-    monkeypatch.setattr(module.u64_http, "verify_audio_mixer_value", lambda current_settings, target, *, shared_state=None: "0 dB")
+    monkeypatch.setattr(
+        module.u64_http,
+        "verify_audio_mixer_value",
+        lambda current_settings, target, *, shared_state=None: module.u64_http.confirm_audio_mixer_value(shared_state, "0 dB"),
+    )
 
     calls = []
 
@@ -358,7 +362,11 @@ def test_telnet_session_write_audio_mixer_item_preserves_latest_known_state(monk
         return "Vol UltiSid 1 0 dB"
 
     monkeypatch.setattr(module, "session_send", fake_send)
-    monkeypatch.setattr(module.u64_http, "verify_audio_mixer_value", lambda current_settings, target, *, shared_state=None: "0 dB")
+    monkeypatch.setattr(
+        module.u64_http,
+        "verify_audio_mixer_value",
+        lambda current_settings, target, *, shared_state=None: module.u64_http.confirm_audio_mixer_value(shared_state, "0 dB"),
+    )
 
     detail = module.session_write_audio_mixer_item(settings, session, "0 dB", shared_state=state)
 
@@ -401,7 +409,11 @@ def test_telnet_session_write_audio_mixer_item_accepts_authoritative_http_target
         return "Vol UltiSid 1 +1 dB"
 
     monkeypatch.setattr(module, "session_send", fake_send)
-    monkeypatch.setattr(module.u64_http, "verify_audio_mixer_value", lambda current_settings, target, *, shared_state=None: "+1 dB")
+    monkeypatch.setattr(
+        module.u64_http,
+        "verify_audio_mixer_value",
+        lambda current_settings, target, *, shared_state=None: module.u64_http.confirm_audio_mixer_value(shared_state, "+1 dB"),
+    )
 
     detail = module.session_write_audio_mixer_item(settings, session, "+1 dB", shared_state=state)
 
@@ -417,6 +429,37 @@ def test_telnet_session_write_audio_mixer_item_accepts_authoritative_http_target
     assert session.view_state == "unknown"
     assert session.menu_focus == "unknown"
     assert state.get_shared_resource_value(module.u64_http.AUDIO_MIXER_SHARED_STATE_KEY) == "+1 dB"
+
+
+def test_telnet_session_write_audio_mixer_item_does_not_double_confirm_shared_state(monkeypatch):
+    runtime = load_runtime()
+    module = load_telnet()
+    settings = make_settings(runtime)
+    session = module.TelnetRunnerSession(sock=UnusedSocket())
+    state = {}
+    calls = []
+
+    monkeypatch.setattr(module, "session_refresh_audio_mixer", lambda _session: "Vol UltiSid 1\n0 dB")
+    monkeypatch.setattr(module, "session_extract_audio_mixer_value", lambda _session, text: (text, "0 dB"))
+    monkeypatch.setattr(module.u64_http, "remember_audio_mixer_value", lambda shared_state, value: value)
+    monkeypatch.setattr(module.u64_http, "normalize_audio_mixer_value", lambda value: value)
+    monkeypatch.setattr(module, "audio_mixer_picker_sequence", lambda settings, current, target: (module.TELNET_KEY_DOWN, 0))
+    monkeypatch.setattr(module.u64_http, "stage_audio_mixer_value", lambda shared_state, value: calls.append(("stage", value)))
+    monkeypatch.setattr(
+        module.u64_http,
+        "verify_audio_mixer_value",
+        lambda current_settings, target, *, shared_state=None: calls.append(("verify", target)) or target,
+    )
+    monkeypatch.setattr(
+        module.u64_http,
+        "confirm_audio_mixer_value",
+        lambda shared_state, value: calls.append(("confirm", value)) or value,
+    )
+
+    detail = module.session_write_audio_mixer_item(settings, session, "0 dB", shared_state=state)
+
+    assert detail == "from=0 dB to=0 dB picker=down steps=0"
+    assert calls == [("verify", "0 dB")]
 
 
 def test_audio_mixer_picker_sequence_prefers_shorter_direction(monkeypatch):

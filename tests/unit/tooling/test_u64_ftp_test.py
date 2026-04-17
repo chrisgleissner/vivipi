@@ -336,7 +336,7 @@ def test_zero_arg_defaults_match_spec():
     assert args.timeout_s == 10
     assert args.remote_dir == "/USB2/test/FTP"
     assert args.sizes == (("20K", 20480), ("200K", 204800), ("1M", 1048576))
-    assert args.target_bytes == 600 * 1024
+    assert args.target_bytes == 1024 * 1024
     assert args.files_per_stage is None
     assert args.concurrency == 3
     assert args.mode == "both"
@@ -1124,7 +1124,6 @@ def test_worker_loop_abort_paths_and_helper_formatters(monkeypatch):
     fail_fast_context = module.StageContext(
         args=fail_fast_args,
         emitter=emitter,
-        deadline_s=None,
         abort_flag=threading.Event(),
     )
     results = module.worker_loop(1, 3, "1K", 1024, b"x", fail_fast_context)
@@ -1137,7 +1136,6 @@ def test_worker_loop_abort_paths_and_helper_formatters(monkeypatch):
     preaborted_context = module.StageContext(
         args=preaborted_args,
         emitter=emitter,
-        deadline_s=None,
         abort_flag=preaborted,
     )
     results = module.worker_loop(1, 3, "1K", 1024, b"x", preaborted_context)
@@ -1155,7 +1153,6 @@ def test_worker_loop_abort_paths_and_helper_formatters(monkeypatch):
     stopped_context = module.StageContext(
         args=stopped_args,
         emitter=emitter,
-        deadline_s=None,
         abort_flag=threading.Event(),
     )
     stopped_context.abort_flag.set()
@@ -1240,3 +1237,30 @@ def test_run_emits_setup_fail_partial_and_ops_failure(monkeypatch):
     monkeypatch.setattr(module, "ensure_remote_dir", lambda _args: (True, None))
     monkeypatch.setattr(module, "run_stage", lambda *args, **kwargs: success_stage(args[2]))
     assert module.run(partial_args) == 2
+
+
+def test_run_ops_stage_closes_session_when_connect_sequence_fails(monkeypatch):
+    module = load_module()
+    emitter = module.Emitter(json_mode=False)
+    args = module.build_parser().parse_args(["--remote-dir", "/USB2/test/FTP"])
+    closed = []
+
+    class ConnectFailFTP:
+        def connect(self, *_args, **_kwargs):
+            raise OSError("offline")
+
+        def quit(self):
+            closed.append("quit")
+            return "221 bye"
+
+        def close(self):
+            closed.append("close")
+            return None
+
+    monkeypatch.setattr(module.ftplib, "FTP", ConnectFailFTP)
+
+    result = module.run_ops_stage(args, emitter, ["u64ftp_1K_1_1.bin"])
+
+    assert result.success is False
+    assert result.error_detail == "connect_or_login: offline"
+    assert closed == ["quit", "close"]

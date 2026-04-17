@@ -605,7 +605,6 @@ def session_write_audio_mixer_item(settings: RuntimeSettings, session: TelnetRun
             text = session_save_changes_to_flash(session) or text
             u64_http.stage_audio_mixer_value(shared_state, normalized_target)
         normalized_authoritative = u64_http.verify_audio_mixer_value(settings, normalized_target, shared_state=shared_state)
-        normalized_authoritative = u64_http.confirm_audio_mixer_value(shared_state, normalized_authoritative)
         session.last_text = text
         session.view_state = "unknown"
         session.menu_focus = "unknown"

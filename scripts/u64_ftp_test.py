@@ -692,7 +692,6 @@ def run_single_transfer(
 class StageContext:
     args: argparse.Namespace
     emitter: Emitter
-    deadline_s: float | None
     abort_flag: threading.Event
 
 
@@ -824,7 +823,7 @@ def run_stage(
 
     payload = build_payload(size_bytes)
     abort_flag = threading.Event()
-    context = StageContext(args=args, emitter=emitter, deadline_s=deadline_s, abort_flag=abort_flag)
+    context = StageContext(args=args, emitter=emitter, abort_flag=abort_flag)
 
     stage.started_at_s = time.perf_counter()
 
@@ -1033,6 +1032,9 @@ def run_ops_stage(args: argparse.Namespace, emitter: Emitter, filenames: list[st
             [("phase", "connect"), ("error", ops.error_detail.replace(" ", "_")[:200])],
         )
         return ops
+    finally:
+        if ops.error_detail is not None:
+            close_session(ftp)
 
     def time_cmd(
         label: str,
