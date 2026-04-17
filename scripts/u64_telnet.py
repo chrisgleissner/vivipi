@@ -23,10 +23,10 @@ from u64_connection_runtime import (
 )
 
 
-TELNET_IDLE_TIMEOUT_S = 0.20
-TELNET_POST_DATA_IDLE_TIMEOUT_S = 0.03
-TELNET_COMMAND_RESPONSE_TIMEOUT_S = 0.15
-TELNET_MAX_EMPTY_READS = 3
+TELNET_IDLE_TIMEOUT_S = 0.12
+TELNET_POST_DATA_IDLE_TIMEOUT_S = 0.02
+TELNET_COMMAND_RESPONSE_TIMEOUT_S = 0.12
+TELNET_MAX_EMPTY_READS = 1
 IAC = 255
 DONT = 254
 DO = 253
@@ -38,9 +38,11 @@ TELNET_KEY_F2 = b"\x1b[12~"
 TELNET_KEY_DOWN = b"\x1b[B"
 TELNET_KEY_LEFT = b"\x1b[D"
 TELNET_KEY_RIGHT = b"\x1b[C"
+TELNET_KEY_UP = b"\x1b[A"
 TELNET_KEY_ESC = b"\x1b"
 TELNET_KEY_ENTER = b"\r"
 TELNET_FAILURE_MARKERS = (b"incorrect", b"failed", b"denied", b"invalid")
+TELNET_SAVE_FLASH_MARKERS = ("save changes to flash", "yes", "no")
 AUDIO_MIXER_WRITE_VALUE_PATTERN = re.compile(r"Vol UltiSid 1\s+(OFF|[+-]?\d+ dB|\d+ dB)")
 
 
@@ -136,6 +138,19 @@ def contains_any(value: bytes, markers: tuple[bytes, ...]) -> bool:
 
 def normalize_text(text: str) -> str:
     return " ".join(text.split()).strip().lower()
+
+
+def classify_view_state(text: str) -> tuple[str, str]:
+    lowered = text.lower()
+    if "vol ultisid 1" in lowered:
+        return "audio_mixer", "audio_mixer"
+    if "video configuration" in lowered and "audio mixer" in lowered and "speaker settings" not in lowered:
+        return "audio_video_menu", "audio_mixer"
+    if "audio mixer" in lowered and "speaker settings" in lowered:
+        if "video configuration" in lowered:
+            return "menu", "video_configuration"
+        return "menu", "audio_mixer"
+    return "unknown", "unknown"
 
 
 def strip_vt_text(value: bytes) -> str:
@@ -289,13 +304,20 @@ def require_text(text: str, *markers: str) -> str:
 def open_menu(sock) -> str:
     read_until_idle(sock)
     last_text = ""
-    for _ in range(2):
+    for _ in range(3):
         sock.sendall(TELNET_KEY_F2)
-        text = read_until_idle(sock, initial_timeout_s=TELNET_IDLE_TIMEOUT_S)
+        text = read_until_idle(sock, max_empty_reads=2, initial_timeout_s=TELNET_IDLE_TIMEOUT_S)
         last_text = text or last_text
         lowered = text.lower()
         if "audio mixer" in lowered and "speaker settings" in lowered:
             return f"visible_bytes={len(text.encode())}"
+        for _repaint in range(2):
+            sock.sendall(TELNET_KEY_ENTER)
+            text = read_until_idle(sock, max_empty_reads=2, initial_timeout_s=TELNET_IDLE_TIMEOUT_S)
+            last_text = text or last_text
+            lowered = text.lower()
+            if "audio mixer" in lowered and "speaker settings" in lowered:
+                return f"visible_bytes={len(text.encode())}"
     text = require_text(last_text, "Audio Mixer", "Speaker Settings")
     return f"visible_bytes={len(text.encode())}"
 
@@ -319,6 +341,10 @@ def smoke_connect(sock) -> str:
 def session_capture(session: TelnetRunnerSession, text: str, view_state: str | None = None) -> str:
     if text:
         session.last_text = text
+        inferred_view, inferred_focus = classify_view_state(text)
+        if view_state is None and inferred_view != "unknown":
+            session.view_state = inferred_view
+            session.menu_focus = inferred_focus
     if view_state is not None:
         session.view_state = view_state
     return text
@@ -357,6 +383,11 @@ def session_has_menu(session: TelnetRunnerSession) -> bool:
     return "audio mixer" in lowered and "speaker settings" in lowered
 
 
+def session_has_audio_video_menu(session: TelnetRunnerSession) -> bool:
+    lowered = session.last_text.lower()
+    return "video configuration" in lowered and "audio mixer" in lowered and "speaker settings" not in lowered
+
+
 def session_has_audio_mixer(session: TelnetRunnerSession) -> bool:
     return "vol ultisid 1" in session.last_text.lower()
 
@@ -374,21 +405,61 @@ def session_smoke_connect(session: TelnetRunnerSession) -> str:
 def session_open_menu(session: TelnetRunnerSession) -> str:
     if session.view_state == "menu" and session_has_menu(session):
         return f"visible_bytes={len(session.last_text.encode())}"
+    if session.view_state == "audio_video_menu" and session_has_audio_video_menu(session):
+        return f"visible_bytes={len(session.last_text.encode())}"
     if session.view_state == "audio_mixer" and session_has_audio_mixer(session):
         text = session_send(session, TELNET_KEY_LEFT)
-        text = require_text(text, "Audio Mixer", "Speaker Settings")
-        session.last_text = text
-        session.view_state = "menu"
-        session.menu_focus = "audio_mixer"
-        return f"visible_bytes={len(text.encode())}"
+        if text:
+            lowered = text.lower()
+            if "audio mixer" in lowered and "speaker settings" in lowered:
+                session.last_text = text
+                session.view_state = "menu"
+                session.menu_focus = "audio_mixer"
+                return f"visible_bytes={len(text.encode())}"
+        session.view_state = "unknown"
+        session.menu_focus = "unknown"
     session_read(session, max_empty_reads=1, view_state=session.view_state)
     last_text = session.last_text
-    for _ in range(2):
+    for attempt in range(3):
+        if attempt > 0:
+            reset_to_home(session.sock)
+            session.view_state = "unknown"
+            session.menu_focus = "unknown"
+            session.last_text = ""
+            session_read(session, max_empty_reads=1, view_state=session.view_state)
+            last_text = session.last_text or last_text
+        elif not last_text:
+            wake_text = session_send(session, TELNET_KEY_ENTER, initial_timeout_s=TELNET_IDLE_TIMEOUT_S)
+            last_text = wake_text or last_text
         text = session_send(session, TELNET_KEY_F2, initial_timeout_s=TELNET_IDLE_TIMEOUT_S)
         last_text = text or last_text
-        if text and session_has_menu(session):
-            session.view_state = "menu"
-            session.menu_focus = "video_configuration"
+        if text and (session_has_menu(session) or session_has_audio_video_menu(session)):
+            if session_has_menu(session):
+                session.view_state = "menu"
+                session.menu_focus = "video_configuration"
+            else:
+                session.view_state = "audio_video_menu"
+                session.menu_focus = "audio_mixer"
+            return f"visible_bytes={len(text.encode())}"
+        if not text:
+            for _repaint in range(2):
+                text = session_send(session, TELNET_KEY_ENTER, initial_timeout_s=TELNET_IDLE_TIMEOUT_S)
+                last_text = text or last_text
+                if text and (session_has_menu(session) or session_has_audio_video_menu(session)):
+                    break
+        if text and not (session_has_menu(session) or session_has_audio_video_menu(session)):
+            tail = session_read(session, max_empty_reads=2, view_state=session.view_state)
+            if tail:
+                text = f"{text} {tail}" if text else tail
+                session_capture(session, text)
+                last_text = text
+        if text and (session_has_menu(session) or session_has_audio_video_menu(session)):
+            if session_has_menu(session):
+                session.view_state = "menu"
+                session.menu_focus = "video_configuration"
+            else:
+                session.view_state = "audio_video_menu"
+                session.menu_focus = "audio_mixer"
             return f"visible_bytes={len(text.encode())}"
     text = require_text(last_text, "Audio Mixer", "Speaker Settings")
     session.last_text = text
@@ -400,31 +471,39 @@ def session_open_menu(session: TelnetRunnerSession) -> str:
 def session_open_audio_mixer(session: TelnetRunnerSession) -> str:
     if session.view_state == "audio_mixer" and session_has_audio_mixer(session):
         return session.last_text
-    session_open_menu(session)
-    if session.menu_focus == "video_configuration":
-        text = session_send(session, TELNET_KEY_DOWN)
-        require_text(text, "Audio Mixer")
-        session.view_state = "menu"
-        session.menu_focus = "audio_mixer"
-        text = session_send(session, TELNET_KEY_ENTER)
-    elif session.menu_focus == "audio_mixer":
-        text = session_send(session, TELNET_KEY_ENTER)
-    else:
-        text = session_send(session, TELNET_KEY_ENTER)
-        if "vol ultisid 1" not in text.lower():
-            text = session_send(session, TELNET_KEY_LEFT)
-            text = require_text(text, "Audio Mixer", "Speaker Settings")
-            session.view_state = "menu"
-            session.menu_focus = "video_configuration"
-            text = session_send(session, TELNET_KEY_DOWN)
-            require_text(text, "Audio Mixer")
-            session.view_state = "menu"
+    last_error: RuntimeError | None = None
+    for attempt in range(3):
+        if attempt > 0 or session.view_state != "unknown":
+            reset_to_home(session.sock)
+            session.view_state = "unknown"
+            session.menu_focus = "unknown"
+            session.last_text = ""
+        if not session.last_text:
+            session_read(session, max_empty_reads=1, view_state=session.view_state)
+        text = session.last_text
+        try:
+            for payload in (TELNET_KEY_F2, TELNET_KEY_DOWN, TELNET_KEY_ENTER):
+                text = session_send(session, payload)
+                if "vol ultisid 1" in text.lower():
+                    break
+            if "vol ultisid 1" not in text.lower():
+                tail = session_read(session, max_empty_reads=1, view_state=session.view_state)
+                if tail:
+                    text = f"{text} {tail}" if text else tail
+                    session_capture(session, text)
+            text = require_text(text, "Vol UltiSid 1")
+            session.last_text = text
+            session.view_state = "audio_mixer"
             session.menu_focus = "audio_mixer"
-            text = session_send(session, TELNET_KEY_ENTER)
-    text = require_text(text, "Vol UltiSid 1")
-    session.last_text = text
-    session.view_state = "audio_mixer"
-    return text
+            return text
+        except RuntimeError as error:
+            last_error = error
+        session.view_state = "unknown"
+        session.menu_focus = "unknown"
+        session.last_text = ""
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("unable to open Audio Mixer")
 
 
 def session_refresh_audio_mixer(session: TelnetRunnerSession) -> str:
@@ -471,6 +550,40 @@ def audio_mixer_write_right_steps(settings: RuntimeSettings, current: str, targe
     return (target_index - current_index) % len(normalized_values)
 
 
+def audio_mixer_picker_sequence(settings: RuntimeSettings, current: str, target: str) -> tuple[bytes, int]:
+    _current_value, values, _body_bytes = u64_http.audio_mixer_item_state(settings)
+    normalized_values = tuple(u64_http.normalize_audio_mixer_value(value) for value in values)
+    normalized_current = u64_http.normalize_audio_mixer_value(current)
+    normalized_target = u64_http.normalize_audio_mixer_value(target)
+    if normalized_current not in normalized_values:
+        raise RuntimeError(f"unsupported Audio Mixer write current value: {current}")
+    if normalized_target not in normalized_values:
+        raise RuntimeError(f"unsupported Audio Mixer write target value: {target}")
+    current_index = normalized_values.index(normalized_current)
+    target_index = normalized_values.index(normalized_target)
+    if target_index < current_index:
+        return TELNET_KEY_UP, current_index - target_index
+    return TELNET_KEY_DOWN, target_index - current_index
+
+
+def is_save_flash_dialog(text: str) -> bool:
+    lowered = text.lower()
+    return all(marker in lowered for marker in TELNET_SAVE_FLASH_MARKERS)
+
+
+def session_save_changes_to_flash(session: TelnetRunnerSession) -> str:
+    first_left = session_send(session, TELNET_KEY_LEFT, view_state="unknown")
+    second_left = session_send(session, TELNET_KEY_LEFT, view_state="unknown")
+    dialog_text = second_left if is_save_flash_dialog(second_left) else first_left
+    if not is_save_flash_dialog(dialog_text):
+        tail = session_read(session, max_empty_reads=2, view_state="unknown")
+        dialog_text = f"{dialog_text} {tail}".strip() if tail else dialog_text
+    if is_save_flash_dialog(dialog_text):
+        confirmed = session_send(session, TELNET_KEY_ENTER, view_state="unknown")
+        return confirmed or dialog_text
+    raise RuntimeError("missing telnet text: Save changes to Flash")
+
+
 def authoritative_audio_mixer_value(settings: RuntimeSettings, *, shared_state: Any | None = None) -> str:
     current, _values, _body_bytes = u64_http.audio_mixer_item_state(settings)
     return u64_http.remember_audio_mixer_value(shared_state, current)
@@ -482,23 +595,22 @@ def session_write_audio_mixer_item(settings: RuntimeSettings, session: TelnetRun
         text, current = session_extract_audio_mixer_value(session, text)
         normalized_current = u64_http.remember_audio_mixer_value(shared_state, current)
         normalized_target = u64_http.normalize_audio_mixer_value(target)
-        steps = audio_mixer_write_right_steps(settings, current, target)
-        for _ in range(steps):
-            text = session_send(session, TELNET_KEY_RIGHT, view_state="audio_mixer")
-        text, updated = session_extract_audio_mixer_value(session, text)
-        normalized_updated = u64_http.remember_audio_mixer_value(shared_state, updated)
-        if normalized_updated != normalized_target:
-            normalized_authoritative = authoritative_audio_mixer_value(settings, shared_state=shared_state)
-            session.view_state = "unknown"
-            session.menu_focus = "unknown"
-            if normalized_authoritative == normalized_target:
-                return f"from={normalized_current} to={normalized_authoritative} right_steps={steps}"
-            raise RuntimeError(
-                f"verification mismatch expected={normalized_target} got={normalized_updated} authoritative={normalized_authoritative} latest_known={u64_http.latest_audio_mixer_value(shared_state) or 'unknown'}"
-            )
+        direction_key, steps = audio_mixer_picker_sequence(settings, current, target)
+        if normalized_current != normalized_target:
+            session_send(session, TELNET_KEY_ENTER, view_state="audio_mixer")
+            session_read(session, max_empty_reads=2, view_state="audio_mixer")
+            for _ in range(steps):
+                session_send(session, direction_key, view_state="audio_mixer")
+            text = session_send(session, TELNET_KEY_ENTER, view_state="audio_mixer")
+            text = session_save_changes_to_flash(session) or text
+            u64_http.stage_audio_mixer_value(shared_state, normalized_target)
+        normalized_authoritative = u64_http.verify_audio_mixer_value(settings, normalized_target, shared_state=shared_state)
+        normalized_authoritative = u64_http.confirm_audio_mixer_value(shared_state, normalized_authoritative)
         session.last_text = text
-        session.view_state = "audio_mixer"
-        return f"from={normalized_current} to={normalized_updated} right_steps={steps}"
+        session.view_state = "unknown"
+        session.menu_focus = "unknown"
+        direction = "up" if direction_key == TELNET_KEY_UP else "down"
+        return f"from={normalized_current} to={normalized_authoritative} picker={direction} steps={steps}"
 
 
 def abort_after_sequence(settings: RuntimeSettings, *payloads: bytes, read_initial: bool = True) -> str:
@@ -626,13 +738,27 @@ def read_audio_mixer_item(sock) -> str:
 
 def write_audio_mixer_item(settings: RuntimeSettings, sock, target: str) -> str:
     text, current = focus_audio_mixer_write_item(sock)
-    steps = audio_mixer_write_right_steps(settings, current, target)
+    direction_key, steps = audio_mixer_picker_sequence(settings, current, target)
+    send_and_read(sock, TELNET_KEY_ENTER)
+    read_until_idle(sock, max_empty_reads=2)
     for _ in range(steps):
-        text = send_and_read(sock, TELNET_KEY_RIGHT, require_change=True)
+        text = send_and_read(sock, direction_key, require_change=True)
+    text = send_and_read(sock, TELNET_KEY_ENTER)
+    first_left = send_and_read(sock, TELNET_KEY_LEFT)
+    second_left = send_and_read(sock, TELNET_KEY_LEFT)
+    dialog_text = second_left if is_save_flash_dialog(second_left) else first_left
+    if not is_save_flash_dialog(dialog_text):
+        tail = read_until_idle(sock, max_empty_reads=2)
+        dialog_text = f"{dialog_text} {tail}".strip() if tail else dialog_text
+    if is_save_flash_dialog(dialog_text):
+        text = send_and_read(sock, TELNET_KEY_ENTER)
+    else:
+        raise RuntimeError("missing telnet text: Save changes to Flash")
     updated = extract_audio_mixer_write_value(text)
     if updated != u64_http.normalize_audio_mixer_value(target):
         raise RuntimeError(f"verification mismatch expected={target} got={updated}")
-    return f"from={current} to={updated} right_steps={steps}"
+    direction = "up" if direction_key == TELNET_KEY_UP else "down"
+    return f"from={current} to={updated} picker={direction} steps={steps}"
 
 
 def enter_speaker_settings(sock) -> str:
@@ -715,19 +841,21 @@ def run_probe(
         started_at = time.perf_counter_ns()
         try:
             def surface_operation(current_settings: RuntimeSettings) -> str:
-                session = get_session(current_settings, context.runner_id)
-                return operation(current_settings, session)
+                session = TelnetRunnerSession(sock=connect(current_settings))
+                try:
+                    return operation(current_settings, session)
+                finally:
+                    close_socket(session.sock)
 
             detail = run_surface_operation(
                 "telnet",
                 surface_operation,
                 settings,
-                on_error=lambda error: drop_session(context.runner_id),
+                on_error=lambda error: None,
             )
             elapsed_ms = (time.perf_counter_ns() - started_at) / 1_000_000.0
             return ProbeOutcome("OK", surface_detail(surface, op_name, detail), elapsed_ms)
         except Exception as error:
-            drop_session(context.runner_id)
             elapsed_ms = (time.perf_counter_ns() - started_at) / 1_000_000.0
             return ProbeOutcome("FAIL", surface_detail(surface, op_name, str(error)), elapsed_ms)
 

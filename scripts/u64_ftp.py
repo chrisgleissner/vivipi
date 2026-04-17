@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import atexit
+import contextlib
 import ftplib
 import io
 import os
+import re
 import threading
 import time
 from typing import Callable
@@ -25,6 +27,10 @@ FTP_TEMP_DIR = "/Temp"
 FTP_SELF_FILE_PREFIX = "u64test_"
 FTP_TINY_FILE_SIZE_BYTES = 1
 FTP_LARGE_FILE_SIZE_BYTES = 256 * 1024
+FTP_SHARED_CONFIRMED_FILES_KEY = "u64.ftp.self_files.confirmed"
+FTP_SHARED_TENTATIVE_FILES_KEY = "u64.ftp.self_files.tentative"
+FTP_VERIFY_RETRY_DELAYS_S = (0.05, 0.10, 0.20)
+SELF_FILE_SIZE_PATTERN = re.compile(r"_(\d+)b_(?:\d+_)?\d+\.bin$")
 
 _FTP_TRACKING_LOCK = threading.Lock()
 _FTP_TRACKED_FILES: set[str] = set()
@@ -62,6 +68,176 @@ def _runner_file_prefix(runner_id: int | None = None) -> str:
 def known_self_files(file_prefix: str = FTP_SELF_FILE_PREFIX) -> tuple[str, ...]:
     with _FTP_TRACKING_LOCK:
         return tuple(sorted(path for path in _FTP_TRACKED_FILES if path.rsplit("/", 1)[-1].startswith(file_prefix)))
+
+
+def ftp_state_lock(shared_state, resource_key: str = FTP_SHARED_CONFIRMED_FILES_KEY):
+    if shared_state is None or not hasattr(shared_state, "shared_resource_lock_for"):
+        return contextlib.nullcontext()
+    return shared_state.shared_resource_lock_for(resource_key)
+
+
+def _read_shared_file_map(shared_state, resource_key: str) -> dict[str, int | None]:
+    if shared_state is None or not hasattr(shared_state, "get_shared_resource_value"):
+        return {}
+    value = shared_state.get_shared_resource_value(resource_key)
+    if not isinstance(value, dict):
+        return {}
+    return {str(path): size for path, size in value.items()}
+
+
+def _write_shared_file_map(shared_state, resource_key: str, value: dict[str, int | None]) -> None:
+    if shared_state is None or not hasattr(shared_state, "set_shared_resource_value"):
+        return
+    shared_state.set_shared_resource_value(resource_key, dict(value))
+
+
+def infer_self_file_size(path: str) -> int | None:
+    match = SELF_FILE_SIZE_PATTERN.search(path.rsplit("/", 1)[-1])
+    if match is None:
+        return None
+    return int(match.group(1))
+
+
+def stage_shared_self_file(shared_state, path: str, size_bytes: int | None) -> None:
+    if shared_state is None:
+        return
+    with ftp_state_lock(shared_state, FTP_SHARED_TENTATIVE_FILES_KEY):
+        tentative = _read_shared_file_map(shared_state, FTP_SHARED_TENTATIVE_FILES_KEY)
+        tentative[path] = size_bytes
+        _write_shared_file_map(shared_state, FTP_SHARED_TENTATIVE_FILES_KEY, tentative)
+
+
+def clear_shared_self_file_tentative(shared_state, path: str) -> None:
+    if shared_state is None:
+        return
+    with ftp_state_lock(shared_state, FTP_SHARED_TENTATIVE_FILES_KEY):
+        tentative = _read_shared_file_map(shared_state, FTP_SHARED_TENTATIVE_FILES_KEY)
+        tentative.pop(path, None)
+        _write_shared_file_map(shared_state, FTP_SHARED_TENTATIVE_FILES_KEY, tentative)
+
+
+def confirm_shared_self_file(shared_state, path: str, size_bytes: int | None) -> None:
+    if shared_state is None:
+        return
+    with ftp_state_lock(shared_state):
+        confirmed = _read_shared_file_map(shared_state, FTP_SHARED_CONFIRMED_FILES_KEY)
+        confirmed[path] = size_bytes
+        _write_shared_file_map(shared_state, FTP_SHARED_CONFIRMED_FILES_KEY, confirmed)
+    clear_shared_self_file_tentative(shared_state, path)
+
+
+def forget_shared_self_file(shared_state, path: str) -> None:
+    if shared_state is None:
+        return
+    with ftp_state_lock(shared_state):
+        confirmed = _read_shared_file_map(shared_state, FTP_SHARED_CONFIRMED_FILES_KEY)
+        confirmed.pop(path, None)
+        _write_shared_file_map(shared_state, FTP_SHARED_CONFIRMED_FILES_KEY, confirmed)
+    clear_shared_self_file_tentative(shared_state, path)
+
+
+def replace_shared_self_file(shared_state, source: str, target: str, size_bytes: int | None) -> None:
+    if shared_state is None:
+        return
+    with ftp_state_lock(shared_state):
+        confirmed = _read_shared_file_map(shared_state, FTP_SHARED_CONFIRMED_FILES_KEY)
+        confirmed.pop(source, None)
+        confirmed[target] = size_bytes
+        _write_shared_file_map(shared_state, FTP_SHARED_CONFIRMED_FILES_KEY, confirmed)
+    clear_shared_self_file_tentative(shared_state, source)
+    clear_shared_self_file_tentative(shared_state, target)
+
+
+def confirmed_self_files(shared_state, *, file_prefix: str = FTP_SELF_FILE_PREFIX) -> tuple[str, ...]:
+    if shared_state is None:
+        return known_self_files(file_prefix=file_prefix)
+    with ftp_state_lock(shared_state):
+        confirmed = _read_shared_file_map(shared_state, FTP_SHARED_CONFIRMED_FILES_KEY)
+    return tuple(sorted(path for path in confirmed if path.rsplit("/", 1)[-1].startswith(file_prefix)))
+
+
+def shared_self_file_size(shared_state, path: str) -> int | None:
+    if shared_state is None:
+        return infer_self_file_size(path)
+    with ftp_state_lock(shared_state):
+        confirmed = _read_shared_file_map(shared_state, FTP_SHARED_CONFIRMED_FILES_KEY)
+    size = confirmed.get(path)
+    if isinstance(size, int):
+        return size
+    return infer_self_file_size(path)
+
+
+def ftp_reply_code(error: BaseException) -> int | None:
+    detail = str(error).strip()
+    if len(detail) < 3 or not detail[:3].isdigit():
+        return None
+    return int(detail[:3])
+
+
+def is_retryable_ftp_verification_error(error: BaseException) -> bool:
+    if isinstance(error, (ConnectionResetError, BrokenPipeError, TimeoutError, OSError)):
+        return True
+    code = ftp_reply_code(error)
+    return code in {450, 550}
+
+
+def update_observed_self_files(shared_state, entries: tuple[str, ...], *, file_prefix: str = FTP_SELF_FILE_PREFIX) -> tuple[str, ...]:
+    observed_paths = readable_self_files(entries, file_prefix=file_prefix)
+    if shared_state is None:
+        return observed_paths
+    with ftp_state_lock(shared_state):
+        confirmed = _read_shared_file_map(shared_state, FTP_SHARED_CONFIRMED_FILES_KEY)
+        stale = [path for path in confirmed if path.rsplit("/", 1)[-1].startswith(file_prefix) and path not in observed_paths]
+        for path in stale:
+            confirmed.pop(path, None)
+        for path in observed_paths:
+            confirmed[path] = confirmed.get(path, infer_self_file_size(path))
+        _write_shared_file_map(shared_state, FTP_SHARED_CONFIRMED_FILES_KEY, confirmed)
+    return observed_paths
+
+
+def verify_self_file_state(
+    ftp: ftplib.FTP,
+    *,
+    settings: RuntimeSettings | None = None,
+    shared_state=None,
+    file_prefix: str = FTP_SELF_FILE_PREFIX,
+    expect_present: tuple[tuple[str, int | None], ...] = (),
+    expect_absent: tuple[str, ...] = (),
+) -> tuple[str, ...]:
+    attempts = len(FTP_VERIFY_RETRY_DELAYS_S) + 1
+    observed_paths: tuple[str, ...] = ()
+    for attempt in range(attempts):
+        verifier = ftp
+        try:
+            if settings is not None:
+                try:
+                    verifier = connect(settings)
+                except Exception:
+                    verifier = ftp
+            observed_paths = update_observed_self_files(shared_state, collect_temp_entries(verifier), file_prefix=file_prefix)
+        except Exception as error:
+            if attempt + 1 < attempts and is_retryable_ftp_verification_error(error):
+                time.sleep(FTP_VERIFY_RETRY_DELAYS_S[attempt])
+                continue
+            raise RuntimeError(f"file state verification failed: {error}") from error
+        finally:
+            if settings is not None and verifier is not ftp:
+                close(verifier)
+        present_ok = all(path in observed_paths for path, _size in expect_present)
+        absent_ok = all(path not in observed_paths for path in expect_absent)
+        if present_ok and absent_ok:
+            for path, size_bytes in expect_present:
+                confirm_shared_self_file(shared_state, path, size_bytes)
+            for path in expect_absent:
+                forget_shared_self_file(shared_state, path)
+            return observed_paths
+        if attempt + 1 < attempts:
+            time.sleep(FTP_VERIFY_RETRY_DELAYS_S[attempt])
+    expected_present = ",".join(path for path, _size in expect_present) or "none"
+    expected_absent = ",".join(expect_absent) or "none"
+    observed = ",".join(observed_paths) or "none"
+    raise RuntimeError(f"verification mismatch present={expected_present} absent={expected_absent} observed={observed}")
 
 
 def next_self_file_path(file_prefix: str = FTP_SELF_FILE_PREFIX, *, tag: str = "data") -> str:
@@ -150,7 +326,7 @@ def close(ftp: ftplib.FTP | None) -> None:
     finally:
         try:
             ftp.close()
-        except OSError:
+        except (OSError, AttributeError):
             pass
 
 
@@ -286,52 +462,128 @@ def store_self_file(settings: RuntimeSettings, ftp: ftplib.FTP, size_bytes: int,
     return path, len(payload_bytes)
 
 
-def ensure_self_file(settings: RuntimeSettings, ftp: ftplib.FTP, size_bytes: int, *, file_prefix: str = FTP_SELF_FILE_PREFIX) -> str:
-    readable = readable_self_files(collect_temp_entries_if_available(ftp), file_prefix=file_prefix)
-    for path in readable:
+def ensure_self_file(
+    settings: RuntimeSettings,
+    ftp: ftplib.FTP,
+    size_bytes: int,
+    *,
+    file_prefix: str = FTP_SELF_FILE_PREFIX,
+    shared_state=None,
+) -> str:
+    for path in confirmed_self_files(shared_state, file_prefix=file_prefix):
         if path_matches_self_file_size(path, size_bytes):
+            verify_self_file_state(
+                ftp,
+                settings=settings,
+                shared_state=shared_state,
+                file_prefix=file_prefix,
+                expect_present=((path, shared_self_file_size(shared_state, path)),),
+            )
             track_self_file(settings, path)
             return path
-    for path in known_self_files(file_prefix=file_prefix):
-        if path_matches_self_file_size(path, size_bytes):
-            return path
     path, _byte_count = store_self_file(settings, ftp, size_bytes, file_prefix=file_prefix)
+    stage_shared_self_file(shared_state, path, size_bytes)
+    verify_self_file_state(ftp, settings=settings, shared_state=shared_state, file_prefix=file_prefix, expect_present=((path, size_bytes),))
     return path
 
 
-def upload_self_file(settings: RuntimeSettings, ftp: ftplib.FTP, size_bytes: int, *, file_prefix: str = FTP_SELF_FILE_PREFIX) -> str:
+def upload_self_file(settings: RuntimeSettings, ftp: ftplib.FTP, size_bytes: int, *, file_prefix: str = FTP_SELF_FILE_PREFIX, shared_state=None) -> str:
     path, byte_count = store_self_file(settings, ftp, size_bytes, file_prefix=file_prefix)
+    stage_shared_self_file(shared_state, path, size_bytes)
+    verify_self_file_state(ftp, settings=settings, shared_state=shared_state, file_prefix=file_prefix, expect_present=((path, size_bytes),))
     return f"path={path} bytes={byte_count}"
 
 
-def download_self_file(settings: RuntimeSettings, ftp: ftplib.FTP, size_bytes: int, *, file_prefix: str = FTP_SELF_FILE_PREFIX) -> str:
-    path = ensure_self_file(settings, ftp, size_bytes, file_prefix=file_prefix)
-    byte_count = retr_binary(ftp, path)
+def download_self_file(settings: RuntimeSettings, ftp: ftplib.FTP, size_bytes: int, *, file_prefix: str = FTP_SELF_FILE_PREFIX, shared_state=None) -> str:
+    path = ensure_self_file(settings, ftp, size_bytes, file_prefix=file_prefix, shared_state=shared_state)
+    attempts = len(FTP_VERIFY_RETRY_DELAYS_S) + 1
+    last_error: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            byte_count = retr_binary(ftp, path)
+            break
+        except Exception as error:
+            last_error = error
+            if attempt + 1 >= attempts or not is_retryable_ftp_verification_error(error):
+                raise
+            verify_self_file_state(
+                ftp,
+                settings=settings,
+                shared_state=shared_state,
+                file_prefix=file_prefix,
+                expect_present=((path, shared_self_file_size(shared_state, path) or size_bytes),),
+            )
+            time.sleep(FTP_VERIFY_RETRY_DELAYS_S[attempt])
+    else:
+        raise RuntimeError(f"download failed without terminal error: {last_error}")
     if byte_count != size_bytes:
         raise RuntimeError(f"size mismatch for {path}: expected={size_bytes} got={byte_count}")
     return f"path={path} bytes={byte_count}"
 
 
-def rename_self_file(settings: RuntimeSettings, ftp: ftplib.FTP, *, file_prefix: str = FTP_SELF_FILE_PREFIX) -> str:
-    owned = known_self_files(file_prefix=file_prefix)
-    if not owned:
-        return "skip=no_self_file"
-    source = owned[0]
+def ensure_any_self_file(settings: RuntimeSettings, ftp: ftplib.FTP, *, file_prefix: str = FTP_SELF_FILE_PREFIX, shared_state=None) -> tuple[str, int | None]:
+    owned = confirmed_self_files(shared_state, file_prefix=file_prefix)
+    if owned:
+        source = owned[0]
+        size_bytes = shared_self_file_size(shared_state, source)
+        verify_self_file_state(ftp, settings=settings, shared_state=shared_state, file_prefix=file_prefix, expect_present=((source, size_bytes),))
+        return source, size_bytes
+    source = ensure_self_file(settings, ftp, FTP_TINY_FILE_SIZE_BYTES, file_prefix=file_prefix, shared_state=shared_state)
+    return source, FTP_TINY_FILE_SIZE_BYTES
+
+
+def rename_self_file(settings: RuntimeSettings, ftp: ftplib.FTP, *, file_prefix: str = FTP_SELF_FILE_PREFIX, shared_state=None) -> str:
+    source, size_bytes = ensure_any_self_file(settings, ftp, file_prefix=file_prefix, shared_state=shared_state)
     target = next_self_file_path(file_prefix=file_prefix)
-    ftp.rename(source, target)
+    attempts = len(FTP_VERIFY_RETRY_DELAYS_S) + 1
+    last_error: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            ftp.rename(source, target)
+            break
+        except Exception as error:
+            last_error = error
+            if attempt + 1 >= attempts or ftp_reply_code(error) != 450:
+                raise
+            verify_self_file_state(ftp, shared_state=shared_state, file_prefix=file_prefix, expect_present=((source, size_bytes),))
+            time.sleep(FTP_VERIFY_RETRY_DELAYS_S[attempt])
+    else:
+        raise RuntimeError(f"rename failed without terminal error: {last_error}")
     forget_self_file(source)
     track_self_file(settings, target)
+    stage_shared_self_file(shared_state, target, size_bytes)
+    verify_self_file_state(
+        ftp,
+        settings=settings,
+        shared_state=shared_state,
+        file_prefix=file_prefix,
+        expect_present=((target, size_bytes),),
+        expect_absent=(source,),
+    )
+    replace_shared_self_file(shared_state, source, target, size_bytes)
     return f"from={source} to={target}"
 
 
-def delete_self_file(settings: RuntimeSettings, ftp: ftplib.FTP, *, file_prefix: str = FTP_SELF_FILE_PREFIX) -> str:
-    del settings
-    owned = known_self_files(file_prefix=file_prefix)
-    if not owned:
-        return "skip=no_self_file"
-    path = owned[0]
-    ftp.delete(path)
+def delete_self_file(settings: RuntimeSettings, ftp: ftplib.FTP, *, file_prefix: str = FTP_SELF_FILE_PREFIX, shared_state=None) -> str:
+    path, size_bytes = ensure_any_self_file(settings, ftp, file_prefix=file_prefix, shared_state=shared_state)
+    attempts = len(FTP_VERIFY_RETRY_DELAYS_S) + 1
+    last_error: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            ftp.delete(path)
+            break
+        except Exception as error:
+            last_error = error
+            if attempt + 1 >= attempts or ftp_reply_code(error) != 450:
+                raise
+            verify_self_file_state(ftp, shared_state=shared_state, file_prefix=file_prefix, expect_present=((path, size_bytes),))
+            time.sleep(FTP_VERIFY_RETRY_DELAYS_S[attempt])
+    else:
+        raise RuntimeError(f"delete failed without terminal error: {last_error}")
     forget_self_file(path)
+    stage_shared_self_file(shared_state, path, size_bytes)
+    verify_self_file_state(ftp, settings=settings, shared_state=shared_state, file_prefix=file_prefix, expect_absent=(path,))
+    forget_shared_self_file(shared_state, path)
     return f"path={path}"
 
 
@@ -457,6 +709,7 @@ def surface_operations(
     *,
     runner_id: int = 1,
     concurrent_multi_runner: bool = False,
+    shared_state=None,
 ) -> tuple[tuple[str, Callable[[RuntimeSettings, ftplib.FTP], str]], ...]:
     file_prefix = _runner_file_prefix(runner_id) if concurrent_multi_runner else FTP_SELF_FILE_PREFIX
     read_operations = (
@@ -470,12 +723,12 @@ def surface_operations(
     if surface == ProbeSurface.READ:
         return read_operations
     return read_operations + (
-        ("ftp_upload_tiny_self_file", lambda settings, ftp: upload_self_file(settings, ftp, FTP_TINY_FILE_SIZE_BYTES, file_prefix=file_prefix)),
-        ("ftp_download_tiny_self_file", lambda settings, ftp: download_self_file(settings, ftp, FTP_TINY_FILE_SIZE_BYTES, file_prefix=file_prefix)),
-        ("ftp_upload_large_self_file", lambda settings, ftp: upload_self_file(settings, ftp, FTP_LARGE_FILE_SIZE_BYTES, file_prefix=file_prefix)),
-        ("ftp_download_large_self_file", lambda settings, ftp: download_self_file(settings, ftp, FTP_LARGE_FILE_SIZE_BYTES, file_prefix=file_prefix)),
-        ("ftp_rename_self_file", lambda settings, ftp: rename_self_file(settings, ftp, file_prefix=file_prefix)),
-        ("ftp_delete_self_file", lambda settings, ftp: delete_self_file(settings, ftp, file_prefix=file_prefix)),
+        ("ftp_upload_tiny_self_file", lambda settings, ftp: upload_self_file(settings, ftp, FTP_TINY_FILE_SIZE_BYTES, file_prefix=file_prefix, shared_state=shared_state)),
+        ("ftp_download_tiny_self_file", lambda settings, ftp: download_self_file(settings, ftp, FTP_TINY_FILE_SIZE_BYTES, file_prefix=file_prefix, shared_state=shared_state)),
+        ("ftp_upload_large_self_file", lambda settings, ftp: upload_self_file(settings, ftp, FTP_LARGE_FILE_SIZE_BYTES, file_prefix=file_prefix, shared_state=shared_state)),
+        ("ftp_download_large_self_file", lambda settings, ftp: download_self_file(settings, ftp, FTP_LARGE_FILE_SIZE_BYTES, file_prefix=file_prefix, shared_state=shared_state)),
+        ("ftp_rename_self_file", lambda settings, ftp: rename_self_file(settings, ftp, file_prefix=file_prefix, shared_state=shared_state)),
+        ("ftp_delete_self_file", lambda settings, ftp: delete_self_file(settings, ftp, file_prefix=file_prefix, shared_state=shared_state)),
     )
 
 
@@ -507,6 +760,7 @@ def run_probe(
                     surface,
                     runner_id=context.runner_id,
                     concurrent_multi_runner=_has_multiple_runners(context),
+                    shared_state=context.state,
                 )
                 index = select_operation_index(context, len(operations))
                 op_name, operation = operations[index]
@@ -529,6 +783,7 @@ def run_probe(
             surface,
             runner_id=context.runner_id,
             concurrent_multi_runner=_has_multiple_runners(context),
+            shared_state=context.state,
         )
         index = select_operation_index(context, len(operations))
         op_name, operation = operations[index]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import enum
+import ftplib
 import http.client
 import socket
 import time
@@ -51,7 +52,7 @@ class ProbeExecutionContext:
 
 
 Operation = Callable[[RuntimeSettings], str]
-SURFACE_OPERATION_RETRY_DELAYS_S = (0.05, 0.10, 0.20)
+SURFACE_OPERATION_RETRY_DELAYS_S = (0.10, 0.25, 0.50, 1.00)
 
 
 def first_non_empty_line(text: str, fallback: str) -> str:
@@ -78,6 +79,10 @@ def select_operation_index(context: ProbeExecutionContext | None, operation_coun
 
 
 def is_retryable_surface_error(error: Exception) -> bool:
+    if isinstance(error, ftplib.Error):
+        detail = str(error).strip()
+        if len(detail) >= 3 and detail[:3].isdigit():
+            return int(detail[:3]) in {425, 450, 550}
     if isinstance(error, (ConnectionResetError, BrokenPipeError, TimeoutError, socket.timeout)):
         return True
     if isinstance(error, (http.client.IncompleteRead, http.client.RemoteDisconnected, http.client.ResponseNotReady)):
