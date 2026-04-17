@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import socket
 import threading
 import types
 
@@ -819,3 +820,381 @@ def test_verify_disabled_skips_verify_marker():
 
     assert exit_code == 0
     assert "verify=SKIP" in output
+
+
+def test_parser_helpers_cover_additional_validation_branches():
+    module = load_module()
+
+    assert module.parse_byte_size("1K") == 1024
+    assert module.parse_mode(" SINGLE ") == "single"
+    assert module.parse_format(" JSON ") == "json"
+    assert module.parse_remote_dir("//USB2/./test//FTP/") == "/USB2/test/FTP"
+    assert module.parse_remote_dir("/") == "/"
+
+    with pytest.raises(Exception):
+        module.parse_size_token("")
+    with pytest.raises(Exception):
+        module.parse_size_token("wat")
+    with pytest.raises(Exception):
+        module.parse_size_token("0.4")
+    with pytest.raises(Exception):
+        module.parse_sizes(" , ")
+    with pytest.raises(Exception):
+        module.parse_mode("parallel")
+    with pytest.raises(Exception):
+        module.parse_format("yaml")
+    with pytest.raises(ValueError):
+        module.validate_ftp_basename("")
+    with pytest.raises(ValueError):
+        module.validate_ftp_basename(".")
+    with pytest.raises(ValueError):
+        module.validate_ftp_basename("bad/name")
+    with pytest.raises(ValueError):
+        module.validate_ftp_basename("bad\nname")
+    with pytest.raises(Exception):
+        module.parse_remote_dir("")
+    with pytest.raises(Exception):
+        module.parse_remote_dir("/bad\npath")
+    with pytest.raises(Exception):
+        module.parse_remote_dir("/bad\\segment")
+
+
+def test_progress_bar_pause_resume_and_stream_failures():
+    module = load_module()
+
+    bar = module.ProgressBar(enabled=True, stream=io.StringIO())
+    bar.label = "size=1K"
+    assert bar.pause() is False
+    bar.start("size=1K", 2)
+    assert bar.pause() is True
+    bar.resume()
+    previous_line = bar._last_line
+    bar._last_draw_at = module.time.perf_counter()
+    bar._draw(force=False)
+    assert bar._last_line == previous_line
+
+    class FailingStream:
+        def write(self, _text):
+            raise OSError("write failed")
+
+        def flush(self):
+            raise OSError("flush failed")
+
+    error_bar = module.ProgressBar(enabled=True, stream=FailingStream())
+    error_bar.start("size=1K", 1)
+    error_bar._last_line = "stale"
+    error_bar._clear()
+    assert error_bar._last_line == ""
+
+
+def test_open_session_close_session_and_safe_sendcmd_failure_paths(monkeypatch):
+    module = load_module()
+    args = module.build_parser().parse_args(["--remote-dir", "/USB2/test/FTP"])
+
+    class LoginFailFTP:
+        def connect(self, *_args, **_kwargs):
+            return "220 ok"
+
+        def login(self, *_args, **_kwargs):
+            raise module.ftplib.error_perm("bad login")
+
+        def close(self):
+            raise OSError("close failed")
+
+    monkeypatch.setattr(module.ftplib, "FTP", LoginFailFTP)
+    with pytest.raises(module.FtpOpenError) as login_error:
+        module.open_session(args)
+    assert login_error.value.phase == "login_failed"
+
+    class CwdFailFTP:
+        def __init__(self):
+            self.sock = types.SimpleNamespace(settimeout=lambda *_args: None)
+
+        def connect(self, *_args, **_kwargs):
+            return "220 ok"
+
+        def login(self, *_args, **_kwargs):
+            return "230 ok"
+
+        def set_pasv(self, _flag):
+            return None
+
+        def cwd(self, _path):
+            raise module.ftplib.error_perm("no dir")
+
+        def close(self):
+            raise OSError("close failed")
+
+    monkeypatch.setattr(module.ftplib, "FTP", CwdFailFTP)
+    with pytest.raises(module.FtpOpenError) as cwd_error:
+        module.open_session(args)
+    assert cwd_error.value.phase == "cwd_failed"
+
+    class NoSockFTP:
+        def connect(self, *_args, **_kwargs):
+            return "220 ok"
+
+        def login(self, *_args, **_kwargs):
+            return "230 ok"
+
+        def set_pasv(self, _flag):
+            return None
+
+        def cwd(self, _path):
+            return "250 ok"
+
+        def sendcmd(self, cmd):
+            return f"200 {cmd}"
+
+        def quit(self):
+            return "221 bye"
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(module.ftplib, "FTP", NoSockFTP)
+    ftp = module.open_session(args)
+    assert isinstance(ftp, NoSockFTP)
+
+    class CloseFailFTP:
+        def quit(self):
+            raise EOFError("socket gone")
+
+        def close(self):
+            raise OSError("close failed")
+
+    module.close_session(CloseFailFTP())
+    module.close_session(None)
+
+    with pytest.raises(ValueError):
+        module.safe_sendcmd(ftp, "BAD CMD")
+    with pytest.raises(ValueError):
+        module.safe_sendcmd(ftp, "CWD", "bad/name")
+
+
+def test_ensure_remote_dir_handles_connect_and_mkdir_failures(monkeypatch):
+    module = load_module()
+    args = module.build_parser().parse_args(["--remote-dir", "/USB2/test/FTP"])
+
+    class ConnectFailFTP:
+        def connect(self, *_args, **_kwargs):
+            raise OSError("offline")
+
+        def quit(self):
+            raise OSError("quit failed")
+
+        def close(self):
+            raise OSError("close failed")
+
+    monkeypatch.setattr(module.ftplib, "FTP", ConnectFailFTP)
+    ok, detail = module.ensure_remote_dir(args)
+    assert ok is False
+    assert detail == "connect_or_login: offline"
+
+    class MkdRaceFTP:
+        def __init__(self):
+            self.paths: set[str] = set()
+
+        def connect(self, *_args, **_kwargs):
+            return "220 ok"
+
+        def login(self, *_args, **_kwargs):
+            return "230 ok"
+
+        def set_pasv(self, _flag):
+            return None
+
+        def cwd(self, path):
+            if path not in self.paths:
+                raise module.ftplib.error_perm("missing")
+            return "250 ok"
+
+        def mkd(self, path):
+            self.paths.add(path)
+            raise module.ftplib.error_perm("already exists")
+
+        def quit(self):
+            return "221 bye"
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(module.ftplib, "FTP", MkdRaceFTP)
+    ok, detail = module.ensure_remote_dir(args)
+    assert ok is True
+    assert detail is None
+
+    class MkdOsErrorFTP(MkdRaceFTP):
+        def mkd(self, path):
+            raise OSError(f"disk full for {path}")
+
+        def quit(self):
+            raise OSError("quit failed")
+
+        def close(self):
+            raise OSError("close failed")
+
+    monkeypatch.setattr(module.ftplib, "FTP", MkdOsErrorFTP)
+    ok, detail = module.ensure_remote_dir(args)
+    assert ok is False
+    assert detail is not None
+    assert detail.startswith("mkd /USB2")
+
+
+def test_run_single_transfer_classifies_filename_upload_and_download_failures():
+    module = load_module()
+    payload = b"payload"
+
+    class UploadFailFTP:
+        def storbinary(self, _cmd, _fp):
+            raise OSError("upload broke")
+
+        def retrbinary(self, _cmd, _callback):
+            raise AssertionError("should not download after upload failure")
+
+    result = module.run_single_transfer(UploadFailFTP(), "bad/name", 7, 1, 1, payload, True)
+    assert result.failure_type == "filename_invalid"
+
+    result = module.run_single_transfer(UploadFailFTP(), "1K", 1024, 1, 1, payload, True)
+    assert result.failure_type == "upload_failed"
+
+    class DownloadFailFTP:
+        def storbinary(self, _cmd, _fp):
+            return "226 ok"
+
+        def retrbinary(self, _cmd, _callback):
+            raise socket.timeout("download broke")
+
+    result = module.run_single_transfer(DownloadFailFTP(), "1K", 1024, 1, 1, payload, True)
+    assert result.failure_type == "download_failed"
+
+
+def test_worker_loop_abort_paths_and_helper_formatters(monkeypatch):
+    module = load_module()
+    emitter = module.Emitter(json_mode=False)
+    args = module.build_parser().parse_args(["--remote-dir", "/USB2/test/FTP", "--no-ensure-remote-dir"])
+
+    def raise_open(_args):
+        raise module.FtpOpenError("connect_failed", OSError("offline"))
+
+    monkeypatch.setattr(module, "open_session", raise_open)
+
+    fail_fast_args = types.SimpleNamespace(**{**vars(args), "fail_fast": True})
+
+    fail_fast_context = module.StageContext(
+        args=fail_fast_args,
+        emitter=emitter,
+        deadline_s=None,
+        abort_flag=threading.Event(),
+    )
+    results = module.worker_loop(1, 3, "1K", 1024, b"x", fail_fast_context)
+    assert len(results) == 1
+    assert fail_fast_context.abort_flag.is_set()
+
+    preaborted = threading.Event()
+    preaborted.set()
+    preaborted_args = types.SimpleNamespace(**{**vars(args), "fail_fast": False})
+    preaborted_context = module.StageContext(
+        args=preaborted_args,
+        emitter=emitter,
+        deadline_s=None,
+        abort_flag=preaborted,
+    )
+    results = module.worker_loop(1, 3, "1K", 1024, b"x", preaborted_context)
+    assert len(results) == 1
+
+    class IdleFTP:
+        def quit(self):
+            return "221 bye"
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(module, "open_session", lambda _args: IdleFTP())
+    stopped_args = types.SimpleNamespace(**{**vars(args), "fail_fast": False})
+    stopped_context = module.StageContext(
+        args=stopped_args,
+        emitter=emitter,
+        deadline_s=None,
+        abort_flag=threading.Event(),
+    )
+    stopped_context.abort_flag.set()
+    assert module.worker_loop(1, 2, "1K", 1024, b"x", stopped_context) == []
+
+    class BadStdout:
+        def isatty(self):
+            raise ValueError("bad stdout")
+
+    monkeypatch.setattr(module.sys, "stdout", BadStdout())
+    assert module._is_interactive_stdout() is False
+    assert module._format_bytes_short(2 * 1024 * 1024 * 1024) == "2G"
+    assert module._format_bytes_short(2 * 1024 * 1024) == "2M"
+    assert module._format_bytes_short(1537) == "1537"
+
+
+def test_build_payload_rejects_zero_and_run_stage_records_worker_future_exceptions(monkeypatch):
+    module = load_module()
+    with pytest.raises(ValueError):
+        module.build_payload(0)
+
+    args = module.build_parser().parse_args(["--remote-dir", "/USB2/test/FTP", "--no-ensure-remote-dir"])
+    emitter = module.Emitter(json_mode=False)
+
+    def fake_worker_loop(worker_index, *_args, **_kwargs):
+        if worker_index == 2:
+            raise RuntimeError("boom")
+        return []
+
+    monkeypatch.setattr(module, "worker_loop", fake_worker_loop)
+    stage = module.run_stage(args, emitter, "1K", 1024, "multi", 2, None)
+    assert stage.failure_count() == 1
+    assert stage.transfers[0].failure_detail == "boom"
+
+
+def test_run_emits_setup_fail_partial_and_ops_failure(monkeypatch):
+    module = load_module()
+
+    def success_stage(size_label: str) -> object:
+        stage = module.StageResult(
+            size_label=size_label,
+            size_bytes=1024,
+            mode="single",
+            workers=1,
+            files_per_worker=1,
+            total_files=1,
+        )
+        stage.started_at_s = 0.0
+        stage.ended_at_s = 1.0
+        stage.transfers.append(
+            module.TransferResult(
+                size_label=size_label,
+                size_bytes=1024,
+                worker=1,
+                iteration=1,
+                success=True,
+                upload_time_s=1.0,
+                download_time_s=1.0,
+                upload_bytes=1024,
+                download_bytes=1024,
+                verify_ok=True,
+                verify_checked=True,
+            )
+        )
+        return stage
+
+    monkeypatch.setattr(module, "ensure_remote_dir", lambda _args: (False, "mkdir failed"))
+    monkeypatch.setattr(module, "run_stage", lambda *args, **kwargs: success_stage(args[2]))
+    monkeypatch.setattr(module, "run_ops_stage", lambda *_args, **_kwargs: module.OpsResult(success=False))
+    setup_code, setup_output = run_main(module, ["--sizes", "1K", "--target-bytes", "1K"])
+    assert setup_code == 1
+    assert "protocol=setup result=FAIL" in setup_output
+    assert "protocol=summary result=FAIL" in setup_output
+
+    partial_args = module.build_parser().parse_args(
+        ["--sizes", "1K,2K", "--target-bytes", "1K", "--mode", "both", "--max-runtime-s", "1", "--no-ensure-remote-dir"]
+    )
+    times = iter([0.0, 0.0, 1.0, 1.0])
+    monkeypatch.setattr(module.time, "monotonic", lambda: next(times))
+    monkeypatch.setattr(module, "ensure_remote_dir", lambda _args: (True, None))
+    monkeypatch.setattr(module, "run_stage", lambda *args, **kwargs: success_stage(args[2]))
+    assert module.run(partial_args) == 2
