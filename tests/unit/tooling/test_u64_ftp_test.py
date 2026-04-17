@@ -78,24 +78,27 @@ class FakeFTP:
             self._server.deleted_paths.append(resolved)
         return "250 ok"
 
+    def _list_child_entries(self, base: str) -> list[str]:
+        prefix = base.rstrip("/") + "/"
+        entries: set[str] = set()
+        for name in sorted(self._server.files):
+            if not name.startswith(prefix):
+                continue
+            remainder = name[len(prefix) :]
+            if not remainder or "/" in remainder:
+                continue
+            entries.add(remainder)
+        return sorted(entries)
+
     def nlst(self, path=None):
         base = self._cwd if path is None else self._resolve(path)
-        prefix = base.rstrip("/") + "/"
         with self._server.lock:
-            entries = [
-                name.rsplit("/", 1)[-1]
-                for name in sorted(self._server.files)
-                if name.startswith(prefix)
-            ]
+            entries = self._list_child_entries(base)
         return entries
 
     def retrlines(self, cmd, callback):
         with self._server.lock:
-            entries = [
-                name.rsplit("/", 1)[-1]
-                for name in sorted(self._server.files)
-                if name.startswith(self._cwd + "/")
-            ]
+            entries = self._list_child_entries(self._cwd)
         for entry in entries:
             callback(entry)
         return "226 ok"
@@ -498,9 +501,12 @@ def test_list_managed_test_filenames_returns_only_managed_basenames_in_cwd():
     state.ensure_dir("/Temp")
     state.ensure_dir("/Temp/test")
     state.ensure_dir("/Temp/test/FTP")
+    state.ensure_dir("/Temp/test/FTP/nested")
     state.files["/Temp/test/FTP/u64ftp_1K_1_1.bin"] = b"one"
     state.files["/Temp/test/FTP/u64ftp_1K_1_2.bin.rn"] = b"two"
     state.files["/Temp/test/FTP/not-managed.bin"] = b"keep"
+    state.files["/Temp/test/FTP/nested/u64ftp_1K_1_1.bin"] = b"nested"
+    state.files["/Temp/test/FTP/nested/u64ftp_1K_1_3.bin"] = b"nested-two"
     state.files["/Temp/test/OTHER/u64ftp_1K_9_9.bin"] = b"elsewhere"
 
     ftp = FakeFTP(state)
