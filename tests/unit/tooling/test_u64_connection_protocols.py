@@ -66,7 +66,7 @@ def test_http_normal_mode_requests_connection_close_and_reads_body(monkeypatch):
 
     monkeypatch.setattr(module.http.client, "HTTPConnection", FakeConnection)
 
-    outcome = module.run_probe(make_settings(runtime), runtime.ProbeCorrectness.CORRECT)
+    outcome = module.run_probe(make_settings(runtime), runtime.ProbeCorrectness.COMPLETE)
 
     assert outcome.result == "OK"
     assert ("request", "GET", "/v1/version", {"Connection": "close"}) in calls
@@ -101,7 +101,7 @@ def test_http_surface_operations_retry_transient_transport_errors(monkeypatch):
         state=RotatingState(),
     )
 
-    outcome = module.run_probe(make_settings(runtime), runtime.ProbeCorrectness.CORRECT, context=context)
+    outcome = module.run_probe(make_settings(runtime), runtime.ProbeCorrectness.COMPLETE, context=context)
 
     assert outcome.result == "OK"
     assert outcome.detail == "surface=read op=flaky http_status=200 body_bytes=43"
@@ -120,7 +120,7 @@ def test_ping_probe_uses_ping_terminology(monkeypatch):
 
     monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs: Completed())
 
-    outcome = module.run_probe(make_settings(runtime), runtime.ProbeCorrectness.CORRECT)
+    outcome = module.run_probe(make_settings(runtime), runtime.ProbeCorrectness.COMPLETE)
 
     assert outcome.result == "OK"
     assert outcome.detail.startswith("ping_reply_ms=")
@@ -182,7 +182,7 @@ def test_ftp_normal_mode_performs_login_pasv_nlst_quit_and_close():
 
     module.ftplib.FTP = FakeFTP
 
-    outcome = module.run_probe(make_settings(runtime), runtime.ProbeCorrectness.CORRECT)
+    outcome = module.run_probe(make_settings(runtime), runtime.ProbeCorrectness.COMPLETE)
 
     assert outcome.result == "OK"
     assert calls == [
@@ -191,6 +191,48 @@ def test_ftp_normal_mode_performs_login_pasv_nlst_quit_and_close():
         ("set_pasv", True),
         ("nlst", "."),
         "quit",
+        "close",
+    ]
+
+
+def test_ftp_open_correctness_skips_quit_after_completed_operation():
+    runtime = load_runtime()
+    module = load_ftp()
+    calls = []
+
+    class FakeFTP:
+        def connect(self, host, port, timeout):
+            calls.append(("connect", host, port, timeout))
+            return "220 ready"
+
+        def login(self, user, password):
+            calls.append(("login", user, password))
+            return "230 logged in"
+
+        def set_pasv(self, enabled):
+            calls.append(("set_pasv", enabled))
+
+        def nlst(self, path):
+            calls.append(("nlst", path))
+            return ["file1", "file2"]
+
+        def quit(self):
+            calls.append("quit")
+            return "221 bye"
+
+        def close(self):
+            calls.append("close")
+
+    module.ftplib.FTP = FakeFTP
+
+    outcome = module.run_probe(make_settings(runtime), runtime.ProbeCorrectness.OPEN)
+
+    assert outcome.result == "OK"
+    assert calls == [
+        ("connect", "host", 21, 8),
+        ("login", "anonymous", ""),
+        ("set_pasv", True),
+        ("nlst", "."),
         "close",
     ]
 
@@ -278,6 +320,69 @@ def test_ftp_smoke_incomplete_operations_match_historical_probe():
     assert [name for name, _ in operations] == ["ftp_greeting_only_quit"]
 
 
+def test_ftp_context_incomplete_readwrite_uses_incomplete_operations(monkeypatch):
+    runtime = load_runtime()
+    module = load_ftp()
+
+    def unexpected_surface_operations(*args, **kwargs):
+        raise AssertionError("surface_operations should not be used for incomplete FTP probes")
+
+    monkeypatch.setattr(module, "surface_operations", unexpected_surface_operations)
+    monkeypatch.setattr(
+        module,
+        "incomplete_operations",
+        lambda surface, *, runner_id=1, concurrent_multi_runner=False: ((
+            "ftp_partial_stor_temp",
+            lambda settings: (_ for _ in ()).throw(ConnectionResetError(104, "Connection reset by peer")),
+        ),),
+    )
+
+    context = runtime.ProbeExecutionContext(
+        protocol="ftp",
+        runner_id=1,
+        iteration=1,
+        surface=runtime.ProbeSurface.READWRITE,
+        state=RotatingState(),
+    )
+
+    outcome = module.run_probe(make_settings(runtime), runtime.ProbeCorrectness.INCOMPLETE, context=context)
+
+    assert outcome.result == "OK"
+    assert outcome.detail == "surface=readwrite op=ftp_partial_stor_temp expected_disconnect_after_abort"
+
+
+def test_ftp_context_open_readwrite_uses_surface_operations(monkeypatch):
+    runtime = load_runtime()
+    module = load_ftp()
+
+    def unexpected_incomplete_operations(*args, **kwargs):
+        raise AssertionError("incomplete_operations should not be used for open FTP probes")
+
+    monkeypatch.setattr(module, "incomplete_operations", unexpected_incomplete_operations)
+    monkeypatch.setattr(
+        module,
+        "surface_operations",
+        lambda surface, *, runner_id=1, concurrent_multi_runner=False, shared_state=None: ((
+            "ftp_upload_tiny_self_file",
+            lambda settings, ftp: "open_surface_path",
+        ),),
+    )
+    monkeypatch.setattr(module, "run_open_surface_probe", lambda current_settings, operation: operation(current_settings, None))
+
+    context = runtime.ProbeExecutionContext(
+        protocol="ftp",
+        runner_id=1,
+        iteration=1,
+        surface=runtime.ProbeSurface.READWRITE,
+        state=RotatingState(),
+    )
+
+    outcome = module.run_probe(make_settings(runtime), runtime.ProbeCorrectness.OPEN, context=context)
+
+    assert outcome.result == "OK"
+    assert outcome.detail == "surface=readwrite op=ftp_upload_tiny_self_file open_surface_path"
+
+
 def test_ftp_read_surface_rotates_across_operation_names(monkeypatch):
     runtime = load_runtime()
     module = load_ftp()
@@ -312,7 +417,7 @@ def test_ftp_read_surface_rotates_across_operation_names(monkeypatch):
             surface=runtime.ProbeSurface.READ,
             state=state,
         )
-        outcome = module.run_probe(make_settings(runtime), runtime.ProbeCorrectness.CORRECT, context=context)
+        outcome = module.run_probe(make_settings(runtime), runtime.ProbeCorrectness.COMPLETE, context=context)
         details.append(outcome.detail)
 
     assert [detail.split()[1] for detail in details] == [

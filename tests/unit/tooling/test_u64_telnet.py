@@ -66,7 +66,7 @@ def test_telnet_normal_mode_sends_newline_drains_banner_and_closes(monkeypatch):
 
     monkeypatch.setattr(module.socket, "create_connection", lambda address, timeout: FakeSocket())
 
-    outcome = module.run_probe(make_settings(runtime), runtime.ProbeCorrectness.CORRECT)
+    outcome = module.run_probe(make_settings(runtime), runtime.ProbeCorrectness.COMPLETE)
 
     assert outcome.result == "OK"
     assert ("sendall", b"\r\n") in calls
@@ -494,20 +494,27 @@ def test_session_save_changes_to_flash_confirms_dialog(monkeypatch):
     assert calls == [module.TELNET_KEY_LEFT, module.TELNET_KEY_LEFT, module.TELNET_KEY_ENTER]
 
 
-def test_extended_telnet_incomplete_mode_treats_connection_reset_as_expected_disconnect(monkeypatch):
+def test_extended_telnet_incomplete_mode_uses_incomplete_operations(monkeypatch):
     runtime = load_runtime()
     module = load_telnet()
     state = RotatingState()
 
+    def unexpected_surface_operations(*args, **kwargs):
+        raise AssertionError("surface_operations should not be used for incomplete Telnet probes")
+
     monkeypatch.setattr(
         module,
         "surface_operations",
-        lambda surface, *, concurrent_multi_runner=False, shared_state=None: ((
-            "telnet_read_vol_ultisid_1",
-            lambda settings, session: (_ for _ in ()).throw(ConnectionResetError(104, "Connection reset by peer")),
+        unexpected_surface_operations,
+    )
+    monkeypatch.setattr(
+        module,
+        "incomplete_operations",
+        lambda surface: ((
+            "telnet_audio_mixer_abort",
+            lambda settings: (_ for _ in ()).throw(ConnectionResetError(104, "Connection reset by peer")),
         ),),
     )
-    monkeypatch.setattr(module, "get_session", lambda settings, runner_id: UnusedSocket())
 
     context = runtime.ProbeExecutionContext(
         protocol="telnet",
@@ -519,7 +526,40 @@ def test_extended_telnet_incomplete_mode_treats_connection_reset_as_expected_dis
     outcome = module.run_probe(make_settings(runtime), runtime.ProbeCorrectness.INCOMPLETE, context=context)
 
     assert outcome.result == "OK"
-    assert outcome.detail == "surface=readwrite op=telnet_read_vol_ultisid_1 expected_disconnect_after_abort"
+    assert outcome.detail == "surface=readwrite op=telnet_audio_mixer_abort expected_disconnect_after_abort"
+
+
+def test_extended_telnet_open_mode_uses_surface_operations(monkeypatch):
+    runtime = load_runtime()
+    module = load_telnet()
+    state = RotatingState()
+
+    def unexpected_incomplete_operations(*args, **kwargs):
+        raise AssertionError("incomplete_operations should not be used for open Telnet probes")
+
+    monkeypatch.setattr(module, "incomplete_operations", unexpected_incomplete_operations)
+    monkeypatch.setattr(
+        module,
+        "surface_operations",
+        lambda surface, *, concurrent_multi_runner=False, shared_state=None: ((
+            "set_vol_ultisid_1_0_db",
+            lambda settings, session: "open_surface_path",
+        ),),
+    )
+    monkeypatch.setattr(module, "run_open_surface_operation", lambda current_settings, runner_id, operation: operation(current_settings, None))
+
+    context = runtime.ProbeExecutionContext(
+        protocol="telnet",
+        runner_id=1,
+        iteration=1,
+        surface=runtime.ProbeSurface.READWRITE,
+        state=state,
+    )
+
+    outcome = module.run_probe(make_settings(runtime), runtime.ProbeCorrectness.OPEN, context=context)
+
+    assert outcome.result == "OK"
+    assert outcome.detail == "surface=readwrite op=set_vol_ultisid_1_0_db open_surface_path"
 
 
 def test_collect_telnet_visible_ignores_subnegotiation_and_keeps_literal_iac():

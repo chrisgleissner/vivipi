@@ -64,15 +64,32 @@ PROBE_SURFACE_CHOICES = {
     "telnet": (ProbeSurface.SMOKE, ProbeSurface.READ, ProbeSurface.READWRITE),
 }
 PROBE_SURFACE_ORDER = (ProbeSurface.SMOKE, ProbeSurface.READ, ProbeSurface.READWRITE)
-PROBE_CORRECTNESS_ORDER = (ProbeCorrectness.CORRECT, ProbeCorrectness.INCOMPLETE, ProbeCorrectness.INVALID)
+PROBE_CORRECTNESS_ORDER = (
+    ProbeCorrectness.COMPLETE,
+    ProbeCorrectness.OPEN,
+    ProbeCorrectness.INCOMPLETE,
+    ProbeCorrectness.INVALID,
+)
 PROBE_CORRECTNESS_CHOICES = {
-    "ping": (ProbeCorrectness.CORRECT,),
-    "http": (ProbeCorrectness.CORRECT,),
-    "ftp": (ProbeCorrectness.CORRECT, ProbeCorrectness.INCOMPLETE, ProbeCorrectness.INVALID),
-    "telnet": (ProbeCorrectness.CORRECT, ProbeCorrectness.INCOMPLETE),
+    "ping": (ProbeCorrectness.COMPLETE,),
+    "http": (ProbeCorrectness.COMPLETE,),
+    "ftp": (ProbeCorrectness.COMPLETE, ProbeCorrectness.OPEN, ProbeCorrectness.INCOMPLETE, ProbeCorrectness.INVALID),
+    "telnet": (ProbeCorrectness.COMPLETE, ProbeCorrectness.OPEN, ProbeCorrectness.INCOMPLETE),
 }
+CORRECTNESS_DEGRADATION_HELP = (
+    "Correctness degradation: "
+    f"{ProbeCorrectness.COMPLETE.value} (finish and close cleanly), "
+    f"{ProbeCorrectness.OPEN.value} (finish and skip orderly teardown), "
+    f"{ProbeCorrectness.INCOMPLETE.value} (abort before completion), "
+    f"{ProbeCorrectness.INVALID.value} (send malformed or unsupported input)."
+)
 HISTORICAL_CORRECTNESS_EVIDENCE = {
     "ftp": {
+        ProbeCorrectness.OPEN.value: {
+            "commit": "f0ef5db",
+            "path": "scripts/u64_ftp.py",
+            "summary": "Former driver-side incomplete FTP probing reused the full surface operations, then dropped the session without an orderly QUIT.",
+        },
         ProbeCorrectness.INCOMPLETE.value: {
             "commit": "37314b1",
             "path": "src/vivipi/runtime/checks.py",
@@ -80,6 +97,11 @@ HISTORICAL_CORRECTNESS_EVIDENCE = {
         }
     },
     "telnet": {
+        ProbeCorrectness.OPEN.value: {
+            "commit": "f0ef5db",
+            "path": "scripts/u64_telnet.py",
+            "summary": "Former driver-side incomplete Telnet probing reused the full surface operations and accepted abrupt disconnects after the completed interaction.",
+        },
         ProbeCorrectness.INCOMPLETE.value: {
             "commit": "37314b1",
             "path": "src/vivipi/runtime/checks.py",
@@ -302,12 +324,14 @@ def _fallback_correctness(protocol: str, requested: ProbeCorrectness) -> ProbeCo
 def profile_overrides_help() -> str:
     return (
         "Profile precedence: if --profile is supplied, explicit --probes, --schedule, --runners, --surface, --mode, --*-surface, and --*-mode values override the profile.\n\n"
+        f"{CORRECTNESS_DEGRADATION_HELP}\n\n"
         "Examples:\n"
         "  ./u64_connection_test.py\n"
         "  ./u64_connection_test.py --profile soak\n"
         "  ./u64_connection_test.py --profile stress\n"
         "  ./u64_connection_test.py --profile soak --duration-s 300\n"
         f"  ./u64_connection_test.py --surface {ProbeSurface.READWRITE.value}\n"
+        f"  ./u64_connection_test.py --mode {ProbeCorrectness.OPEN.value}\n"
         f"  ./u64_connection_test.py --mode {ProbeCorrectness.INCOMPLETE.value}\n"
         "  ./u64_connection_test.py --probes ping,http,ftp,telnet\n"
         "  ./u64_connection_test.py --schedule concurrent --runners 3\n"
@@ -347,7 +371,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--runners", type=parse_runners, default=None, help="Logical runner count >= 1.")
     parser.add_argument("--duration-s", type=parse_duration_s, default=None, help="Optional total run duration in seconds. Soak defaults to 43200 (12h); stress defaults to 120.")
     parser.add_argument("--surface", choices=[value.value for value in ProbeSurface], default=None, help="Apply the same surface to all probes, falling back per protocol to the nearest supported lower surface.")
-    parser.add_argument("--mode", choices=[value.value for value in ProbeCorrectness], default=None, help="Apply the same correctness mode to all probes, falling back per protocol to the nearest supported lower mode.")
+    parser.add_argument("--mode", choices=[value.value for value in ProbeCorrectness], default=None, help=f"Apply the same correctness mode to all probes, falling back per protocol to the nearest supported lower mode. {CORRECTNESS_DEGRADATION_HELP}")
     parser.add_argument("--http-surface", choices=[value.value for value in ProbeSurface], default=None, help="HTTP probe surface.")
     parser.add_argument("--ftp-surface", choices=[value.value for value in ProbeSurface], default=None, help="FTP probe surface.")
     parser.add_argument("--telnet-surface", choices=[value.value for value in ProbeSurface], default=None, help="Telnet probe surface.")
@@ -416,8 +440,8 @@ def profile_execution_config(profile: str) -> ExecutionConfig:
             runners=5,
             duration_s=DEFAULT_PROFILE_DURATION_S,
             probe_correctness={
-                "ping": ProbeCorrectness.CORRECT,
-                "http": ProbeCorrectness.CORRECT,
+                "ping": ProbeCorrectness.COMPLETE,
+                "http": ProbeCorrectness.COMPLETE,
                 "ftp": ProbeCorrectness.INCOMPLETE,
                 "telnet": ProbeCorrectness.INCOMPLETE,
             },
