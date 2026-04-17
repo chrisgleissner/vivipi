@@ -494,20 +494,27 @@ def test_session_save_changes_to_flash_confirms_dialog(monkeypatch):
     assert calls == [module.TELNET_KEY_LEFT, module.TELNET_KEY_LEFT, module.TELNET_KEY_ENTER]
 
 
-def test_extended_telnet_incomplete_mode_treats_connection_reset_as_expected_disconnect(monkeypatch):
+def test_extended_telnet_incomplete_mode_uses_incomplete_operations(monkeypatch):
     runtime = load_runtime()
     module = load_telnet()
     state = RotatingState()
 
+    def unexpected_surface_operations(*args, **kwargs):
+        raise AssertionError("surface_operations should not be used for incomplete Telnet probes")
+
     monkeypatch.setattr(
         module,
         "surface_operations",
-        lambda surface, *, concurrent_multi_runner=False, shared_state=None: ((
-            "telnet_read_vol_ultisid_1",
-            lambda settings, session: (_ for _ in ()).throw(ConnectionResetError(104, "Connection reset by peer")),
+        unexpected_surface_operations,
+    )
+    monkeypatch.setattr(
+        module,
+        "incomplete_operations",
+        lambda surface: ((
+            "telnet_audio_mixer_abort",
+            lambda settings: (_ for _ in ()).throw(ConnectionResetError(104, "Connection reset by peer")),
         ),),
     )
-    monkeypatch.setattr(module, "get_session", lambda settings, runner_id: UnusedSocket())
 
     context = runtime.ProbeExecutionContext(
         protocol="telnet",
@@ -519,7 +526,7 @@ def test_extended_telnet_incomplete_mode_treats_connection_reset_as_expected_dis
     outcome = module.run_probe(make_settings(runtime), runtime.ProbeCorrectness.INCOMPLETE, context=context)
 
     assert outcome.result == "OK"
-    assert outcome.detail == "surface=readwrite op=telnet_read_vol_ultisid_1 expected_disconnect_after_abort"
+    assert outcome.detail == "surface=readwrite op=telnet_audio_mixer_abort expected_disconnect_after_abort"
 
 
 def test_collect_telnet_visible_ignores_subnegotiation_and_keeps_literal_iac():

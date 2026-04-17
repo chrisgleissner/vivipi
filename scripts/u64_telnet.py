@@ -819,17 +819,6 @@ def run_probe(
     if context is not None:
         surface = context.surface
         if correctness == ProbeCorrectness.INCOMPLETE:
-            if surface != ProbeSurface.SMOKE:
-                operations = surface_operations(surface, concurrent_multi_runner=_has_multiple_runners(context), shared_state=context.state)
-                index = select_operation_index(context, len(operations))
-                op_name, operation = operations[index]
-                return run_incomplete_surface_operation(
-                    "telnet",
-                    surface,
-                    op_name,
-                    lambda current_settings: _run_incomplete_surface_operation(current_settings, context.runner_id, operation),
-                    settings,
-                )
             operations = incomplete_operations(surface)
             index = select_operation_index(context, len(operations))
             op_name, operation = operations[index]

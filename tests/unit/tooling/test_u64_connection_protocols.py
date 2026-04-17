@@ -278,6 +278,37 @@ def test_ftp_smoke_incomplete_operations_match_historical_probe():
     assert [name for name, _ in operations] == ["ftp_greeting_only_quit"]
 
 
+def test_ftp_context_incomplete_readwrite_uses_incomplete_operations(monkeypatch):
+    runtime = load_runtime()
+    module = load_ftp()
+
+    def unexpected_surface_operations(*args, **kwargs):
+        raise AssertionError("surface_operations should not be used for incomplete FTP probes")
+
+    monkeypatch.setattr(module, "surface_operations", unexpected_surface_operations)
+    monkeypatch.setattr(
+        module,
+        "incomplete_operations",
+        lambda surface, *, runner_id=1, concurrent_multi_runner=False: ((
+            "ftp_partial_stor_temp",
+            lambda settings: (_ for _ in ()).throw(ConnectionResetError(104, "Connection reset by peer")),
+        ),),
+    )
+
+    context = runtime.ProbeExecutionContext(
+        protocol="ftp",
+        runner_id=1,
+        iteration=1,
+        surface=runtime.ProbeSurface.READWRITE,
+        state=RotatingState(),
+    )
+
+    outcome = module.run_probe(make_settings(runtime), runtime.ProbeCorrectness.INCOMPLETE, context=context)
+
+    assert outcome.result == "OK"
+    assert outcome.detail == "surface=readwrite op=ftp_partial_stor_temp expected_disconnect_after_abort"
+
+
 def test_ftp_read_surface_rotates_across_operation_names(monkeypatch):
     runtime = load_runtime()
     module = load_ftp()

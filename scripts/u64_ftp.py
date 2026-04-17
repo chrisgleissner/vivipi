@@ -755,22 +755,6 @@ def run_probe(
             return run_probe_invalid(settings)
         surface = context.surface
         if correctness == ProbeCorrectness.INCOMPLETE:
-            if surface != ProbeSurface.SMOKE:
-                operations = surface_operations(
-                    surface,
-                    runner_id=context.runner_id,
-                    concurrent_multi_runner=_has_multiple_runners(context),
-                    shared_state=context.state,
-                )
-                index = select_operation_index(context, len(operations))
-                op_name, operation = operations[index]
-                return run_incomplete_surface_operation(
-                    "ftp",
-                    surface,
-                    op_name,
-                    lambda current_settings: run_incomplete_surface_probe(current_settings, operation),
-                    settings,
-                )
             operations = incomplete_operations(
                 surface,
                 runner_id=context.runner_id,
