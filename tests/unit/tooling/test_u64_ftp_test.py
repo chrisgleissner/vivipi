@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import re
 import socket
 import threading
 import types
@@ -77,13 +78,27 @@ class FakeFTP:
             self._server.deleted_paths.append(resolved)
         return "250 ok"
 
+    def _list_child_entries(self, base: str) -> list[str]:
+        prefix = base.rstrip("/") + "/"
+        entries: set[str] = set()
+        for name in sorted(self._server.files):
+            if not name.startswith(prefix):
+                continue
+            remainder = name[len(prefix) :]
+            if not remainder or "/" in remainder:
+                continue
+            entries.add(remainder)
+        return sorted(entries)
+
+    def nlst(self, path=None):
+        base = self._cwd if path is None else self._resolve(path)
+        with self._server.lock:
+            entries = self._list_child_entries(base)
+        return entries
+
     def retrlines(self, cmd, callback):
         with self._server.lock:
-            entries = [
-                name.rsplit("/", 1)[-1]
-                for name in sorted(self._server.files)
-                if name.startswith(self._cwd + "/")
-            ]
+            entries = self._list_child_entries(self._cwd)
         for entry in entries:
             callback(entry)
         return "226 ok"
@@ -273,17 +288,32 @@ def test_validate_managed_test_filename_rejects_non_test_or_nested_paths():
         module.validate_managed_test_filename("../u64ftp_1K_1_1.bin")
 
 
-def test_compute_files_per_worker_uses_ceiling_and_respects_override():
+def test_compute_stage_sizing_respects_target_duration_workers_clamps_and_override():
     module = load_module()
 
-    # 1M target / 20K size = 52 files per worker (spec example)
-    assert module.compute_files_per_worker(20 * 1024, 1024 * 1024, None) == 52
-    assert module.compute_files_per_worker(200 * 1024, 1024 * 1024, None) == 6
-    assert module.compute_files_per_worker(1024 * 1024, 1024 * 1024, None) == 1
-    # Override wins
-    assert module.compute_files_per_worker(20 * 1024, 1024 * 1024, 4) == 4
-    # Minimum one
-    assert module.compute_files_per_worker(1024 * 1024, 1024, None) == 1
+    auto = module.compute_stage_sizing(20 * 1024, 1, 20.0, 6, None, 3, 12)
+    assert auto.files_per_worker == 6
+    assert auto.total_files == 6
+    assert auto.planned_stage_bytes == 6 * 20 * 1024
+    assert auto.sampling_mode == "auto"
+
+    worker_aware = module.compute_stage_sizing(20 * 1024, 3, 20.0, 10, None, 3, 12)
+    assert worker_aware.files_per_worker == 4
+    assert worker_aware.total_files == 12
+
+    clamped_min = module.compute_stage_sizing(1024 * 1024, 1, 20.0, 1, None, 3, 12)
+    assert clamped_min.files_per_worker == 3
+    assert clamped_min.sampling_mode == "clamped_min"
+
+    clamped_max = module.compute_stage_sizing(1024, 1, 20.0, 100, None, 3, 12)
+    assert clamped_max.files_per_worker == 12
+    assert clamped_max.sampling_mode == "clamped_max"
+
+    override = module.compute_stage_sizing(20 * 1024, 3, 20.0, 99, 4, 3, 12)
+    assert override.files_per_worker == 4
+    assert override.total_files == 12
+    assert override.estimated_KiBps == 0
+    assert override.sampling_mode == "override"
 
 
 def test_modes_for_and_workers_for_match_spec():
@@ -310,8 +340,10 @@ def test_help_text_lists_all_required_flags():
         "--timeout-s",
         "--remote-dir",
         "--sizes",
-        "--target-bytes",
+        "--target-stage-duration-s",
         "--files-per-stage",
+        "--min-files-per-worker",
+        "--max-files-per-worker",
         "--concurrency",
         "--mode",
         "--verify",
@@ -322,6 +354,21 @@ def test_help_text_lists_all_required_flags():
         "--verbose",
     ]:
         assert flag in help_text, flag
+
+    assert "--remote-dir REMOTE_DIR" in help_text
+    assert "Default:" in help_text
+    assert "/Temp/test/FTP." in help_text
+    assert "Default: 20K,200K,1M." in help_text
+    assert "Default: 20." in help_text
+    assert "Choices: single, multi, both." in help_text
+    assert "Choices: text, json." in help_text
+    assert "Accepted units per token:" in help_text
+    assert "raw bytes, K, M, or G" in help_text
+    assert "Before each run, the tool removes only prior managed test files" in help_text
+    assert "calibrated with a short upload/download probe" in help_text
+    assert "deterministic summary" in help_text
+    assert "latency percentiles" in help_text
+    assert "Examples:" in help_text
 
 
 def test_zero_arg_defaults_match_spec():
@@ -334,10 +381,12 @@ def test_zero_arg_defaults_match_spec():
     assert args.ftp_pass == ""
     assert args.passive is True
     assert args.timeout_s == 10
-    assert args.remote_dir == "/USB2/test/FTP"
+    assert args.remote_dir == "/Temp/test/FTP"
     assert args.sizes == (("20K", 20480), ("200K", 204800), ("1M", 1048576))
-    assert args.target_bytes == 1024 * 1024
+    assert args.target_stage_duration_s == 20.0
     assert args.files_per_stage is None
+    assert args.min_files_per_worker == 3
+    assert args.max_files_per_worker == 12
     assert args.concurrency == 3
     assert args.mode == "both"
     assert args.verify is True
@@ -351,16 +400,17 @@ def test_config_line_format_matches_spec_example():
     module = load_module()
     state = install_fake_ftp(module)
     # Pre-seed the remote dir so ensure_remote_dir is a no-op
-    state.ensure_dir("/USB2/test")
-    state.ensure_dir("/USB2/test/FTP")
+    state.ensure_dir("/Temp")
+    state.ensure_dir("/Temp/test")
+    state.ensure_dir("/Temp/test/FTP")
 
     exit_code, output = run_main(
         module,
         [
             "--sizes",
             "20K",
-            "--target-bytes",
-            "20K",
+            "--files-per-stage",
+            "1",
             "--concurrency",
             "1",
             "--mode",
@@ -373,7 +423,8 @@ def test_config_line_format_matches_spec_example():
     assert lines[0].startswith("2")  # timestamp prefix
     assert "protocol=config result=INFO" in lines[0]
     assert 'detail="host=u64' in lines[0]
-    assert "dir=/USB2/test/FTP" in lines[0]
+    assert "dir=/Temp/test/FTP" in lines[0]
+    assert "target=20s" in lines[0]
     assert "verify=1" in lines[0]
 
 
@@ -388,8 +439,8 @@ def test_end_to_end_happy_path_uploads_and_downloads_all_files():
             "fake",
             "--sizes",
             "1K,4K",
-            "--target-bytes",
-            "4K",
+            "--files-per-stage",
+            "1",
             "--concurrency",
             "2",
             "--mode",
@@ -400,32 +451,29 @@ def test_end_to_end_happy_path_uploads_and_downloads_all_files():
     )
 
     assert exit_code == 0, output
-    # Expected totals: for 1K at target 4K => 4 files/worker
-    #   single: 1 worker * 4 = 4
-    #   multi:  2 workers * 4 = 8
-    # For 4K at target 4K => 1 file/worker
-    #   single: 1 * 1 = 1
-    #   multi:  2 * 1 = 2
-    # Total = 15 STORs + 15 RETRs
-    assert state.stor_count == 15
-    assert state.retr_count == 15
+    # With a 1-file override, each size runs once in single mode and twice in multi mode.
+    assert state.stor_count == 6
+    assert state.retr_count == 6
 
     assert "protocol=config result=INFO" in output
     assert output.count("protocol=stage result=START") == 4
     assert output.count("protocol=stage result=END") == 4
     assert "protocol=summary result=OK" in output
-    # Unit-tagged throughput keys must be present on stage END and summary
-    assert "agg_up_KBps=" in output
-    assert "agg_down_KBps=" in output
+    assert "protocol=score" not in output
+    assert "score_breakdown" not in output
+    assert "up_KiBps=" in output
+    assert "down_KiBps=" in output
+    assert "agg_KiBps=" in output
     assert "stage_s=" in output
-    assert "total_up_KB=" in output
-    assert "total_down_KB=" in output
+    assert "fail=0" in output
+    assert "verify_fail=0" in output
+    assert "_KB" not in output
 
 
 def test_ensure_remote_dir_creates_missing_directory():
     module = load_module()
     state = install_fake_ftp(module)
-    assert "/USB2/test/FTP" not in state.dirs
+    assert "/Temp/test/FTP" not in state.dirs
 
     exit_code, output = run_main(
         module,
@@ -434,8 +482,8 @@ def test_ensure_remote_dir_creates_missing_directory():
             "fake",
             "--sizes",
             "1K",
-            "--target-bytes",
-            "1K",
+            "--files-per-stage",
+            "1",
             "--concurrency",
             "1",
             "--mode",
@@ -444,7 +492,67 @@ def test_ensure_remote_dir_creates_missing_directory():
     )
 
     assert exit_code == 0, output
-    assert "/USB2/test/FTP" in state.dirs
+    assert "/Temp/test/FTP" in state.dirs
+
+
+def test_list_managed_test_filenames_returns_only_managed_basenames_in_cwd():
+    module = load_module()
+    state = install_fake_ftp(module)
+    state.ensure_dir("/Temp")
+    state.ensure_dir("/Temp/test")
+    state.ensure_dir("/Temp/test/FTP")
+    state.ensure_dir("/Temp/test/FTP/nested")
+    state.files["/Temp/test/FTP/u64ftp_1K_1_1.bin"] = b"one"
+    state.files["/Temp/test/FTP/u64ftp_1K_1_2.bin.rn"] = b"two"
+    state.files["/Temp/test/FTP/not-managed.bin"] = b"keep"
+    state.files["/Temp/test/FTP/nested/u64ftp_1K_1_1.bin"] = b"nested"
+    state.files["/Temp/test/FTP/nested/u64ftp_1K_1_3.bin"] = b"nested-two"
+    state.files["/Temp/test/OTHER/u64ftp_1K_9_9.bin"] = b"elsewhere"
+
+    ftp = FakeFTP(state)
+    ftp.cwd("/Temp/test/FTP")
+
+    assert module.list_managed_test_filenames(ftp) == ["u64ftp_1K_1_1.bin", "u64ftp_1K_1_2.bin.rn"]
+
+
+def test_cleanup_remote_test_files_deletes_only_managed_files_in_selected_directory():
+    module = load_module()
+    state = install_fake_ftp(module)
+    state.ensure_dir("/Temp")
+    state.ensure_dir("/Temp/test")
+    state.ensure_dir("/Temp/test/FTP")
+    state.ensure_dir("/Temp/test/OTHER")
+    state.files["/Temp/test/FTP/u64ftp_20K_1_1.bin"] = b"one"
+    state.files["/Temp/test/FTP/u64ftp_20K_1_2.bin.rn"] = b"two"
+    state.files["/Temp/test/FTP/keep.txt"] = b"keep"
+    state.files["/Temp/test/OTHER/u64ftp_20K_9_9.bin"] = b"elsewhere"
+    args = module.build_parser().parse_args(["--remote-dir", "/Temp/test/FTP"])
+
+    deleted_count, error = module.cleanup_remote_test_files(args)
+
+    assert error is None
+    assert deleted_count == 2
+    assert state.deleted_paths == [
+        "/Temp/test/FTP/u64ftp_20K_1_1.bin",
+        "/Temp/test/FTP/u64ftp_20K_1_2.bin.rn",
+    ]
+    assert "/Temp/test/FTP/keep.txt" in state.files
+    assert "/Temp/test/OTHER/u64ftp_20K_9_9.bin" in state.files
+
+
+def test_cleanup_remote_test_files_reports_open_session_errors(monkeypatch):
+    module = load_module()
+    args = module.build_parser().parse_args(["--remote-dir", "/Temp/test/FTP"])
+
+    def raise_open(_args):
+        raise module.FtpOpenError("cwd_failed", module.ftplib.error_perm("550 missing"))
+
+    monkeypatch.setattr(module, "open_session", raise_open)
+
+    deleted_count, error = module.cleanup_remote_test_files(args)
+
+    assert deleted_count == 0
+    assert error == "cwd_failed: 550 missing"
 
 
 def test_connect_failure_yields_classified_transfers_and_nonzero_exit():
@@ -469,8 +577,8 @@ def test_connect_failure_yields_classified_transfers_and_nonzero_exit():
             "x",
             "--sizes",
             "1K",
-            "--target-bytes",
-            "1K",
+            "--files-per-stage",
+            "1",
             "--concurrency",
             "1",
             "--mode",
@@ -480,8 +588,9 @@ def test_connect_failure_yields_classified_transfers_and_nonzero_exit():
     )
 
     assert exit_code == 1
-    assert "phase=connect_failed" in output
-    assert "protocol=summary result=FAIL" in output
+    assert "protocol=setup result=FAIL" in output
+    assert "phase=cleanup" in output
+    assert "connect_failed:_refused" in output
 
 
 def test_verify_mismatch_is_reported_when_download_corrupts_payload():
@@ -505,8 +614,8 @@ def test_verify_mismatch_is_reported_when_download_corrupts_payload():
                 "fake",
                 "--sizes",
                 "1K",
-                "--target-bytes",
-                "1K",
+                "--files-per-stage",
+                "1",
                 "--concurrency",
                 "1",
                 "--mode",
@@ -541,8 +650,8 @@ def test_fail_fast_stops_after_first_failure():
                 "fake",
                 "--sizes",
                 "1K,4K",
-                "--target-bytes",
-                "4K",
+                "--files-per-stage",
+                "2",
                 "--concurrency",
                 "2",
                 "--mode",
@@ -571,8 +680,8 @@ def test_json_mode_emits_single_document_with_config_stages_summary():
             "fake",
             "--sizes",
             "1K",
-            "--target-bytes",
-            "2K",
+            "--files-per-stage",
+            "1",
             "--concurrency",
             "2",
             "--mode",
@@ -589,7 +698,12 @@ def test_json_mode_emits_single_document_with_config_stages_summary():
     assert document["summary"]["result"] == "OK"
     assert document["summary"]["stages_run"] == 2
     assert document["summary"]["success"] is True
-    assert document["summary"]["stages_failed"] == 0
+    assert document["summary"]["failed_stages"] == 0
+    assert document["summary"]["total_fail"] == 0
+    assert document["summary"]["total_verify_fail"] == 0
+    assert "score" not in document["summary"]
+    assert "up_KiBps" in document["summary"]
+    assert "up_KiBps" in document["stages"][0]
 
 
 def test_run_ops_stage_rejects_non_owned_or_escaped_filenames():
@@ -648,8 +762,8 @@ def test_max_runtime_limit_stops_between_stages_and_marks_partial():
             "fake",
             "--sizes",
             "1K,4K,8K",
-            "--target-bytes",
-            "1K",
+            "--files-per-stage",
+            "1",
             "--concurrency",
             "1",
             "--mode",
@@ -682,8 +796,8 @@ def test_progress_bar_disabled_when_stdout_is_not_tty():
                 "fake",
                 "--sizes",
                 "1K",
-                "--target-bytes",
-                "2K",
+                "--files-per-stage",
+                "1",
                 "--concurrency",
                 "1",
                 "--mode",
@@ -716,8 +830,8 @@ def test_progress_bar_renders_single_line_when_tty_enabled():
                 "fake",
                 "--sizes",
                 "1K",
-                "--target-bytes",
-                "4K",
+                "--files-per-stage",
+                "4",
                 "--concurrency",
                 "1",
                 "--mode",
@@ -758,8 +872,8 @@ def test_progress_bar_prefers_tty_stderr_when_stdout_is_not_interactive():
                 "fake",
                 "--sizes",
                 "1K",
-                "--target-bytes",
-                "4K",
+                "--files-per-stage",
+                "4",
                 "--concurrency",
                 "1",
                 "--mode",
@@ -819,9 +933,9 @@ def test_aggregate_throughput_is_bytes_over_stage_wall_time():
                     verify_checked=True,
                 )
             )
-    # 30 files * 20 KB = 600 KB in 5 s => 120 KB/s aggregate
-    assert stage.aggregate_upload_KBps() == pytest.approx(120.0)
-    assert stage.aggregate_download_KBps() == pytest.approx(120.0)
+    # 30 files * 20 KiB = 600 KiB in 5 s => 120 KiB/s aggregate
+    assert stage.aggregate_upload_KiBps() == pytest.approx(120.0)
+    assert stage.aggregate_download_KiBps() == pytest.approx(120.0)
 
 
 def test_progress_bar_noop_when_disabled():
@@ -847,8 +961,8 @@ def test_verify_disabled_skips_verify_marker():
             "fake",
             "--sizes",
             "1K",
-            "--target-bytes",
-            "1K",
+            "--files-per-stage",
+            "1",
             "--concurrency",
             "1",
             "--mode",
@@ -866,6 +980,8 @@ def test_parser_helpers_cover_additional_validation_branches():
     module = load_module()
 
     assert module.parse_byte_size("1K") == 1024
+    assert module.parse_positive_int("3") == 3
+    assert module.parse_positive_float("2.5") == 2.5
     assert module.parse_mode(" SINGLE ") == "single"
     assert module.parse_format(" JSON ") == "json"
     assert module.parse_remote_dir("//USB2/./test//FTP/") == "/USB2/test/FTP"
@@ -879,6 +995,10 @@ def test_parser_helpers_cover_additional_validation_branches():
         module.parse_size_token("0.4")
     with pytest.raises(Exception):
         module.parse_sizes(" , ")
+    with pytest.raises(Exception):
+        module.parse_positive_int("0")
+    with pytest.raises(Exception):
+        module.parse_positive_float("0")
     with pytest.raises(Exception):
         module.parse_mode("parallel")
     with pytest.raises(Exception):
@@ -1185,7 +1305,7 @@ def test_build_payload_rejects_zero_and_run_stage_records_worker_future_exceptio
         return []
 
     monkeypatch.setattr(module, "worker_loop", fake_worker_loop)
-    stage = module.run_stage(args, emitter, "1K", 1024, "multi", 2, None)
+    stage = module.run_stage(args, emitter, "1K", 1024, "multi", 2, None, None)
     assert stage.failure_count() == 1
     assert stage.transfers[0].failure_detail == "boom"
 
@@ -1222,21 +1342,262 @@ def test_run_emits_setup_fail_partial_and_ops_failure(monkeypatch):
         return stage
 
     monkeypatch.setattr(module, "ensure_remote_dir", lambda _args: (False, "mkdir failed"))
+    monkeypatch.setattr(module, "cleanup_remote_test_files", lambda _args: (0, None))
     monkeypatch.setattr(module, "run_stage", lambda *args, **kwargs: success_stage(args[2]))
     monkeypatch.setattr(module, "run_ops_stage", lambda *_args, **_kwargs: module.OpsResult(success=False))
-    setup_code, setup_output = run_main(module, ["--sizes", "1K", "--target-bytes", "1K"])
+    setup_code, setup_output = run_main(module, ["--sizes", "1K", "--files-per-stage", "1"])
     assert setup_code == 1
     assert "protocol=setup result=FAIL" in setup_output
     assert "protocol=summary result=FAIL" in setup_output
 
     partial_args = module.build_parser().parse_args(
-        ["--sizes", "1K,2K", "--target-bytes", "1K", "--mode", "both", "--max-runtime-s", "1", "--no-ensure-remote-dir"]
+        ["--sizes", "1K,2K", "--files-per-stage", "1", "--mode", "both", "--max-runtime-s", "1", "--no-ensure-remote-dir"]
     )
     times = iter([0.0, 0.0, 1.0, 1.0])
     monkeypatch.setattr(module.time, "monotonic", lambda: next(times))
     monkeypatch.setattr(module, "ensure_remote_dir", lambda _args: (True, None))
+    monkeypatch.setattr(module, "cleanup_remote_test_files", lambda _args: (0, None))
     monkeypatch.setattr(module, "run_stage", lambda *args, **kwargs: success_stage(args[2]))
     assert module.run(partial_args) == 2
+
+
+def test_run_fails_when_startup_cleanup_fails(monkeypatch):
+    module = load_module()
+
+    monkeypatch.setattr(module, "ensure_remote_dir", lambda _args: (True, None))
+    monkeypatch.setattr(module, "cleanup_remote_test_files", lambda _args: (3, "550 denied"))
+
+    exit_code, output = run_main(module, ["--sizes", "1K", "--files-per-stage", "1"])
+
+    assert exit_code == 1
+    assert "protocol=setup result=FAIL" in output
+    assert "phase=cleanup" in output
+    assert "550_denied" in output
+
+
+def test_calibration_produces_estimates_and_is_deterministic(monkeypatch):
+    module = load_module()
+    emitter = module.Emitter(json_mode=False)
+    args = module.build_parser().parse_args(["--sizes", "20K,200K,1M"])
+
+    def fake_probe(_args, size_label, size_bytes, sample_s):
+        return module.CalibrationResult(
+            size_label=size_label,
+            size_bytes=size_bytes,
+            estimated_KiBps={"20K": 12, "200K": 24, "1M": 48}[size_label],
+            upload_KiBps=0,
+            download_KiBps=0,
+            sample_s=sample_s,
+        )
+
+    monkeypatch.setattr(module, "run_calibration_probe", fake_probe)
+
+    first = module.calibrate_sizes(args, emitter)
+    second = module.calibrate_sizes(args, emitter)
+
+    assert {label: result.estimated_KiBps for label, result in first.items()} == {
+        "20K": 12,
+        "200K": 24,
+        "1M": 48,
+    }
+    assert first == second
+
+
+def test_files_per_stage_override_bypasses_calibration(monkeypatch):
+    module = load_module()
+    state = install_fake_ftp(module)
+    state.ensure_dir("/Temp")
+    state.ensure_dir("/Temp/test")
+    state.ensure_dir("/Temp/test/FTP")
+
+    def fail_calibration(*_args, **_kwargs):
+        raise AssertionError("calibration should be skipped when files-per-stage is set")
+
+    monkeypatch.setattr(module, "calibrate_sizes", fail_calibration)
+
+    exit_code, output = run_main(
+        module,
+        ["--sizes", "1K", "--files-per-stage", "1", "--mode", "single"],
+    )
+
+    assert exit_code == 0
+    assert "protocol=calibration" not in output
+
+
+def test_run_level_throughput_uses_successful_bytes_over_successful_time(monkeypatch):
+    module = load_module()
+
+    def fake_stage(*_args, **_kwargs):
+        stage = module.StageResult(
+            size_label="20K",
+            size_bytes=20 * 1024,
+            mode="single",
+            workers=1,
+            files_per_worker=1,
+            total_files=1,
+        )
+        stage.started_at_s = 0.0
+        stage.ended_at_s = 10.0
+        stage.transfers.extend(
+            [
+                module.TransferResult(
+                    size_label="20K",
+                    size_bytes=20 * 1024,
+                    worker=1,
+                    iteration=1,
+                    success=True,
+                    upload_time_s=1.0,
+                    download_time_s=2.0,
+                    upload_bytes=2 * 1024,
+                    download_bytes=4 * 1024,
+                    verify_ok=True,
+                    verify_checked=True,
+                ),
+                module.TransferResult(
+                    size_label="20K",
+                    size_bytes=20 * 1024,
+                    worker=1,
+                    iteration=2,
+                    success=True,
+                    upload_time_s=3.0,
+                    download_time_s=4.0,
+                    upload_bytes=6 * 1024,
+                    download_bytes=8 * 1024,
+                    verify_ok=True,
+                    verify_checked=True,
+                ),
+                module.TransferResult(
+                    size_label="20K",
+                    size_bytes=20 * 1024,
+                    worker=1,
+                    iteration=3,
+                    success=False,
+                    failure_type="upload_failed",
+                    failure_detail="550 Requested action not taken.",
+                    upload_time_s=5.0,
+                    upload_bytes=10 * 1024,
+                ),
+            ]
+        )
+        return stage
+
+    monkeypatch.setattr(module, "ensure_remote_dir", lambda _args: (True, None))
+    monkeypatch.setattr(module, "cleanup_remote_test_files", lambda _args: (0, None))
+    monkeypatch.setattr(module, "run_stage", fake_stage)
+
+    exit_code, output = run_main(
+        module,
+        ["--sizes", "20K", "--files-per-stage", "1", "--mode", "single", "--no-ensure-remote-dir"],
+    )
+
+    assert exit_code == 1
+    assert re.search(
+        r'protocol=summary result=FAIL detail="dur_s=\d+ up_KiBps=2 down_KiBps=2 agg_KiBps=2 fail=1 verify_fail=0 failed_stages=1 errors=550:1"',
+        output,
+    )
+
+
+def test_summary_duration_includes_ops_phase(monkeypatch):
+    module = load_module()
+
+    stage = module.StageResult(
+        size_label="20K",
+        size_bytes=20 * 1024,
+        mode="single",
+        workers=1,
+        files_per_worker=1,
+        total_files=1,
+    )
+    stage.started_at_s = 0.0
+    stage.ended_at_s = 1.0
+    stage.transfers.append(
+        module.TransferResult(
+            size_label="20K",
+            size_bytes=20 * 1024,
+            worker=1,
+            iteration=1,
+            success=True,
+            upload_time_s=1.0,
+            download_time_s=1.0,
+            upload_bytes=1024,
+            download_bytes=1024,
+            verify_ok=True,
+            verify_checked=True,
+        )
+    )
+
+    monkeypatch.setattr(module, "ensure_remote_dir", lambda _args: (True, None))
+    monkeypatch.setattr(module, "cleanup_remote_test_files", lambda _args: (0, None))
+    monkeypatch.setattr(module, "run_stage", lambda *_args, **_kwargs: stage)
+    monkeypatch.setattr(module, "run_ops_stage", lambda *_args, **_kwargs: module.OpsResult(success=True))
+    monotonic_values = iter([0.0, 5.0])
+    monkeypatch.setattr(module.time, "monotonic", lambda: next(monotonic_values))
+
+    exit_code, output = run_main(
+        module,
+        ["--sizes", "20K", "--files-per-stage", "1", "--mode", "single", "--no-ensure-remote-dir"],
+    )
+
+    assert exit_code == 0
+    assert 'protocol=summary result=OK detail="dur_s=5 ' in output
+
+
+def test_failure_aggregation_groups_top_three_errors_deterministically():
+    module = load_module()
+
+    stage = module.StageResult(
+        size_label="20K",
+        size_bytes=20 * 1024,
+        mode="single",
+        workers=1,
+        files_per_worker=1,
+        total_files=1,
+    )
+    stage.transfers.extend(
+        [
+            module.TransferResult("20K", 20 * 1024, 1, 1, False, "upload_failed", "452 Requested action not taken."),
+            module.TransferResult("20K", 20 * 1024, 1, 2, False, "upload_failed", "452 Requested action not taken."),
+            module.TransferResult("20K", 20 * 1024, 1, 3, False, "download_failed", "Connection reset by peer"),
+            module.TransferResult("20K", 20 * 1024, 1, 4, False, "download_failed", "Connection reset"),
+            module.TransferResult("20K", 20 * 1024, 1, 5, False, "upload_failed", "timed out waiting for reply"),
+            module.TransferResult("20K", 20 * 1024, 1, 6, False, "upload_failed", "temporary glitch"),
+            module.TransferResult("20K", 20 * 1024, 1, 7, False, "verify_mismatch", "expected_bytes=1 got_bytes=2"),
+        ]
+    )
+
+    assert module.summarize_transfer_errors([stage]) == "452:2,conn_reset:2,temporary_glitch:1"
+
+
+def test_summary_output_line_is_present_and_ordered_without_score_fields():
+    module = load_module()
+    state = install_fake_ftp(module)
+    state.ensure_dir("/Temp")
+    state.ensure_dir("/Temp/test")
+    state.ensure_dir("/Temp/test/FTP")
+
+    exit_code, output = run_main(
+        module,
+        ["--sizes", "20K,200K,1M", "--files-per-stage", "1", "--mode", "single"],
+    )
+
+    assert exit_code == 0
+    assert re.search(
+        r'protocol=summary result=OK detail="dur_s=\d+ up_KiBps=\d+ down_KiBps=\d+ agg_KiBps=\d+(?: lat_ms_p50=\d+ lat_ms_p90=\d+)? fail=0 verify_fail=0 failed_stages=0"',
+        output,
+    )
+    assert "protocol=score" not in output
+    assert "score_breakdown" not in output
+
+
+def test_latency_percentiles_use_p50_and_p90_when_ops_metrics_exist():
+    module = load_module()
+
+    ops = module.OpsResult(
+        success=True,
+        latency_ms={"cd": 10, "list": 20, "nlst": 40, "mlsd": 50, "delete": 100},
+    )
+
+    assert module.summarize_latency_ms(ops) == (40, 80)
 
 
 def test_run_ops_stage_closes_session_when_connect_sequence_fails(monkeypatch):

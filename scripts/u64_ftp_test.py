@@ -28,9 +28,10 @@ DEFAULT_FTP_USER = ""
 DEFAULT_FTP_PASS = ""
 DEFAULT_PASSIVE = True
 DEFAULT_TIMEOUT_S = 10
-DEFAULT_REMOTE_DIR = "/USB2/test/FTP"
+DEFAULT_REMOTE_DIR = "/Temp/test/FTP"
 DEFAULT_SIZES = "20K,200K,1M"
-DEFAULT_TARGET_BYTES = "1M"
+DEFAULT_TARGET_STAGE_DURATION_S = 20.0
+DEFAULT_CALIBRATION_SAMPLE_S = 2.5
 DEFAULT_CONCURRENCY = 3
 DEFAULT_MODE = "both"
 DEFAULT_VERIFY = True
@@ -40,6 +41,8 @@ DEFAULT_MAX_RUNTIME_S = (
 )
 DEFAULT_FORMAT = "text"
 DEFAULT_ENSURE_REMOTE_DIR = True
+DEFAULT_MIN_FILES_PER_WORKER = 3
+DEFAULT_MAX_FILES_PER_WORKER = 12
 
 MODES = ("single", "multi", "both")
 FORMATS = ("text", "json")
@@ -93,6 +96,26 @@ def parse_sizes(value: str) -> tuple[tuple[str, int], ...]:
 def parse_byte_size(value: str) -> int:
     _label, byte_count = parse_size_token(value)
     return byte_count
+
+
+def parse_positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(f"invalid integer: {value!r}") from error
+    if parsed < 1:
+        raise argparse.ArgumentTypeError(f"value must be >= 1: {value!r}")
+    return parsed
+
+
+def parse_positive_float(value: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(f"invalid number: {value!r}") from error
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError(f"value must be > 0: {value!r}")
+    return parsed
 
 
 def parse_mode(value: str) -> str:
@@ -154,50 +177,199 @@ def parse_remote_dir(value: str) -> str:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="u64_ftp_test",
-        description="Deterministic FTP performance tester for Ultimate 64 devices.",
+        description=(
+            "Deterministic FTP performance tester for Ultimate 64 devices. "
+            "Each size tier is first calibrated with a short upload/download probe, "
+            "then stage file counts are auto-sized to target a predictable wall-clock duration. "
+            "After the benchmark, the tool appends a deterministic summary of throughput, "
+            "ops latency percentiles, and failure counts. "
+            "Before each run, the tool removes only prior managed test files "
+            "matching the u64ftp_* naming pattern from the selected remote directory."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  u64_ftp_test --remote-dir /Temp/test/FTP\n"
+            "  u64_ftp_test --sizes 20K,200K --target-stage-duration-s 12 --mode multi --concurrency 4\n"
+            "  u64_ftp_test --files-per-stage 6 --format json --no-verify"
+        ),
     )
-    parser.add_argument("-H", "--host", default=DEFAULT_HOST)
-    parser.add_argument("--ftp-port", type=int, default=DEFAULT_FTP_PORT)
-    parser.add_argument("-u", "--ftp-user", default=DEFAULT_FTP_USER)
-    parser.add_argument("-P", "--ftp-pass", default=DEFAULT_FTP_PASS)
+    parser.add_argument(
+        "-H",
+        "--host",
+        default=DEFAULT_HOST,
+        help=f"FTP hostname or IP address. Default: {DEFAULT_HOST}.",
+    )
+    parser.add_argument(
+        "--ftp-port",
+        type=int,
+        default=DEFAULT_FTP_PORT,
+        help=f"FTP control port. Default: {DEFAULT_FTP_PORT}.",
+    )
+    parser.add_argument(
+        "-u",
+        "--ftp-user",
+        default=DEFAULT_FTP_USER,
+        help="FTP username. Default: empty string.",
+    )
+    parser.add_argument(
+        "-P",
+        "--ftp-pass",
+        default=DEFAULT_FTP_PASS,
+        help="FTP password. Default: empty string.",
+    )
     passive_group = parser.add_mutually_exclusive_group()
     passive_group.add_argument(
-        "--passive", dest="passive", action="store_true", default=DEFAULT_PASSIVE
+        "--passive",
+        dest="passive",
+        action="store_true",
+        default=DEFAULT_PASSIVE,
+        help="Use passive mode for data connections. Default: enabled.",
     )
-    passive_group.add_argument("--no-passive", dest="passive", action="store_false")
-    parser.add_argument("--timeout-s", type=int, default=DEFAULT_TIMEOUT_S)
+    passive_group.add_argument(
+        "--no-passive",
+        dest="passive",
+        action="store_false",
+        help="Use active mode instead of passive mode.",
+    )
     parser.add_argument(
-        "--remote-dir", type=parse_remote_dir, default=parse_remote_dir(DEFAULT_REMOTE_DIR)
+        "--timeout-s",
+        type=int,
+        default=DEFAULT_TIMEOUT_S,
+        help=f"Socket timeout in seconds. Default: {DEFAULT_TIMEOUT_S}.",
     )
-    parser.add_argument("--sizes", type=parse_sizes, default=parse_sizes(DEFAULT_SIZES))
     parser.add_argument(
-        "--target-bytes", type=parse_byte_size, default=parse_byte_size(DEFAULT_TARGET_BYTES)
+        "--remote-dir",
+        type=parse_remote_dir,
+        default=parse_remote_dir(DEFAULT_REMOTE_DIR),
+        help=(
+            "Absolute FTP directory used for uploads, downloads, startup cleanup, "
+            f"and post-run ops checks. Default: {DEFAULT_REMOTE_DIR}."
+        ),
     )
-    parser.add_argument("--files-per-stage", type=int, default=None)
-    parser.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY)
-    parser.add_argument("--mode", type=parse_mode, default=DEFAULT_MODE)
+    parser.add_argument(
+        "--sizes",
+        type=parse_sizes,
+        default=parse_sizes(DEFAULT_SIZES),
+        help=(
+            "Comma-separated stage sizes. Accepted units per token: raw bytes, K, M, or G, "
+            f"for example 20K,200K,1M. Default: {DEFAULT_SIZES}."
+        ),
+    )
+    parser.add_argument(
+        "--target-stage-duration-s",
+        type=parse_positive_float,
+        default=DEFAULT_TARGET_STAGE_DURATION_S,
+        help=(
+            "Target wall-clock duration for each stage in seconds. The tool first runs a short "
+            "per-size calibration probe, then derives worker-aware file counts from the measured "
+            f"effective throughput. Default: {int(DEFAULT_TARGET_STAGE_DURATION_S)}."
+        ),
+    )
+    parser.add_argument(
+        "--files-per-stage",
+        type=parse_positive_int,
+        default=None,
+        help=(
+            "Exact per-worker file count override. When set, calibration and automatic stage sizing "
+            "are skipped entirely. Accepted values: integer >= 1. Default: auto."
+        ),
+    )
+    parser.add_argument(
+        "--min-files-per-worker",
+        type=parse_positive_int,
+        default=DEFAULT_MIN_FILES_PER_WORKER,
+        help=(
+            "Minimum auto-sized per-worker file count after calibration. "
+            f"Default: {DEFAULT_MIN_FILES_PER_WORKER}."
+        ),
+    )
+    parser.add_argument(
+        "--max-files-per-worker",
+        type=parse_positive_int,
+        default=DEFAULT_MAX_FILES_PER_WORKER,
+        help=(
+            "Maximum auto-sized per-worker file count after calibration. "
+            f"Default: {DEFAULT_MAX_FILES_PER_WORKER}."
+        ),
+    )
+    parser.add_argument(
+        "--concurrency",
+        type=parse_positive_int,
+        default=DEFAULT_CONCURRENCY,
+        help=f"Worker count for multi mode. Accepted values: integer >= 1. Default: {DEFAULT_CONCURRENCY}.",
+    )
+    parser.add_argument(
+        "--mode",
+        type=parse_mode,
+        choices=MODES,
+        default=DEFAULT_MODE,
+        help=f"Stage variants to run. Choices: {', '.join(MODES)}. Default: {DEFAULT_MODE}.",
+    )
     verify_group = parser.add_mutually_exclusive_group()
     verify_group.add_argument(
-        "--verify", dest="verify", action="store_true", default=DEFAULT_VERIFY
+        "--verify",
+        dest="verify",
+        action="store_true",
+        default=DEFAULT_VERIFY,
+        help="Read each uploaded file back and compare bytes. Default: enabled.",
     )
-    verify_group.add_argument("--no-verify", dest="verify", action="store_false")
+    verify_group.add_argument(
+        "--no-verify",
+        dest="verify",
+        action="store_false",
+        help="Skip download byte verification.",
+    )
     fail_fast_group = parser.add_mutually_exclusive_group()
     fail_fast_group.add_argument(
-        "--fail-fast", dest="fail_fast", action="store_true", default=DEFAULT_FAIL_FAST
+        "--fail-fast",
+        dest="fail_fast",
+        action="store_true",
+        default=DEFAULT_FAIL_FAST,
+        help="Stop after the first failed transfer or stage. Default: disabled.",
     )
-    fail_fast_group.add_argument("--no-fail-fast", dest="fail_fast", action="store_false")
-    parser.add_argument("--max-runtime-s", type=int, default=DEFAULT_MAX_RUNTIME_S)
-    parser.add_argument("--format", type=parse_format, default=DEFAULT_FORMAT)
-    parser.add_argument("-v", "--verbose", action="store_true", default=False)
+    fail_fast_group.add_argument(
+        "--no-fail-fast",
+        dest="fail_fast",
+        action="store_false",
+        help="Always run the full matrix even after failures.",
+    )
+    parser.add_argument(
+        "--max-runtime-s",
+        type=int,
+        default=DEFAULT_MAX_RUNTIME_S,
+        help=(
+            "Optional wall-clock limit for the stage matrix. Accepted values: integer >= 0. "
+            f"Zero disables the cap. Default: {DEFAULT_MAX_RUNTIME_S}."
+        ),
+    )
+    parser.add_argument(
+        "--format",
+        type=parse_format,
+        choices=FORMATS,
+        default=DEFAULT_FORMAT,
+        help=f"Output format. Choices: {', '.join(FORMATS)}. Default: {DEFAULT_FORMAT}.",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        default=False,
+        help="Log every successful transfer instead of failures only. Default: disabled.",
+    )
     ensure_group = parser.add_mutually_exclusive_group()
     ensure_group.add_argument(
         "--ensure-remote-dir",
         dest="ensure_remote_dir",
         action="store_true",
         default=DEFAULT_ENSURE_REMOTE_DIR,
+        help="Create the remote directory chain before cleanup and testing. Default: enabled.",
     )
     ensure_group.add_argument(
-        "--no-ensure-remote-dir", dest="ensure_remote_dir", action="store_false"
+        "--no-ensure-remote-dir",
+        dest="ensure_remote_dir",
+        action="store_false",
+        help="Assume the remote directory already exists.",
     )
     return parser
 
@@ -244,6 +416,20 @@ def build_renamed_test_filename(filename: str) -> str:
 
 def normalize_managed_test_filenames(filenames: list[str]) -> set[str]:
     return {validate_managed_test_filename(name) for name in filenames}
+
+
+def build_calibration_filename(size_label: str) -> str:
+    return validate_ftp_basename(f"u64ftp_cal_{size_label}.bin", label="calibration filename")
+
+
+def list_managed_test_filenames(ftp: ftplib.FTP) -> list[str]:
+    managed: set[str] = set()
+    for entry in ftp.nlst():
+        basename = entry.rsplit("/", 1)[-1].strip()
+        if not basename or not is_managed_test_filename(basename):
+            continue
+        managed.add(validate_managed_test_filename(basename))
+    return sorted(managed)
 
 
 # ------------------------------ logging ---------------------------------
@@ -408,6 +594,78 @@ def _format_value(value: object) -> str:
     return str(value)
 
 
+def _kib_per_second(byte_count: int, duration_s: float) -> float:
+    if byte_count <= 0 or duration_s <= 0:
+        return 0.0
+    return (byte_count / 1024.0) / duration_s
+
+
+def _harmonic_mean(first: float, second: float) -> float | None:
+    if first <= 0 or second <= 0:
+        return None
+    return 2.0 / ((1.0 / first) + (1.0 / second))
+
+
+def _percentile(values: list[int], fraction: float) -> int | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    position = max(0.0, min(1.0, fraction)) * (len(ordered) - 1)
+    lower_index = int(math.floor(position))
+    upper_index = int(math.ceil(position))
+    if lower_index == upper_index:
+        return ordered[lower_index]
+    lower_value = ordered[lower_index]
+    upper_value = ordered[upper_index]
+    weight = position - lower_index
+    return int(round(lower_value + ((upper_value - lower_value) * weight)))
+
+
+def _normalize_error_label(value: str | None) -> str:
+    raw = (value or "").strip().lower()
+    if not raw:
+        return "unknown"
+    raw = re.sub(r"[^a-z0-9\s]", " ", raw)
+    raw = re.sub(r"\s+", "_", raw).strip("_")
+    if not raw:
+        return "unknown"
+    if raw.startswith("connection_reset"):
+        return "conn_reset"
+    if raw.startswith("connection_refused") or raw.endswith("_refused"):
+        return "conn_refused"
+    if "timed_out" in raw or "timeout" in raw:
+        return "timeout"
+    match = re.match(r"^(\d{3})(?:_|$)", raw)
+    if match is not None:
+        return match.group(1)
+    return raw
+
+
+def summarize_transfer_errors(stages: list[StageResult]) -> str | None:
+    counts: dict[str, int] = {}
+    for stage in stages:
+        for transfer in stage.transfers:
+            if transfer.success or transfer.failure_type == "verify_mismatch":
+                continue
+            label = _normalize_error_label(transfer.failure_detail or transfer.failure_type)
+            counts[label] = counts.get(label, 0) + 1
+    if not counts:
+        return None
+    ordered = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    return ",".join(f"{label}:{count}" for label, count in ordered[:3])
+
+
+def summarize_latency_ms(ops_result: OpsResult | None) -> tuple[int | None, int | None]:
+    if ops_result is None:
+        return None, None
+    values = [value for value in ops_result.latency_ms.values() if value > 0]
+    if not values:
+        return None, None
+    return _percentile(values, 0.5), _percentile(values, 0.9)
+
+
 # ------------------------------ data model ------------------------------
 
 
@@ -428,16 +686,12 @@ class TransferResult:
     verify_checked: bool = False
 
     @property
-    def upload_KBps(self) -> float:
-        if self.upload_time_s <= 0:
-            return 0.0
-        return (self.upload_bytes / 1024.0) / self.upload_time_s
+    def upload_KiBps(self) -> float:
+        return _kib_per_second(self.upload_bytes, self.upload_time_s)
 
     @property
-    def download_KBps(self) -> float:
-        if self.download_time_s <= 0:
-            return 0.0
-        return (self.download_bytes / 1024.0) / self.download_time_s
+    def download_KiBps(self) -> float:
+        return _kib_per_second(self.download_bytes, self.download_time_s)
 
 
 @dataclass
@@ -460,6 +714,26 @@ class OpsResult:
     delete_time_s: float = 0.0
     success: bool = True
     error_detail: str | None = None
+    latency_ms: dict[str, int] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class CalibrationResult:
+    size_label: str
+    size_bytes: int
+    estimated_KiBps: int
+    upload_KiBps: int
+    download_KiBps: int
+    sample_s: float
+
+
+@dataclass(frozen=True)
+class StageSizing:
+    files_per_worker: int
+    total_files: int
+    planned_stage_bytes: int
+    estimated_KiBps: int
+    sampling_mode: str
 
 
 @dataclass
@@ -470,44 +744,54 @@ class StageResult:
     workers: int
     files_per_worker: int
     total_files: int
+    planned_stage_bytes: int = 0
+    estimated_KiBps: int = 0
+    sampling_mode: str = "auto"
     transfers: list[TransferResult] = field(default_factory=list)
     started_at_s: float = 0.0
     ended_at_s: float = 0.0
     aborted: bool = False
 
     def total_bytes_up(self) -> int:
-        return sum(t.upload_bytes for t in self.transfers if t.success)
+        return sum(t.upload_bytes for t in self.transfers)
 
     def total_bytes_down(self) -> int:
+        return sum(t.download_bytes for t in self.transfers)
+
+    def successful_bytes_up(self) -> int:
+        return sum(t.upload_bytes for t in self.transfers if t.success)
+
+    def successful_bytes_down(self) -> int:
         return sum(t.download_bytes for t in self.transfers if t.success)
+
+    def successful_upload_time_s(self) -> float:
+        return sum(t.upload_time_s for t in self.transfers if t.success)
+
+    def successful_download_time_s(self) -> float:
+        return sum(t.download_time_s for t in self.transfers if t.success)
 
     def success_count(self) -> int:
         return sum(1 for t in self.transfers if t.success)
 
     def failure_count(self) -> int:
-        return sum(1 for t in self.transfers if not t.success)
+        return sum(
+            1 for t in self.transfers if not t.success and t.failure_type != "verify_mismatch"
+        )
 
     def verify_failures(self) -> int:
-        return sum(1 for t in self.transfers if t.verify_checked and not t.verify_ok)
+        return sum(1 for t in self.transfers if t.failure_type == "verify_mismatch")
 
-    def aggregate_upload_KBps(self) -> float:
+    def aggregate_upload_KiBps(self) -> float:
         """Aggregate stage upload throughput, summed across all workers.
 
         Computed as total successful upload bytes divided by the stage's
-        wall-clock duration, in kilobytes/sec (1024-based). Returns 0 when
-        the stage produced no successful transfers or has no measurable
-        duration.
+        wall-clock duration, in KiB/s. Returns 0 when the stage has no
+        measurable duration.
         """
-        duration = self.total_time_s()
-        if duration <= 0:
-            return 0.0
-        return (self.total_bytes_up() / 1024.0) / duration
+        return _kib_per_second(self.total_bytes_up(), self.total_time_s())
 
-    def aggregate_download_KBps(self) -> float:
-        duration = self.total_time_s()
-        if duration <= 0:
-            return 0.0
-        return (self.total_bytes_down() / 1024.0) / duration
+    def aggregate_download_KiBps(self) -> float:
+        return _kib_per_second(self.total_bytes_down(), self.total_time_s())
 
     def total_time_s(self) -> float:
         if self.ended_at_s > self.started_at_s:
@@ -614,6 +898,23 @@ def close_session(ftp: ftplib.FTP | None) -> None:
             pass
 
 
+def cleanup_remote_test_files(args: argparse.Namespace) -> tuple[int, str | None]:
+    ftp: ftplib.FTP | None = None
+    deleted_count = 0
+    try:
+        ftp = open_session(args)
+        for filename in list_managed_test_filenames(ftp):
+            ftp.delete(filename)
+            deleted_count += 1
+        return deleted_count, None
+    except FtpOpenError as error:
+        return deleted_count, f"{error.phase}: {error.cause}"
+    except (OSError, ftplib.Error, EOFError, socket.timeout) as error:
+        return deleted_count, str(error) or error.__class__.__name__
+    finally:
+        close_session(ftp)
+
+
 def safe_sendcmd(ftp: ftplib.FTP, cmd_name: str, argument: str | None = None) -> str:
     safe_cmd = cmd_name.strip().upper()
     if not safe_cmd or any(ch.isspace() for ch in safe_cmd):
@@ -683,6 +984,78 @@ def run_single_transfer(
     else:
         result.success = True
     return result
+
+
+def run_calibration_probe(
+    args: argparse.Namespace,
+    size_label: str,
+    size_bytes: int,
+    sample_s: float,
+) -> CalibrationResult:
+    ftp: ftplib.FTP | None = None
+    payload = build_payload(size_bytes)
+    filename = build_calibration_filename(size_label)
+    upload_bytes = 0
+    download_bytes = 0
+    started_at_s = time.perf_counter()
+    iteration = 0
+    try:
+        ftp = open_session(args)
+        while iteration == 0 or (time.perf_counter() - started_at_s) < sample_s:
+            ftp.storbinary(f"STOR {filename}", io.BytesIO(payload))
+            upload_bytes += len(payload)
+
+            received = bytearray()
+            ftp.retrbinary(f"RETR {filename}", received.extend)
+            if bytes(received) != payload:
+                raise ValueError("calibration verify mismatch")
+            download_bytes += len(received)
+            iteration += 1
+    finally:
+        elapsed_s = max(time.perf_counter() - started_at_s, 0.001)
+        if ftp is not None:
+            try:
+                ftp.delete(filename)
+            except (OSError, ftplib.Error, EOFError, socket.timeout):
+                pass
+        close_session(ftp)
+
+    upload_kibps = int(round(_kib_per_second(upload_bytes, elapsed_s)))
+    download_kibps = int(round(_kib_per_second(download_bytes, elapsed_s)))
+    estimated_kibps = max(1, int(round((upload_kibps + download_kibps) / 2.0)))
+    return CalibrationResult(
+        size_label=size_label,
+        size_bytes=size_bytes,
+        estimated_KiBps=estimated_kibps,
+        upload_KiBps=upload_kibps,
+        download_KiBps=download_kibps,
+        sample_s=elapsed_s,
+    )
+
+
+def calibration_sample_s(size_count: int) -> float:
+    return min(DEFAULT_CALIBRATION_SAMPLE_S, 9.0 / max(1, size_count))
+
+
+def calibrate_sizes(
+    args: argparse.Namespace,
+    emitter: Emitter,
+) -> dict[str, CalibrationResult]:
+    sample_s = calibration_sample_s(len(args.sizes))
+    results: dict[str, CalibrationResult] = {}
+    for size_label, size_bytes in args.sizes:
+        result = run_calibration_probe(args, size_label, size_bytes, sample_s)
+        results[size_label] = result
+        emitter.emit_text(
+            "calibration",
+            "INFO",
+            [
+                ("size", size_label),
+                ("est_KiBps", result.estimated_KiBps),
+                ("sample_s", round(result.sample_s, 1)),
+            ],
+        )
+    return results
 
 
 # ------------------------------ stage runner ----------------------------
@@ -760,8 +1133,8 @@ def log_transfer(context: StageContext, transfer: TransferResult) -> None:
             ("size", transfer.size_label),
             ("worker", transfer.worker),
             ("iter", transfer.iteration),
-            ("up_KBps", int(round(transfer.upload_KBps))),
-            ("down_KBps", int(round(transfer.download_KBps))),
+            ("up_KiBps", int(round(transfer.upload_KiBps))),
+            ("down_KiBps", int(round(transfer.download_KiBps))),
             (
                 "verify",
                 "OK" if transfer.verify_ok else ("SKIP" if not transfer.verify_checked else "FAIL"),
@@ -779,10 +1152,68 @@ def log_transfer(context: StageContext, transfer: TransferResult) -> None:
         context.emitter.emit_text("transfer", "FAIL", detail)
 
 
-def compute_files_per_worker(size_bytes: int, target_bytes: int, override: int | None) -> int:
+def compute_stage_sizing(
+    size_bytes: int,
+    workers: int,
+    target_stage_duration_s: float,
+    estimated_KiBps: int,
+    override: int | None,
+    min_files_per_worker: int,
+    max_files_per_worker: int,
+) -> StageSizing:
     if override is not None:
-        return max(1, int(override))
-    return max(1, math.ceil(target_bytes / size_bytes))
+        files_per_worker = max(1, int(override))
+        return StageSizing(
+            files_per_worker=files_per_worker,
+            total_files=files_per_worker * workers,
+            planned_stage_bytes=files_per_worker * workers * size_bytes,
+            estimated_KiBps=0,
+            sampling_mode="override",
+        )
+
+    target_stage_bytes = max(
+        size_bytes,
+        int(round(float(estimated_KiBps) * float(target_stage_duration_s) * 1024.0)),
+    )
+    target_total_files = max(1, math.ceil(target_stage_bytes / size_bytes))
+    raw_files_per_worker = max(1, math.ceil(target_total_files / max(1, workers)))
+    files_per_worker = raw_files_per_worker
+    sampling_mode = "auto"
+    if files_per_worker < min_files_per_worker:
+        files_per_worker = min_files_per_worker
+        sampling_mode = "clamped_min"
+    elif files_per_worker > max_files_per_worker:
+        files_per_worker = max_files_per_worker
+        sampling_mode = "clamped_max"
+
+    total_files = files_per_worker * workers
+    return StageSizing(
+        files_per_worker=files_per_worker,
+        total_files=total_files,
+        planned_stage_bytes=total_files * size_bytes,
+        estimated_KiBps=max(0, int(estimated_KiBps)),
+        sampling_mode=sampling_mode,
+    )
+
+
+def compute_files_per_worker(
+    size_bytes: int,
+    workers: int,
+    target_stage_duration_s: float,
+    estimated_KiBps: int,
+    override: int | None,
+    min_files_per_worker: int,
+    max_files_per_worker: int,
+) -> int:
+    return compute_stage_sizing(
+        size_bytes,
+        workers,
+        target_stage_duration_s,
+        estimated_KiBps,
+        override,
+        min_files_per_worker,
+        max_files_per_worker,
+    ).files_per_worker
 
 
 def run_stage(
@@ -792,18 +1223,29 @@ def run_stage(
     size_bytes: int,
     mode: str,
     workers: int,
+    calibration: CalibrationResult | None,
     deadline_s: float | None,
 ) -> StageResult:
-    files_per_worker = compute_files_per_worker(size_bytes, args.target_bytes, args.files_per_stage)
-    total_files = files_per_worker * workers
+    sizing = compute_stage_sizing(
+        size_bytes,
+        workers,
+        args.target_stage_duration_s,
+        calibration.estimated_KiBps if calibration is not None else 0,
+        args.files_per_stage,
+        args.min_files_per_worker,
+        args.max_files_per_worker,
+    )
 
     stage = StageResult(
         size_label=size_label,
         size_bytes=size_bytes,
         mode=mode,
         workers=workers,
-        files_per_worker=files_per_worker,
-        total_files=total_files,
+        files_per_worker=sizing.files_per_worker,
+        total_files=sizing.total_files,
+        planned_stage_bytes=sizing.planned_stage_bytes,
+        estimated_KiBps=sizing.estimated_KiBps,
+        sampling_mode=sizing.sampling_mode,
     )
 
     emitter.emit_text(
@@ -813,13 +1255,19 @@ def run_stage(
             ("size", size_label),
             ("mode", mode),
             ("workers", workers),
-            ("files_per_worker", files_per_worker),
-            ("total_files", total_files),
-            ("target", _format_bytes_short(args.target_bytes)),
+            ("files_per_worker", sizing.files_per_worker),
+            ("total_files", sizing.total_files),
+            ("target", _format_bytes_short(sizing.planned_stage_bytes)),
+            ("planned_stage_bytes", sizing.planned_stage_bytes),
+            ("target_stage_duration_s", _format_value(args.target_stage_duration_s)),
+            ("estimated_KiBps", sizing.estimated_KiBps),
+            ("sampling_mode", sizing.sampling_mode),
         ],
     )
 
-    emitter.progress_start(f"size={size_label} mode={mode} workers={workers}", total_files)
+    emitter.progress_start(
+        f"size={size_label} mode={mode} workers={workers}", sizing.total_files
+    )
 
     payload = build_payload(size_bytes)
     abort_flag = threading.Event()
@@ -828,13 +1276,21 @@ def run_stage(
     stage.started_at_s = time.perf_counter()
 
     if workers == 1:
-        stage.transfers = worker_loop(1, files_per_worker, size_label, size_bytes, payload, context)
+        stage.transfers = worker_loop(
+            1, sizing.files_per_worker, size_label, size_bytes, payload, context
+        )
     else:
         ordered: list[list[TransferResult]] = [[] for _ in range(workers)]
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="u64ftp") as pool:
             futures = {
                 pool.submit(
-                    worker_loop, idx + 1, files_per_worker, size_label, size_bytes, payload, context
+                    worker_loop,
+                    idx + 1,
+                    sizing.files_per_worker,
+                    size_label,
+                    size_bytes,
+                    payload,
+                    context,
                 ): idx
                 for idx in range(workers)
             }
@@ -869,8 +1325,8 @@ def run_stage(
             ("size", size_label),
             ("mode", mode),
             ("stage_s", round(stage.total_time_s(), 2)),
-            ("agg_up_KBps", int(round(stage.aggregate_upload_KBps()))),
-            ("agg_down_KBps", int(round(stage.aggregate_download_KBps()))),
+            ("up_KiBps", int(round(stage.aggregate_upload_KiBps()))),
+            ("down_KiBps", int(round(stage.aggregate_download_KiBps()))),
             ("success", stage.success_count()),
             ("fail", stage.failure_count()),
             ("verify_fail", stage.verify_failures()),
@@ -908,7 +1364,6 @@ def workers_for(mode: str, concurrency: int) -> int:
 
 def emit_config(args: argparse.Namespace, emitter: Emitter) -> dict:
     sizes_str = ",".join(label for label, _ in args.sizes)
-    target_str = _format_bytes_short(args.target_bytes)
     config_dict = {
         "host": args.host,
         "ftp_port": args.ftp_port,
@@ -917,8 +1372,10 @@ def emit_config(args: argparse.Namespace, emitter: Emitter) -> dict:
         "timeout_s": args.timeout_s,
         "remote_dir": args.remote_dir,
         "sizes": sizes_str,
-        "target_bytes": args.target_bytes,
+        "target_stage_duration_s": args.target_stage_duration_s,
         "files_per_stage": args.files_per_stage,
+        "min_files_per_worker": args.min_files_per_worker,
+        "max_files_per_worker": args.max_files_per_worker,
         "concurrency": args.concurrency,
         "mode": args.mode,
         "verify": bool(args.verify),
@@ -935,7 +1392,7 @@ def emit_config(args: argparse.Namespace, emitter: Emitter) -> dict:
             ("host", args.host),
             ("dir", args.remote_dir),
             ("sizes", sizes_str),
-            ("target", target_str),
+            ("target", f"{_format_value(args.target_stage_duration_s)}s"),
             ("concurrency", args.concurrency),
             ("mode", args.mode),
             ("verify", args.verify),
@@ -952,17 +1409,20 @@ def build_stage_record(stage: StageResult) -> dict:
         "workers": stage.workers,
         "files_per_worker": stage.files_per_worker,
         "total_files": stage.total_files,
-        "agg_upload_KBps": round(stage.aggregate_upload_KBps(), 2),
-        "agg_download_KBps": round(stage.aggregate_download_KBps(), 2),
-        "success_count": stage.success_count(),
-        "failure_count": stage.failure_count(),
-        "verify_failures": stage.verify_failures(),
+        "planned_stage_bytes": stage.planned_stage_bytes,
+        "estimated_KiBps": stage.estimated_KiBps,
+        "sampling_mode": stage.sampling_mode,
+        "up_KiBps": round(stage.aggregate_upload_KiBps(), 2),
+        "down_KiBps": round(stage.aggregate_download_KiBps(), 2),
+        "success": stage.success_count(),
+        "fail": stage.failure_count(),
+        "verify_fail": stage.verify_failures(),
         "total_bytes_up": stage.total_bytes_up(),
         "total_bytes_down": stage.total_bytes_down(),
         "total_time_s": round(stage.total_time_s(), 3),
         "aborted": stage.aborted,
-        "throughput_basis": "aggregate_across_all_workers",
-        "throughput_unit": "KBps_1024_based",
+        "throughput_basis": "stage_wall_time_bytes_over_elapsed_s",
+        "throughput_unit": "KiBps",
         "transfers": [
             {
                 "worker": t.worker,
@@ -974,8 +1434,8 @@ def build_stage_record(stage: StageResult) -> dict:
                 "download_time_s": round(t.download_time_s, 6),
                 "upload_bytes": t.upload_bytes,
                 "download_bytes": t.download_bytes,
-                "upload_KBps": round(t.upload_KBps, 2),
-                "download_KBps": round(t.download_KBps, 2),
+                "upload_KiBps": round(t.upload_KiBps, 2),
+                "download_KiBps": round(t.download_KiBps, 2),
                 "verify_ok": t.verify_ok,
                 "verify_checked": t.verify_checked,
             }
@@ -1103,6 +1563,7 @@ def run_ops_stage(args: argparse.Namespace, emitter: Emitter, filenames: list[st
 
     ops.cd_time_s = time.perf_counter() - cd_start
     cd_avg = ops.cd_time_s / ops.cd_count if ops.cd_count else 0.0
+    ops.latency_ms["cd"] = int(round(cd_avg * 1000)) if ops.cd_count else 0
     emitter.emit_text("ops", "CD_PERF", [("count", ops.cd_count), ("avg_s", round(cd_avg, 4))])
 
     list_count = 5
@@ -1122,6 +1583,7 @@ def run_ops_stage(args: argparse.Namespace, emitter: Emitter, filenames: list[st
                 break
         op_dur = time.perf_counter() - op_start
         op_avg = op_dur / op_success if op_success else 0.0
+        ops.latency_ms[op.lower()] = int(round(op_avg * 1000)) if op_success else 0
         emitter.emit_text("ops", f"{op}_PERF", [("count", op_success), ("avg_s", round(op_avg, 4))])
 
     ops.list_time_s = time.perf_counter() - list_start
@@ -1208,6 +1670,7 @@ def run_ops_stage(args: argparse.Namespace, emitter: Emitter, filenames: list[st
 
     ops.delete_time_s = time.perf_counter() - del_start
     del_avg = ops.delete_time_s / ops.delete_count if ops.delete_count else 0.0
+    ops.latency_ms["delete"] = int(round(del_avg * 1000)) if ops.delete_count else 0
     emitter.emit_text(
         "ops", "DELETE_PERF", [("count", ops.delete_count), ("avg_s", round(del_avg, 4))]
     )
@@ -1264,13 +1727,48 @@ def run(args: argparse.Namespace) -> int:
                 [("dir", args.remote_dir), ("error", (detail or "").replace(" ", "_")[:200])],
             )
 
+    deleted_count, cleanup_error = cleanup_remote_test_files(args)
+    if cleanup_error is not None:
+        emitter.emit_text(
+            "setup",
+            "FAIL",
+            [
+                ("dir", args.remote_dir),
+                ("phase", "cleanup"),
+                ("error", cleanup_error.replace(" ", "_")[:200]),
+            ],
+        )
+        return 1
+    emitter.emit_text("setup", "INFO", [("dir", args.remote_dir), ("cleanup_deleted", deleted_count)])
+
+    calibrations: dict[str, CalibrationResult] = {}
+    if args.files_per_stage is None:
+        try:
+            calibrations = calibrate_sizes(args, emitter)
+        except (OSError, ftplib.Error, EOFError, socket.timeout, ValueError, FtpOpenError) as error:
+            emitter.emit_text(
+                "setup",
+                "FAIL",
+                [("phase", "calibration"), ("error", str(error).replace(" ", "_")[:200])],
+            )
+            return 1
+
     for size_label, size_bytes in args.sizes:
         for mode in modes_for(args.mode):
             if deadline_s is not None and time.monotonic() >= deadline_s:
                 partial = True
                 break
             workers = workers_for(mode, args.concurrency)
-            stage = run_stage(args, emitter, size_label, size_bytes, mode, workers, deadline_s)
+            stage = run_stage(
+                args,
+                emitter,
+                size_label,
+                size_bytes,
+                mode,
+                workers,
+                calibrations.get(size_label),
+                deadline_s,
+            )
             stages.append(stage)
             if stage.failure_count() > 0 or stage.verify_failures() > 0:
                 stages_failed += 1
@@ -1280,17 +1778,16 @@ def run(args: argparse.Namespace) -> int:
             continue
         break
 
-    total_runtime = time.monotonic() - start_monotonic
-    total_bytes_up = sum(s.total_bytes_up() for s in stages)
-    total_bytes_down = sum(s.total_bytes_down() for s in stages)
-    total_stage_seconds = sum(s.total_time_s() for s in stages)
-    agg_up_kbps = (
-        (total_bytes_up / 1024.0) / total_stage_seconds if total_stage_seconds > 0 else 0.0
-    )
-    agg_down_kbps = (
-        (total_bytes_down / 1024.0) / total_stage_seconds if total_stage_seconds > 0 else 0.0
-    )
-    overall_success = stages_failed == 0 and not partial and len(stages) > 0
+    total_bytes_up = sum(s.successful_bytes_up() for s in stages)
+    total_bytes_down = sum(s.successful_bytes_down() for s in stages)
+    total_upload_time_s = sum(s.successful_upload_time_s() for s in stages)
+    total_download_time_s = sum(s.successful_download_time_s() for s in stages)
+    total_fail = sum(s.failure_count() for s in stages)
+    total_verify_fail = sum(s.verify_failures() for s in stages)
+    run_up_kibps = _kib_per_second(total_bytes_up, total_upload_time_s)
+    run_down_kibps = _kib_per_second(total_bytes_down, total_download_time_s)
+    agg_kibps = _harmonic_mean(run_up_kibps, run_down_kibps)
+    overall_success = total_fail == 0 and total_verify_fail == 0 and not partial and len(stages) > 0
 
     ops_result: OpsResult | None = None
     if overall_success and not partial:
@@ -1306,17 +1803,20 @@ def run(args: argparse.Namespace) -> int:
         if not ops_result.success:
             overall_success = False
 
+    total_runtime = time.monotonic() - start_monotonic
+
     summary_dict = {
-        "runtime_s": round(total_runtime, 3),
-        "stage_seconds_total": round(total_stage_seconds, 3),
+        "dur_s": round(total_runtime, 3),
         "stages_run": len(stages),
-        "stages_failed": stages_failed,
+        "failed_stages": stages_failed,
         "total_bytes_up": total_bytes_up,
         "total_bytes_down": total_bytes_down,
-        "total_up_KB": total_bytes_up // 1024,
-        "total_down_KB": total_bytes_down // 1024,
-        "agg_up_KBps": round(agg_up_kbps, 2),
-        "agg_down_KBps": round(agg_down_kbps, 2),
+        "up_KiBps": round(run_up_kibps, 2),
+        "down_KiBps": round(run_down_kibps, 2),
+        "agg_KiBps": round(agg_kibps, 2) if agg_kibps is not None else None,
+        "total_fail": total_fail,
+        "total_verify_fail": total_verify_fail,
+        "errors": summarize_transfer_errors(stages),
         "ops_success": ops_result.success if ops_result else None,
         "ops_cd_count": ops_result.cd_count if ops_result else 0,
         "ops_list_count": ops_result.list_count if ops_result else 0,
@@ -1325,20 +1825,37 @@ def run(args: argparse.Namespace) -> int:
         "partial": partial,
     }
 
-    summary_result = "PARTIAL" if partial else ("OK" if overall_success else "FAIL")
+    summary_result = "OK" if overall_success else "FAIL"
+    lat_ms_p50, lat_ms_p90 = summarize_latency_ms(ops_result)
+    if lat_ms_p50 is not None:
+        summary_dict["lat_ms_p50"] = lat_ms_p50
+    if lat_ms_p90 is not None:
+        summary_dict["lat_ms_p90"] = lat_ms_p90
     emitter.summary = dict(summary_dict, result=summary_result)
+    summary_detail = [
+        ("dur_s", int(round(total_runtime))),
+        ("up_KiBps", int(round(run_up_kibps))),
+        ("down_KiBps", int(round(run_down_kibps))),
+    ]
+    if agg_kibps is not None:
+        summary_detail.append(("agg_KiBps", int(round(agg_kibps))))
+    if lat_ms_p50 is not None:
+        summary_detail.append(("lat_ms_p50", lat_ms_p50))
+    if lat_ms_p90 is not None:
+        summary_detail.append(("lat_ms_p90", lat_ms_p90))
+    summary_detail.extend(
+        [
+            ("fail", total_fail),
+            ("verify_fail", total_verify_fail),
+            ("failed_stages", stages_failed),
+        ]
+    )
+    if summary_dict["errors"]:
+        summary_detail.append(("errors", summary_dict["errors"]))
     emitter.emit_text(
         "summary",
         summary_result,
-        [
-            ("runtime_s", int(round(total_runtime))),
-            ("stages", len(stages)),
-            ("failed", stages_failed),
-            ("total_up_KB", total_bytes_up // 1024),
-            ("total_down_KB", total_bytes_down // 1024),
-            ("agg_up_KBps", int(round(agg_up_kbps))),
-            ("agg_down_KBps", int(round(agg_down_kbps))),
-        ],
+        summary_detail,
     )
 
     if args.format == "json":

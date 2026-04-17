@@ -1,5 +1,49 @@
 # Plans
 
+## U64 FTP Benchmark Reproducibility Plan
+
+Authoritative execution plan for hardening `scripts/u64_ftp_test.py` with time-normalized stage sizing, deterministic scoring, and minimal output extensions.
+
+### Execution Phases
+
+Phase 1: Pin current behavior and update the active plan  
+Status: COMPLETED
+
+- Read the current CLI, stage sizing logic, summary output, and unit tests.
+- Preserve any unrelated in-flight edits in `tests/unit/tooling/test_u64_ftp_test.py`.
+- The implementation patch is in place and validation is complete.
+
+Phase 2: Implement calibrated stage sizing  
+Status: COMPLETED
+
+- Replace the byte-target model with `--target-stage-duration-s`.
+- Add deterministic per-size calibration that measures upload and download throughput in a short bounded probe.
+- Compute worker-aware file counts with min/max clamping and explicit override bypass.
+- Extend stage start logging with the planned sizing fields and sampling mode.
+
+Phase 3: Add deterministic scoring and output extensions  
+Status: COMPLETED
+
+- Compute an auditable overall score from stage throughput, stage duration, ops latency, and failure penalties.
+- Append `protocol=score` and `protocol=score_breakdown` after the existing summary line.
+- Keep the line-oriented text output grep-friendly and stable.
+
+Phase 4: Extend unit coverage and validate  
+Status: COMPLETED
+
+- Update `tests/unit/tooling/test_u64_ftp_test.py` for calibration, auto-sizing, override bypass, scoring, and output format coverage.
+- Run `./.venv/bin/python -m pytest -o addopts='' tests/unit/tooling/test_u64_ftp_test.py`.
+- Run `./build` after the targeted tests pass.
+
+### Completion Criteria
+
+Done only when:
+
+- Stage sizing is duration-driven by default and calibration is skipped when `--files-per-stage` is set.
+- Stage start logs expose the new sizing fields and sampling mode without removing existing log lines.
+- Score and score breakdown lines are emitted after the summary and remain deterministic.
+- The targeted unit test file passes, then `./build` passes.
+
 ## FTP Implementation Prompt Plan
 
 Current authoritative plan for writing a self-contained implementation prompt that can be used inside a fresh `1541ultimate` checkout with no access to this repository's research folder.
@@ -204,6 +248,45 @@ Done only when:
 
 - FTP lifecycle failures are eliminated without weakening validation.
 - Telnet operations no longer rely on stale UI state and verified writes converge through HTTP read-back.
+
+---
+
+## U64 FTP Benchmark Metrics Hardening Plan
+
+Authoritative execution plan for removing subjective scoring from `scripts/u64_ftp_test.py` and replacing it with deterministic, engineering-grade summary metrics.
+
+### Execution Phases
+
+Phase 1: Re-read the current implementation and scoring surface  
+Status: COMPLETED
+
+- Confirm every scoring-related constant, helper, output line, and JSON field in `scripts/u64_ftp_test.py`.
+- Confirm the existing unit coverage in `tests/unit/tooling/test_u64_ftp_test.py` that must be removed or rewritten.
+- Preserve the current time-normalized stage sizing and transfer behavior.
+
+Phase 2: Replace scoring with deterministic throughput and failure metrics  
+Status: COMPLETED
+
+- Remove all score and score-breakdown outputs, helpers, constants, and JSON fields.
+- Rename visible throughput fields from `KB` to `KiB` and redefine stage/run throughput as total bytes divided by measured time.
+- Add deterministic failure counts, failed-stage accounting, compact error aggregation, and latency percentiles where available.
+- Rewrite the summary and stage END lines to keep them grep-friendly and compact.
+
+Phase 3: Update tests and validate  
+Status: COMPLETED
+
+- Remove scoring-focused assertions and add coverage for KiB units, throughput aggregation, summary ordering, latency percentiles, and deterministic error grouping.
+- Run `./.venv/bin/python -m pytest -o addopts='' tests/unit/tooling/test_u64_ftp_test.py`.
+- Run `./build` after the targeted tests pass.
+
+### Completion Criteria
+
+Done only when:
+
+- No scoring code, output, or test coverage remains.
+- Stage and summary throughput fields use `KiB` naming and exact bytes-over-time semantics.
+- Failures and top error classes are surfaced directly in both text and JSON summaries.
+- The targeted test file passes, then `./build` passes.
 - The shared model carries confirmed and tentative state for the mutated HTTP/FTP resources.
 - Probe semantics remain `smoke`, `read`, `readwrite`, and `incomplete`.
 - Validation evidence shows zero unexpected FAIL results for the targeted probe set.

@@ -1,4 +1,5 @@
 __pycache__/
+.codex
 .coverage
 .pytest_cache/
 .ruff_cache/
