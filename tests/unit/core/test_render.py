@@ -64,6 +64,16 @@ def test_overview_without_selection_does_not_invert_rows():
     assert frame.rows[0].startswith("Router")
 
 
+def test_overview_can_disable_selection_highlight_without_clearing_selection_state():
+    state = AppState(checks=(make_check("router", "Router"),), selected_id="router")
+
+    frame = render_frame(state, highlight_selection=False)
+
+    assert frame.inverted_row is None
+    assert frame.inverted_spans == ()
+    assert frame.rows[0].startswith("Router")
+
+
 def test_overview_displays_unknown_status_as_question_mark():
     state = AppState(checks=(make_check("router", "Router", status=Status.UNKNOWN),), selected_id="router")
 

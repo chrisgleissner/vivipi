@@ -229,6 +229,7 @@ Checks are evaluated periodically.
 - Telnet session
 - Must accept a TCP session
 - May report banner/session output when available
+- A post-connect idle timeout or reset still counts as reachable unless explicit login failure text is seen
 - Failure = connection failure, explicit login failure text, or timeout
 
 ### SERVICE
@@ -297,6 +298,7 @@ Rules:
 - UNKNOWN is displayed as "?"
 - No animation
 - FAIL has highest visual priority
+- The visible DEG phase MUST be configurable independently from the internal hysteresis state
 
 [VIVIPI-UX-STATUS-001]
 
@@ -317,8 +319,8 @@ Thresholds MUST be configurable.
 
 ## 7. Polling & Timing
 
-- Default interval: 15 seconds (configurable)
-- Timeout: 10 seconds (configurable)
+- Default interval: 5 seconds (configurable)
+- Timeout: 4 seconds (configurable)
 
 Constraint:
 
@@ -400,6 +402,7 @@ Button B:
 - Enter detail view
 - Return from detail view
 
+- Each press MUST produce a visible acknowledgement, either by changing selection/page state or by showing button feedback
 Debounce:
 
 - 20–50 ms

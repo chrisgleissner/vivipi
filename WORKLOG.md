@@ -1,5 +1,95 @@
 # ViviPi Work Log
 
+## 2026-04-17T17:45:00Z
+
+- Follow-up tuning after live validation showed intermittent single-probe false negatives.
+- Relaxed the checked-in direct-probe timing from `5s / 4s` to `7s / 5s` in `config/checks.yaml` and `config/checks.local.yaml`.
+  - rationale: preserve sub-15-second single-probe detection while stopping transient healthy probes from briefly flipping to `FAIL` on short network stalls
+  - `5s / 5s` was rejected by the config validator because `timeout_s` must remain at least 20% smaller than `interval_s`, so `7s / 5s` is the smallest legal timing pair that adds the needed slack
+- Investigated the inverted first display row and confirmed it was the normal overview selection highlight, not a display transport/render bug.
+- Temporarily disabled overview selection highlighting on the device runtime path:
+  - added a `highlight_selection` render/runtime switch with a safe default of `True`
+  - firmware now instantiates `RuntimeApp(..., highlight_selection=False)` so the real Pico display stays neutral until button input is fixed
+  - internal selection state is preserved; only the visible inversion is suppressed
+- Added focused coverage for the new behavior and revalidated:
+  - `tests/unit/core/test_render.py`
+  - `tests/unit/firmware/test_runtime.py`
+  - focused result: `39 passed`
+
+## 2026-04-17T17:20:00Z
+
+- Investigated the new report that powered-off `C64U` and `U64` were still shown as `OK` after 30s and that button presses had no effect.
+- Confirmed the direct probe/runtime logic itself was not the failing layer:
+  - with both devices powered off, `sg dialout -c 'mpremote connect auto run artifacts/device/pico_probe_runner.py'` reported `FAIL` for `c64u-rest`, `c64u-ftp`, `c64u-telnet`, `u64-rest`, `u64-ftp`, and `u64-telnet` within the configured `4s` timeout budget
+  - this means the runtime probe engine can detect the off-state correctly; the symptom was a stale or non-running unattended firmware session on the device
+- Root cause hypothesis strengthened by live behavior:
+  - the supported deploy path ended with `mpremote ... soft-reset`
+  - after prior USB/REPL interactions, that was not strong enough to guarantee the Pico returned to autonomous `boot.py` / `main.py` execution
+  - a stale screen plus dead buttons is consistent with the board being left in a non-running interactive state even though the copied firmware is correct
+- Implemented a deploy-path fix in `src/vivipi/tooling/build_deploy.py`:
+  - after copying the device filesystem, deploy now finishes with `mpremote connect <port> reset` instead of only `soft-reset`
+  - recovery behavior inside `_run_mpremote_command(...)` still uses `soft-reset` for retry purposes; only the final post-deploy restart is now a full device reset
+- Updated and revalidated deploy coverage in `tests/unit/tooling/test_build_deploy.py`:
+  - focused test file: `65 passed`
+  - full repo build: `./build` -> `617 passed`, coverage `98.46%`
+- Redeployed the Pico with the new final-reset behavior so the device should now come back in the unattended runtime path rather than a stale USB-touched state.
+
+## 2026-04-17T16:55:00Z
+
+- Completed the ViviPi probe productionization task end-to-end.
+- Root cause and code fix:
+  - reproduced the failure on the real Pico with `artifacts/device/pico_probe_runner.py`; both `c64u-telnet` and `u64-telnet` failed on-device with `io: [Errno 110] ETIMEDOUT` even though the same runtime helper succeeded under CPython and the host-side `scripts/u64_connection_test.py` suite also passed
+  - fixed `src/vivipi/runtime/checks.py` so MicroPython `ETIMEDOUT` (`errno 110`) is classified as `timeout`, which restores the intended post-connect telnet success semantics on-device
+- Responsiveness and state-model changes:
+  - added render-time `visible_degraded` handling so the display can hide the visible `DEG` phase without changing the internal hysteresis model
+  - updated runtime/config plumbing so `check_state.visible_degraded` is parsed, validated, rendered into `config.json`, and consumed by the Pico runtime
+  - lengthened normal button press feedback visibility from `0.15s` to `0.75s` so button activity is observable during normal use
+  - updated checked-in configs to use internal thresholds `1/2/1`, `visible_degraded: false`, and direct probe cadence `interval_s: 5`, `timeout_s: 4`
+- Docs and tests:
+  - updated `docs/spec.md`, `docs/spec-traceability.md`, `README.md`, and checked-in config examples to reflect telnet success semantics, visible degraded configuration, faster default cadence, and observable button feedback
+  - added/updated unit coverage in `tests/unit/runtime/test_checks.py`, `tests/unit/runtime/test_app.py`, `tests/unit/firmware/test_runtime.py`, and `tests/unit/tooling/test_build_deploy.py`
+- Validation evidence:
+  - focused tests: `pytest --no-cov tests/unit/runtime/test_checks.py tests/unit/runtime/test_app.py tests/unit/firmware/test_runtime.py tests/unit/tooling/test_build_deploy.py -q` -> `188 passed`
+  - full repo build: `./build` -> `617 passed`, coverage `98.46%`
+  - redeployed the Pico with the supported deploy task and verified the live on-device baseline with `sg dialout -c 'mpremote connect auto run artifacts/device/pico_probe_runner.py'`
+  - post-fix on-device results were all healthy with the redeployed config:
+    - `c64u-rest OK HTTP 200`
+    - `c64u-ftp OK pwd=/`
+    - `c64u-telnet OK visible_bytes=3770`
+    - `pixel4-adb OK HTTP 200`
+    - `u64-rest OK HTTP 200`
+    - `u64-ftp OK pwd=/`
+    - `u64-telnet OK visible_bytes=2009`
+  - read deployed `config.json` from the Pico and confirmed `failures_to_failed: 2`, `visible_degraded: false`, and `interval_s: 5` / `timeout_s: 4`
+  - live GPIO/button validation on the deployed Pico:
+    - idle monitor confirmed `GP15` and `GP17` both idle high
+    - interactive button monitor captured `PRESS` and `RELEASE` events for both button A on `GP15` and button B on `GP17`
+- No remaining code-side blockers were found after deploy and hardware validation.
+
+## 2026-04-17T10:05:00Z
+
+- Started the ViviPi probe productionization task and replaced the active top-of-file plan in `PLANS.md` with a task-specific execution plan for probe correctness, responsiveness, configurable visible degradation, button verification, deployment, and live validation.
+- Repository and spec review completed for the active task:
+  - read `docs/spec.md`, `README.md`, `AGENTS.md`
+  - inspected repo memories for prior validated probe and OLED transport semantics
+  - inspected `config/build-deploy.yaml`, `config/build-deploy.local.example.yaml`, `config/build-deploy.local.yaml`, `config/checks.yaml`, and `config/checks.local.yaml`
+  - inspected Pico/runtime code in `src/vivipi/runtime/checks.py`, `src/vivipi/runtime/app.py`, `src/vivipi/core/models.py`, `src/vivipi/core/state.py`, `src/vivipi/core/config.py`, `src/vivipi/core/scheduler.py`, `src/vivipi/core/input.py`, `firmware/runtime.py`, and `firmware/input.py`
+  - inspected source-of-truth host probes in `scripts/u64_connection_test.py`, `scripts/u64_connection_runtime.py`, `scripts/u64_telnet.py`, `scripts/u64_ftp.py`, and `scripts/u64_http.py`
+  - inspected relevant tests in `tests/unit/runtime/test_checks.py`, `tests/unit/runtime/test_app.py`, `tests/unit/firmware/test_runtime.py`, `tests/unit/firmware/test_firmware_input.py`, and `tests/unit/tooling/test_u64_connection_protocols.py`
+- Findings documented before code changes:
+  - local deployment config already targets `GP15` / `GP17` and enables `startup_self_test_s: 30`
+  - local deployment config already uses immediate state thresholds: `failures_to_degraded=1`, `failures_to_failed=1`, `successes_to_recover=1`
+  - active local checks still use `interval_s: 10` and `timeout_s: 8`, which is the strongest current explanation for slow visible fail/recover behavior
+  - Pico FTP probe is already structurally aligned with the remembered source-of-truth smoke semantics: connect, login, `PWD`, `QUIT`
+  - Pico telnet probe is already structurally aligned with the remembered source-of-truth smoke semantics in one key respect: post-connect timeout/reset is treated as healthy connectivity
+  - button handling is present, not missing: the runtime polls buttons, applies navigation actions, shows short press feedback, and supports a startup self-test frame
+- Current leading hypotheses:
+  - `U64 TELNET` may still fail on the Pico because of a smaller remaining socket-handling mismatch rather than a missing authentication flow
+  - slow displayed transitions are likely dominated by the `10s/8s` cadence and timeout budget, not by the threshold model, because the active config already forces direct fail/recover thresholds
+  - button complaints are likely due to discoverability or insufficiently observable normal-runtime feedback rather than total absence of button software support
+- No code changes yet beyond updating execution tracking files.
+- No runtime commands executed yet; next step is live baseline reproduction of the current probe behavior and then a targeted code fix.
+
 ## 2026-04-17T06:35:00Z
 
 - Tightened the telnet `Vol UltiSid 1` write path in `scripts/u64_telnet.py` to match the live-proven exact sequence for this setting:

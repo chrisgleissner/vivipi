@@ -143,6 +143,8 @@ class RuntimeApp:
         column_separator: str = " ",
         transition_thresholds: TransitionThresholds | None = None,
         probe_scheduling: ProbeSchedulingPolicy | None = None,
+        visible_degraded: bool = True,
+        highlight_selection: bool = True,
         sleep_ms=_sleep_ms,
         probe_time_provider=_monotonic_now_s,
         version: str = "",
@@ -159,6 +161,8 @@ class RuntimeApp:
         self.page_interval_s = page_interval_s
         self.transition_thresholds = transition_thresholds or TransitionThresholds()
         self.probe_scheduling = probe_scheduling or ProbeSchedulingPolicy()
+        self.visible_degraded = bool(visible_degraded)
+        self.highlight_selection = bool(highlight_selection)
         self.sleep_ms = sleep_ms
         self.probe_time_provider = probe_time_provider
         self.last_started_at: dict[str, float] = {}
@@ -236,7 +240,7 @@ class RuntimeApp:
         self.feedback_duration_s = 1.5
         self.press_feedback_message = ""
         self.press_feedback_until_s: float | None = None
-        self.press_feedback_duration_s = 0.15
+        self.press_feedback_duration_s = 0.75
         self.last_cycle_ms: float | None = None
         self.last_render_at_s: float | None = None
         self.last_render_reason = "bootstrap"
@@ -311,7 +315,10 @@ class RuntimeApp:
         if self.display_retry_at_s is not None and now_s < self.display_retry_at_s:
             return reason
         try:
-            frame = self._decorate_frame(render_frame(self.state, now_s=now_s), now_s)
+            frame = self._decorate_frame(
+                render_frame(self._display_state(), now_s=now_s, highlight_selection=self.highlight_selection),
+                now_s,
+            )
             self.display.draw_frame(frame)
         except Exception as error:
             self._record_display_failure(error, now_s)
@@ -324,6 +331,17 @@ class RuntimeApp:
             self.last_rendered_feedback = feedback_text
             self._log_display_propagation(now_s, reason)
         return reason
+
+    def _display_state(self) -> AppState:
+        if self.visible_degraded:
+            return self.state
+        display_checks = tuple(
+            replace(check, status=Status.FAIL) if check.status == Status.DEG else check
+            for check in self.state.checks
+        )
+        if display_checks == self.state.checks:
+            return self.state
+        return replace(self.state, checks=display_checks)
 
     def configure_observability(
         self,

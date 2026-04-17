@@ -221,6 +221,24 @@ def _transition_thresholds_from_config(config):
     )
 
 
+def _visible_degraded_from_config(config) -> bool:
+    raw = config.get("check_state") if isinstance(config, dict) else None
+    if not isinstance(raw, dict):
+        return True
+    value = raw.get("visible_degraded")
+    if value is None:
+        return True
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "1", "on"}:
+            return True
+        if normalized in {"false", "no", "0", "off"}:
+            return False
+    raise ValueError("check_state.visible_degraded must be a boolean")
+
+
 def _probe_scheduling_from_config(config):
     raw = config.get("probe_schedule") if isinstance(config, dict) else None
     return parse_probe_schedule_config(raw)
@@ -533,6 +551,8 @@ def build_runtime_app(
         column_separator=str(display_config.get("column_separator", " ")),
         transition_thresholds=_transition_thresholds_from_config(config),
         probe_scheduling=_probe_scheduling_from_config(config),
+        visible_degraded=_visible_degraded_from_config(config),
+        highlight_selection=False,
         sleep_ms=sleep_ms,
         probe_time_provider=_steady_now_s,
         version=version,

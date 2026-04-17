@@ -105,6 +105,7 @@ def load_build_deploy_settings(path: str | Path, env: dict[str, str] | None = No
             service.pop("base_url", None)
 
     _normalize_device_display_settings(resolved)
+    _normalize_check_state_settings(resolved)
     _normalize_probe_schedule_settings(resolved)
 
     return resolved
@@ -116,6 +117,25 @@ def _normalize_device_display_settings(settings: dict[str, object]):
         return
 
     device["display"] = normalize_display_config(device.get("display"))
+
+
+def _normalize_check_state_settings(settings: dict[str, object]):
+    raw = settings.get("check_state")
+    if raw is None:
+        return
+    if not isinstance(raw, dict):
+        raise ValueError("check_state must be a mapping")
+
+    settings["check_state"] = {
+        "failures_to_degraded": int(raw.get("failures_to_degraded", 1)),
+        "failures_to_failed": int(raw.get("failures_to_failed", 2)),
+        "successes_to_recover": int(raw.get("successes_to_recover", 1)),
+        "visible_degraded": _parse_bool(
+            raw.get("visible_degraded"),
+            "check_state.visible_degraded",
+            True,
+        ),
+    }
 
 
 def _parse_bool(value: object, context: str, default: bool) -> bool:
@@ -734,7 +754,7 @@ def deploy_firmware(
                 command.extend([str(item), f":{item.name}"])
             _run_mpremote_command(command, run_command=run_command, recovery_port=resolved_port)
         _run_mpremote_command(
-            ["mpremote", "connect", resolved_port, "soft-reset"],
+            ["mpremote", "connect", resolved_port, "reset"],
             run_command=run_command,
             recovery_port=resolved_port,
         )
