@@ -29,7 +29,7 @@ DEFAULT_FTP_PASS = ""
 DEFAULT_PASSIVE = True
 DEFAULT_TIMEOUT_S = 10
 DEFAULT_REMOTE_DIR = "/USB2/test/FTP"
-DEFAULT_SIZES = "20K,200K"
+DEFAULT_SIZES = "20K,200K,1M"
 DEFAULT_TARGET_BYTES = "600K"
 DEFAULT_CONCURRENCY = 3
 DEFAULT_MODE = "both"
@@ -47,6 +47,8 @@ FORMATS = ("text", "json")
 PAYLOAD_SEED = b"u64ftp-deterministic-payload-00\n"  # 32 bytes
 OPS_TEMP_DIR = "__perf_cd"
 OPS_XMKD_DIR = "__perf_xmkd"
+OPS_CD_LEVEL_1 = "level1"
+OPS_CD_LEVEL_2 = "level2"
 TEST_FILE_RENAME_SUFFIX = ".rn"
 TEST_FILENAME_RE = re.compile(r"^u64ftp_[^/\\]+_[1-9][0-9]*_[1-9][0-9]*\.bin(?:\.rn)?$")
 
@@ -1057,10 +1059,19 @@ def run_ops_stage(args: argparse.Namespace, emitter: Emitter, filenames: list[st
     cd_start = time.perf_counter()
     try:
         safe_sendcmd(ftp, "MKD", OPS_TEMP_DIR)
+        safe_sendcmd(ftp, "CWD", OPS_TEMP_DIR)
+        safe_sendcmd(ftp, "MKD", OPS_CD_LEVEL_1)
+        safe_sendcmd(ftp, "CWD", OPS_CD_LEVEL_1)
+        safe_sendcmd(ftp, "MKD", OPS_CD_LEVEL_2)
+        ftp.cwd(args.remote_dir)
         for _ in range(cd_count):
             try:
                 safe_sendcmd(ftp, "CWD", OPS_TEMP_DIR)
-                ftp.cwd(args.remote_dir)
+                safe_sendcmd(ftp, "CWD", OPS_CD_LEVEL_1)
+                safe_sendcmd(ftp, "CWD", OPS_CD_LEVEL_2)
+                safe_sendcmd(ftp, "CDUP")
+                safe_sendcmd(ftp, "CDUP")
+                safe_sendcmd(ftp, "CDUP")
                 ops.cd_count += 1
             except Exception:
                 ops.success = False
@@ -1068,6 +1079,12 @@ def run_ops_stage(args: argparse.Namespace, emitter: Emitter, filenames: list[st
 
         # Ensure we are back in the correct directory before removing
         ftp.cwd(args.remote_dir)
+        safe_sendcmd(ftp, "CWD", OPS_TEMP_DIR)
+        safe_sendcmd(ftp, "CWD", OPS_CD_LEVEL_1)
+        safe_sendcmd(ftp, "RMD", OPS_CD_LEVEL_2)
+        safe_sendcmd(ftp, "CDUP")
+        safe_sendcmd(ftp, "RMD", OPS_CD_LEVEL_1)
+        safe_sendcmd(ftp, "CDUP")
         safe_sendcmd(ftp, "RMD", OPS_TEMP_DIR)
     except Exception:
         ops.success = False
@@ -1182,6 +1199,15 @@ def run_ops_stage(args: argparse.Namespace, emitter: Emitter, filenames: list[st
     emitter.emit_text(
         "ops", "DELETE_PERF", [("count", ops.delete_count), ("avg_s", round(del_avg, 4))]
     )
+
+    try:
+        ftp.sock.settimeout(1)
+        time_cmd("ABOR", expect_error=True)
+    finally:
+        try:
+            ftp.sock.settimeout(args.timeout_s)
+        except Exception:
+            pass
 
     close_session(ftp)
 

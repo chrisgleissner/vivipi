@@ -112,6 +112,9 @@ class FakeFTP:
         if verb == "CWD":
             assert arg is not None
             return self.cwd(arg)
+        if verb == "CDUP":
+            parent = self._cwd.rsplit("/", 1)[0] or "/"
+            return self.cwd(parent)
         if verb == "SIZE":
             assert arg is not None
             resolved = self._resolve(arg)
@@ -131,6 +134,7 @@ class FakeFTP:
                 if resolved not in self._server.files:
                     raise __import__("ftplib").error_perm("550 not found")
             self._rename_from = resolved
+            self._server.last_rename_from = resolved
             return "350 ready"
         if verb == "RNTO":
             assert arg is not None
@@ -143,6 +147,8 @@ class FakeFTP:
                 self._server.last_rename_to = resolved
                 self._rename_from = None
             return "250 renamed"
+        if verb == "ABOR":
+            raise TimeoutError("timed out waiting for ABOR reply")
         raise AssertionError(f"Unsupported FTP command: {cmd}")
 
     def quit(self):
@@ -620,6 +626,8 @@ def test_ops_stage_deletes_only_managed_uploaded_files_in_selected_directory():
 
     assert result.success is True
     assert state.deleted_paths == ["/USB2/test/FTP/" + managed_name]
+    assert state.last_rename_from == "/USB2/test/FTP/" + managed_name + ".rn"
+    assert state.last_rename_to == "/USB2/test/FTP/" + managed_name
     assert "/USB2/test/OTHER/" + managed_name in state.files
     assert "/USB2/test/FTP/" + other_name in state.files
 

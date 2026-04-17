@@ -4,7 +4,7 @@
 
 Current authoritative plan for writing a self-contained implementation prompt that can be used inside a fresh `1541ultimate` checkout with no access to this repository's research folder.
 
-### Phases
+### Prompt Phases
 
 Phase 1: Distill the implementation scope  
 Status: COMPLETED
@@ -32,7 +32,7 @@ Status: COMPLETED
 - Verify that `prompt.md` matches the recommendations already captured in `findings.md`.
 - Close out `WORKLOG.md` and mark this plan complete.
 
-### Completion Criteria
+### Prompt Completion Criteria
 
 Done only when:
 
@@ -47,7 +47,7 @@ Done only when:
 
 Current authoritative plan for extending the existing `1541ultimate` FTP performance investigation with RAM-cost and target-viability analysis for `U64`, `U64E-II`, and `U2+`.
 
-### Phases
+### RAM Extension Phases
 
 Phase 1: Confirm memory model and target mapping  
 Status: COMPLETED
@@ -77,7 +77,7 @@ Status: COMPLETED
 - Align `findings.md`, `PLANS.md`, and `WORKLOG.md`.
 - Confirm the report clearly separates FTP-local viable changes from global high-risk memory tuning.
 
-### Completion Criteria
+### RAM Extension Completion Criteria
 
 Done only when:
 
@@ -92,7 +92,7 @@ Done only when:
 
 Current authoritative plan for the requested code-grounded investigation of FTP throughput in the `1541ultimate` firmware tree. Historical plan content is retained below for traceability, but this section is the active execution plan for the current task.
 
-### Phases
+### Investigation Phases
 
 Phase 1: Map the FTP implementation  
 Status: COMPLETED
@@ -126,7 +126,7 @@ Status: COMPLETED
 - Verify that `PLANS.md`, `WORKLOG.md`, and the report are aligned.
 - Confirm the report covers architecture, both transfer directions, ruled-out explanations, candidate matrix, and recommended order of attack.
 
-### Completion Criteria
+### Investigation Completion Criteria
 
 Done only when:
 
@@ -150,12 +150,12 @@ Authoritative plan for eliminating the observed FTP and telnet failures in the s
 - `450 Requested file action not taken` on rename.
 - Silent `skip=no_self_file` classifications that avoid exercising the intended readwrite operation.
 
-2. Telnet state desynchronization
+1. Telnet state desynchronization
 
 - Missing expected menu text such as `Audio Mixer` after prior UI interactions.
 - Post-write telnet sessions trusting stale local view state instead of re-entering from verified UI state.
 
-3. Shared state model gaps
+1. Shared state model gaps
 
 - HTTP already verifies writes, but state tracking is confirmed-value only and does not expose tentative intent.
 - FTP file lifecycle is process-local instead of shared across runners.
