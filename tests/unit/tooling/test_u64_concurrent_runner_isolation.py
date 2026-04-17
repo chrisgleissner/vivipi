@@ -105,6 +105,10 @@ def test_ftp_multi_runner_readwrite_uses_runner_specific_self_file_prefixes(monk
             del payload
             captured_paths.append(command.removeprefix("STOR "))
 
+        def nlst(self, path):
+            assert path == module.FTP_TEMP_DIR
+            return list(dict.fromkeys(captured_paths))
+
     fake_ftp = FakeFTP()
     runner_1_operations = module.surface_operations(runtime.ProbeSurface.READWRITE, runner_id=1, concurrent_multi_runner=True)
     runner_2_operations = module.surface_operations(runtime.ProbeSurface.READWRITE, runner_id=2, concurrent_multi_runner=True)

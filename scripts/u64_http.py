@@ -24,8 +24,10 @@ HTTP_VOLUME_ULTISID_1_PATH = f"{HTTP_AUDIO_MIXER_CATEGORY_PATH}/Vol%20UltiSid%20
 AUDIO_MIXER_WRITE_ITEM = "Vol UltiSid 1"
 AUDIO_MIXER_WRITE_TARGET_VALUES = ("0 dB", "+1 dB")
 AUDIO_MIXER_SHARED_STATE_KEY = "u64.audio_mixer.vol_ultisid_1"
+AUDIO_MIXER_TENTATIVE_STATE_KEY = "u64.audio_mixer.vol_ultisid_1.tentative"
 SCREEN_RAM_BASE_ADDRESS = 0x0400
 SCREEN_RAM_RUNNER_SLOT_COUNT = 40
+STATE_VERIFY_RETRY_DELAYS_S = (0.05, 0.10, 0.20)
 
 
 def request_path(http_path: str) -> str:
@@ -151,13 +153,53 @@ def remember_audio_mixer_value(shared_state: Any | None, value: str) -> str:
     return normalized
 
 
-def latest_audio_mixer_value(shared_state: Any | None) -> str | None:
+def stage_audio_mixer_value(shared_state: Any | None, value: str) -> str:
+    normalized = normalize_audio_mixer_value(value)
+    if shared_state is not None and hasattr(shared_state, "set_shared_resource_value"):
+        shared_state.set_shared_resource_value(AUDIO_MIXER_TENTATIVE_STATE_KEY, normalized)
+    return normalized
+
+
+def clear_audio_mixer_tentative(shared_state: Any | None) -> None:
+    if shared_state is None or not hasattr(shared_state, "set_shared_resource_value"):
+        return
+    shared_state.set_shared_resource_value(AUDIO_MIXER_TENTATIVE_STATE_KEY, None)
+
+
+def confirm_audio_mixer_value(shared_state: Any | None, value: str) -> str:
+    normalized = remember_audio_mixer_value(shared_state, value)
+    clear_audio_mixer_tentative(shared_state)
+    return normalized
+
+
+def latest_audio_mixer_value(shared_state: Any | None, *, include_tentative: bool = False) -> str | None:
     if shared_state is None or not hasattr(shared_state, "get_shared_resource_value"):
         return None
+    if include_tentative:
+        tentative = shared_state.get_shared_resource_value(AUDIO_MIXER_TENTATIVE_STATE_KEY)
+        if isinstance(tentative, str) and tentative.strip():
+            return normalize_audio_mixer_value(tentative)
     value = shared_state.get_shared_resource_value(AUDIO_MIXER_SHARED_STATE_KEY)
     if not isinstance(value, str) or not value.strip():
         return None
     return normalize_audio_mixer_value(value)
+
+
+def verify_audio_mixer_value(settings: RuntimeSettings, expected: str, *, shared_state: Any | None = None) -> str:
+    normalized_target = normalize_audio_mixer_value(expected)
+    observed = "unknown"
+    attempts = len(STATE_VERIFY_RETRY_DELAYS_S) + 1
+    for attempt in range(attempts):
+        current, _values, _body_bytes = audio_mixer_item_state(settings)
+        observed = remember_audio_mixer_value(shared_state, current)
+        if observed == normalized_target:
+            return confirm_audio_mixer_value(shared_state, observed)
+        if attempt + 1 < attempts:
+            time.sleep(STATE_VERIFY_RETRY_DELAYS_S[attempt])
+    clear_audio_mixer_tentative(shared_state)
+    raise RuntimeError(
+        f"verification mismatch expected={normalized_target} got={observed} latest_known={latest_audio_mixer_value(shared_state) or 'unknown'}"
+    )
 
 
 def audio_mixer_item_state(settings: RuntimeSettings) -> tuple[str, tuple[str, ...], int]:
@@ -183,7 +225,7 @@ def audio_mixer_item_state(settings: RuntimeSettings) -> tuple[str, tuple[str, .
 def read_audio_mixer_item(settings: RuntimeSettings, *, shared_state: Any | None = None) -> str:
     with audio_mixer_shared_lock(shared_state):
         current, values, body_bytes = audio_mixer_item_state(settings)
-        normalized_current = remember_audio_mixer_value(shared_state, current)
+        normalized_current = confirm_audio_mixer_value(shared_state, current)
         return f"body_bytes={body_bytes} current={normalized_current} options={len(values)}"
 
 
@@ -198,12 +240,8 @@ def write_audio_mixer_item(settings: RuntimeSettings, target: str, *, shared_sta
             status, _body, _headers = request_bytes(settings, "PUT", f"{HTTP_VOLUME_ULTISID_1_PATH}?value={encoded_target}")
             if not 200 <= status < 300:
                 raise RuntimeError(f"expected HTTP 2xx, got {status}")
-        updated, _updated_values, _body_bytes = audio_mixer_item_state(settings)
-        normalized_updated = remember_audio_mixer_value(shared_state, updated)
-        if normalized_updated != normalized_target:
-            raise RuntimeError(
-                f"verification mismatch expected={normalized_target} got={normalized_updated} latest_known={latest_audio_mixer_value(shared_state) or 'unknown'}"
-            )
+            stage_audio_mixer_value(shared_state, normalized_target)
+        normalized_updated = verify_audio_mixer_value(settings, normalized_target, shared_state=shared_state)
         return f"from={normalized_current} to={normalized_updated}"
 
 

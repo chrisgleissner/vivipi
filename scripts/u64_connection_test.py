@@ -130,7 +130,7 @@ class ExecutionState:
     probe_operation_counts: dict[tuple[int, str, str], int] = field(default_factory=dict)
     shared_resource_registry_lock: threading.Lock = field(default_factory=threading.Lock)
     shared_resource_locks: dict[str, threading.Lock] = field(default_factory=dict)
-    shared_resource_values: dict[str, str] = field(default_factory=dict)
+    shared_resource_values: dict[str, object] = field(default_factory=dict)
     stream_monitor: u64_stream.StreamMonitor | None = None
 
     def _derived_seed(self, *parts: object) -> int:
@@ -161,11 +161,11 @@ class ExecutionState:
             self.shared_resource_locks[resource_key] = created
             return created
 
-    def get_shared_resource_value(self, resource_key: str) -> str | None:
+    def get_shared_resource_value(self, resource_key: str) -> object | None:
         with self.shared_resource_registry_lock:
             return self.shared_resource_values.get(resource_key)
 
-    def set_shared_resource_value(self, resource_key: str, value: str) -> None:
+    def set_shared_resource_value(self, resource_key: str, value: object) -> None:
         with self.shared_resource_registry_lock:
             self.shared_resource_values[resource_key] = value
 

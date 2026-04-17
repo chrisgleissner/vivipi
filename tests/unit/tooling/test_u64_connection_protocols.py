@@ -106,7 +106,7 @@ def test_http_surface_operations_retry_transient_transport_errors(monkeypatch):
     assert outcome.result == "OK"
     assert outcome.detail == "surface=read op=flaky http_status=200 body_bytes=43"
     assert attempts == ["call", "call", "call"]
-    assert sleeps == [0.05, 0.1]
+    assert sleeps == [0.1, 0.25]
 
 
 def test_ping_probe_uses_ping_terminology(monkeypatch):
@@ -149,6 +149,7 @@ def test_http_audio_mixer_write_preserves_latest_known_state(monkeypatch):
 
     assert detail == "from=+1 dB to=0 dB"
     assert state.get_shared_resource_value(module.AUDIO_MIXER_SHARED_STATE_KEY) == "0 dB"
+    assert state.get_shared_resource_value(module.AUDIO_MIXER_TENTATIVE_STATE_KEY) is None
 
 
 def test_ftp_normal_mode_performs_login_pasv_nlst_quit_and_close():
@@ -356,8 +357,10 @@ def test_ftp_partial_stor_temp_reuses_bounded_temp_path(monkeypatch):
 
 def test_ftp_readwrite_surface_uploads_and_downloads_tiny_and_large_files(monkeypatch):
     runtime = load_runtime()
+    connection_test = load_connection_test()
     module = load_ftp()
     settings = make_settings(runtime)
+    state = connection_test.ExecutionState(settings=settings, include_runner_context=False, random_seed=1)
     stored_payloads: dict[str, bytes] = {}
 
     class FakeFTP:
@@ -376,7 +379,7 @@ def test_ftp_readwrite_surface_uploads_and_downloads_tiny_and_large_files(monkey
     monkeypatch.setattr(module, "track_self_file", lambda current_settings, path: None)
 
     ftp = FakeFTP()
-    operations = dict(module.surface_operations(runtime.ProbeSurface.READWRITE))
+    operations = dict(module.surface_operations(runtime.ProbeSurface.READWRITE, shared_state=state))
 
     tiny_upload = operations["ftp_upload_tiny_self_file"](settings, ftp)
     tiny_download = operations["ftp_download_tiny_self_file"](settings, ftp)
@@ -388,6 +391,66 @@ def test_ftp_readwrite_surface_uploads_and_downloads_tiny_and_large_files(monkey
     assert large_upload.endswith(f"bytes={module.FTP_LARGE_FILE_SIZE_BYTES}")
     assert large_download.endswith(f"bytes={module.FTP_LARGE_FILE_SIZE_BYTES}")
     assert sorted(len(payload) for payload in stored_payloads.values()) == [1, module.FTP_LARGE_FILE_SIZE_BYTES]
+
+
+def test_ftp_rename_provisions_confirmed_file_instead_of_skipping(monkeypatch):
+    runtime = load_runtime()
+    connection_test = load_connection_test()
+    module = load_ftp()
+    settings = make_settings(runtime)
+    state = connection_test.ExecutionState(settings=settings, include_runner_context=False, random_seed=1)
+    stored_payloads: dict[str, bytes] = {}
+
+    class FakeFTP:
+        def storbinary(self, command, payload):
+            stored_payloads[command.removeprefix("STOR ")] = payload.read()
+
+        def rename(self, source, target):
+            stored_payloads[target] = stored_payloads.pop(source)
+
+        def nlst(self, path):
+            assert path == module.FTP_TEMP_DIR
+            return list(stored_payloads)
+
+    monkeypatch.setattr(module, "track_self_file", lambda current_settings, path: None)
+    monkeypatch.setattr(module, "forget_self_file", lambda path: None)
+
+    detail = module.rename_self_file(settings, FakeFTP(), shared_state=state)
+
+    assert detail.startswith("from=/Temp/u64test_")
+    assert " to=/Temp/u64test_" in detail
+    assert state.get_shared_resource_value(module.FTP_SHARED_TENTATIVE_FILES_KEY) == {}
+    confirmed = state.get_shared_resource_value(module.FTP_SHARED_CONFIRMED_FILES_KEY)
+    assert isinstance(confirmed, dict)
+    assert len(confirmed) == 1
+
+
+def test_ftp_delete_provisions_confirmed_file_instead_of_skipping(monkeypatch):
+    runtime = load_runtime()
+    connection_test = load_connection_test()
+    module = load_ftp()
+    settings = make_settings(runtime)
+    state = connection_test.ExecutionState(settings=settings, include_runner_context=False, random_seed=1)
+    stored_payloads: dict[str, bytes] = {}
+
+    class FakeFTP:
+        def storbinary(self, command, payload):
+            stored_payloads[command.removeprefix("STOR ")] = payload.read()
+
+        def delete(self, path):
+            stored_payloads.pop(path)
+
+        def nlst(self, path):
+            assert path == module.FTP_TEMP_DIR
+            return list(stored_payloads)
+
+    monkeypatch.setattr(module, "track_self_file", lambda current_settings, path: None)
+    monkeypatch.setattr(module, "forget_self_file", lambda path: None)
+
+    detail = module.delete_self_file(settings, FakeFTP(), shared_state=state)
+
+    assert detail.startswith("path=/Temp/u64test_")
+    assert state.get_shared_resource_value(module.FTP_SHARED_CONFIRMED_FILES_KEY) == {}
 
 
 def test_ftp_prime_temp_dir_deletes_stale_self_files_before_seeding(monkeypatch):
