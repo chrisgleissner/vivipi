@@ -28,7 +28,7 @@ DEFAULT_FTP_USER = ""
 DEFAULT_FTP_PASS = ""
 DEFAULT_PASSIVE = True
 DEFAULT_TIMEOUT_S = 10
-DEFAULT_REMOTE_DIR = "/USB2/test/FTP"
+DEFAULT_REMOTE_DIR = "/Temp/test/FTP"
 DEFAULT_SIZES = "20K,200K,1M"
 DEFAULT_TARGET_BYTES = "1M"
 DEFAULT_CONCURRENCY = 3
@@ -154,50 +154,176 @@ def parse_remote_dir(value: str) -> str:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="u64_ftp_test",
-        description="Deterministic FTP performance tester for Ultimate 64 devices.",
+        description=(
+            "Deterministic FTP performance tester for Ultimate 64 devices. "
+            "Before each run, the tool removes only prior managed test files "
+            "matching the u64ftp_* naming pattern from the selected remote directory."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  u64_ftp_test --remote-dir /Temp/test/FTP\n"
+            "  u64_ftp_test --sizes 20K,200K --target-bytes 2M --mode multi --concurrency 4\n"
+            "  u64_ftp_test --format json --no-verify"
+        ),
     )
-    parser.add_argument("-H", "--host", default=DEFAULT_HOST)
-    parser.add_argument("--ftp-port", type=int, default=DEFAULT_FTP_PORT)
-    parser.add_argument("-u", "--ftp-user", default=DEFAULT_FTP_USER)
-    parser.add_argument("-P", "--ftp-pass", default=DEFAULT_FTP_PASS)
+    parser.add_argument(
+        "-H",
+        "--host",
+        default=DEFAULT_HOST,
+        help=f"FTP hostname or IP address. Default: {DEFAULT_HOST}.",
+    )
+    parser.add_argument(
+        "--ftp-port",
+        type=int,
+        default=DEFAULT_FTP_PORT,
+        help=f"FTP control port. Default: {DEFAULT_FTP_PORT}.",
+    )
+    parser.add_argument(
+        "-u",
+        "--ftp-user",
+        default=DEFAULT_FTP_USER,
+        help="FTP username. Default: empty string.",
+    )
+    parser.add_argument(
+        "-P",
+        "--ftp-pass",
+        default=DEFAULT_FTP_PASS,
+        help="FTP password. Default: empty string.",
+    )
     passive_group = parser.add_mutually_exclusive_group()
     passive_group.add_argument(
-        "--passive", dest="passive", action="store_true", default=DEFAULT_PASSIVE
+        "--passive",
+        dest="passive",
+        action="store_true",
+        default=DEFAULT_PASSIVE,
+        help="Use passive mode for data connections. Default: enabled.",
     )
-    passive_group.add_argument("--no-passive", dest="passive", action="store_false")
-    parser.add_argument("--timeout-s", type=int, default=DEFAULT_TIMEOUT_S)
+    passive_group.add_argument(
+        "--no-passive",
+        dest="passive",
+        action="store_false",
+        help="Use active mode instead of passive mode.",
+    )
     parser.add_argument(
-        "--remote-dir", type=parse_remote_dir, default=parse_remote_dir(DEFAULT_REMOTE_DIR)
+        "--timeout-s",
+        type=int,
+        default=DEFAULT_TIMEOUT_S,
+        help=f"Socket timeout in seconds. Default: {DEFAULT_TIMEOUT_S}.",
     )
-    parser.add_argument("--sizes", type=parse_sizes, default=parse_sizes(DEFAULT_SIZES))
     parser.add_argument(
-        "--target-bytes", type=parse_byte_size, default=parse_byte_size(DEFAULT_TARGET_BYTES)
+        "--remote-dir",
+        type=parse_remote_dir,
+        default=parse_remote_dir(DEFAULT_REMOTE_DIR),
+        help=(
+            "Absolute FTP directory used for uploads, downloads, startup cleanup, "
+            f"and post-run ops checks. Default: {DEFAULT_REMOTE_DIR}."
+        ),
     )
-    parser.add_argument("--files-per-stage", type=int, default=None)
-    parser.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY)
-    parser.add_argument("--mode", type=parse_mode, default=DEFAULT_MODE)
+    parser.add_argument(
+        "--sizes",
+        type=parse_sizes,
+        default=parse_sizes(DEFAULT_SIZES),
+        help=(
+            "Comma-separated stage sizes. Accepted units per token: raw bytes, K, M, or G, "
+            f"for example 20K,200K,1M. Default: {DEFAULT_SIZES}."
+        ),
+    )
+    parser.add_argument(
+        "--target-bytes",
+        type=parse_byte_size,
+        default=parse_byte_size(DEFAULT_TARGET_BYTES),
+        help=(
+            "Approximate bytes transferred per stage before worker multiplication. "
+            f"Accepted units: raw bytes, K, M, or G. Default: {DEFAULT_TARGET_BYTES}."
+        ),
+    )
+    parser.add_argument(
+        "--files-per-stage",
+        type=int,
+        default=None,
+        help=(
+            "Override the automatic per-worker file count instead of deriving it from --target-bytes. "
+            "Accepted values: integer >= 1. Default: auto."
+        ),
+    )
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=DEFAULT_CONCURRENCY,
+        help=f"Worker count for multi mode. Accepted values: integer >= 1. Default: {DEFAULT_CONCURRENCY}.",
+    )
+    parser.add_argument(
+        "--mode",
+        type=parse_mode,
+        choices=MODES,
+        default=DEFAULT_MODE,
+        help=f"Stage variants to run. Choices: {', '.join(MODES)}. Default: {DEFAULT_MODE}.",
+    )
     verify_group = parser.add_mutually_exclusive_group()
     verify_group.add_argument(
-        "--verify", dest="verify", action="store_true", default=DEFAULT_VERIFY
+        "--verify",
+        dest="verify",
+        action="store_true",
+        default=DEFAULT_VERIFY,
+        help="Read each uploaded file back and compare bytes. Default: enabled.",
     )
-    verify_group.add_argument("--no-verify", dest="verify", action="store_false")
+    verify_group.add_argument(
+        "--no-verify",
+        dest="verify",
+        action="store_false",
+        help="Skip download byte verification.",
+    )
     fail_fast_group = parser.add_mutually_exclusive_group()
     fail_fast_group.add_argument(
-        "--fail-fast", dest="fail_fast", action="store_true", default=DEFAULT_FAIL_FAST
+        "--fail-fast",
+        dest="fail_fast",
+        action="store_true",
+        default=DEFAULT_FAIL_FAST,
+        help="Stop after the first failed transfer or stage. Default: disabled.",
     )
-    fail_fast_group.add_argument("--no-fail-fast", dest="fail_fast", action="store_false")
-    parser.add_argument("--max-runtime-s", type=int, default=DEFAULT_MAX_RUNTIME_S)
-    parser.add_argument("--format", type=parse_format, default=DEFAULT_FORMAT)
-    parser.add_argument("-v", "--verbose", action="store_true", default=False)
+    fail_fast_group.add_argument(
+        "--no-fail-fast",
+        dest="fail_fast",
+        action="store_false",
+        help="Always run the full matrix even after failures.",
+    )
+    parser.add_argument(
+        "--max-runtime-s",
+        type=int,
+        default=DEFAULT_MAX_RUNTIME_S,
+        help=(
+            "Optional wall-clock limit for the stage matrix. Accepted values: integer >= 0. "
+            f"Zero disables the cap. Default: {DEFAULT_MAX_RUNTIME_S}."
+        ),
+    )
+    parser.add_argument(
+        "--format",
+        type=parse_format,
+        choices=FORMATS,
+        default=DEFAULT_FORMAT,
+        help=f"Output format. Choices: {', '.join(FORMATS)}. Default: {DEFAULT_FORMAT}.",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        default=False,
+        help="Log every successful transfer instead of failures only. Default: disabled.",
+    )
     ensure_group = parser.add_mutually_exclusive_group()
     ensure_group.add_argument(
         "--ensure-remote-dir",
         dest="ensure_remote_dir",
         action="store_true",
         default=DEFAULT_ENSURE_REMOTE_DIR,
+        help="Create the remote directory chain before cleanup and testing. Default: enabled.",
     )
     ensure_group.add_argument(
-        "--no-ensure-remote-dir", dest="ensure_remote_dir", action="store_false"
+        "--no-ensure-remote-dir",
+        dest="ensure_remote_dir",
+        action="store_false",
+        help="Assume the remote directory already exists.",
     )
     return parser
 
@@ -244,6 +370,16 @@ def build_renamed_test_filename(filename: str) -> str:
 
 def normalize_managed_test_filenames(filenames: list[str]) -> set[str]:
     return {validate_managed_test_filename(name) for name in filenames}
+
+
+def list_managed_test_filenames(ftp: ftplib.FTP) -> list[str]:
+    managed: set[str] = set()
+    for entry in ftp.nlst():
+        basename = entry.rsplit("/", 1)[-1].strip()
+        if not basename or not is_managed_test_filename(basename):
+            continue
+        managed.add(validate_managed_test_filename(basename))
+    return sorted(managed)
 
 
 # ------------------------------ logging ---------------------------------
@@ -612,6 +748,23 @@ def close_session(ftp: ftplib.FTP | None) -> None:
             ftp.close()
         except OSError:
             pass
+
+
+def cleanup_remote_test_files(args: argparse.Namespace) -> tuple[int, str | None]:
+    ftp: ftplib.FTP | None = None
+    deleted_count = 0
+    try:
+        ftp = open_session(args)
+        for filename in list_managed_test_filenames(ftp):
+            ftp.delete(filename)
+            deleted_count += 1
+        return deleted_count, None
+    except FtpOpenError as error:
+        return deleted_count, f"{error.phase}: {error.cause}"
+    except (OSError, ftplib.Error, EOFError, socket.timeout) as error:
+        return deleted_count, str(error) or error.__class__.__name__
+    finally:
+        close_session(ftp)
 
 
 def safe_sendcmd(ftp: ftplib.FTP, cmd_name: str, argument: str | None = None) -> str:
@@ -1263,6 +1416,20 @@ def run(args: argparse.Namespace) -> int:
                 "FAIL",
                 [("dir", args.remote_dir), ("error", (detail or "").replace(" ", "_")[:200])],
             )
+
+    deleted_count, cleanup_error = cleanup_remote_test_files(args)
+    if cleanup_error is not None:
+        emitter.emit_text(
+            "setup",
+            "FAIL",
+            [
+                ("dir", args.remote_dir),
+                ("phase", "cleanup"),
+                ("error", cleanup_error.replace(" ", "_")[:200]),
+            ],
+        )
+        return 1
+    emitter.emit_text("setup", "INFO", [("dir", args.remote_dir), ("cleanup_deleted", deleted_count)])
 
     for size_label, size_bytes in args.sizes:
         for mode in modes_for(args.mode):

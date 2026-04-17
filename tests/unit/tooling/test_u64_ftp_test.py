@@ -77,6 +77,17 @@ class FakeFTP:
             self._server.deleted_paths.append(resolved)
         return "250 ok"
 
+    def nlst(self, path=None):
+        base = self._cwd if path is None else self._resolve(path)
+        prefix = base.rstrip("/") + "/"
+        with self._server.lock:
+            entries = [
+                name.rsplit("/", 1)[-1]
+                for name in sorted(self._server.files)
+                if name.startswith(prefix)
+            ]
+        return entries
+
     def retrlines(self, cmd, callback):
         with self._server.lock:
             entries = [
@@ -323,6 +334,15 @@ def test_help_text_lists_all_required_flags():
     ]:
         assert flag in help_text, flag
 
+    assert "Default: /Temp/test/FTP." in help_text
+    assert "Default: 20K,200K,1M." in help_text
+    assert "Default: 1M." in help_text
+    assert "Choices: single, multi, both." in help_text
+    assert "Choices: text, json." in help_text
+    assert "Accepted units per token: raw bytes, K, M, or G" in help_text
+    assert "Before each run, the tool removes only prior managed test files" in help_text
+    assert "Examples:" in help_text
+
 
 def test_zero_arg_defaults_match_spec():
     module = load_module()
@@ -334,7 +354,7 @@ def test_zero_arg_defaults_match_spec():
     assert args.ftp_pass == ""
     assert args.passive is True
     assert args.timeout_s == 10
-    assert args.remote_dir == "/USB2/test/FTP"
+    assert args.remote_dir == "/Temp/test/FTP"
     assert args.sizes == (("20K", 20480), ("200K", 204800), ("1M", 1048576))
     assert args.target_bytes == 1024 * 1024
     assert args.files_per_stage is None
@@ -351,8 +371,9 @@ def test_config_line_format_matches_spec_example():
     module = load_module()
     state = install_fake_ftp(module)
     # Pre-seed the remote dir so ensure_remote_dir is a no-op
-    state.ensure_dir("/USB2/test")
-    state.ensure_dir("/USB2/test/FTP")
+    state.ensure_dir("/Temp")
+    state.ensure_dir("/Temp/test")
+    state.ensure_dir("/Temp/test/FTP")
 
     exit_code, output = run_main(
         module,
@@ -373,7 +394,7 @@ def test_config_line_format_matches_spec_example():
     assert lines[0].startswith("2")  # timestamp prefix
     assert "protocol=config result=INFO" in lines[0]
     assert 'detail="host=u64' in lines[0]
-    assert "dir=/USB2/test/FTP" in lines[0]
+    assert "dir=/Temp/test/FTP" in lines[0]
     assert "verify=1" in lines[0]
 
 
@@ -425,7 +446,7 @@ def test_end_to_end_happy_path_uploads_and_downloads_all_files():
 def test_ensure_remote_dir_creates_missing_directory():
     module = load_module()
     state = install_fake_ftp(module)
-    assert "/USB2/test/FTP" not in state.dirs
+    assert "/Temp/test/FTP" not in state.dirs
 
     exit_code, output = run_main(
         module,
@@ -444,7 +465,64 @@ def test_ensure_remote_dir_creates_missing_directory():
     )
 
     assert exit_code == 0, output
-    assert "/USB2/test/FTP" in state.dirs
+    assert "/Temp/test/FTP" in state.dirs
+
+
+def test_list_managed_test_filenames_returns_only_managed_basenames_in_cwd():
+    module = load_module()
+    state = install_fake_ftp(module)
+    state.ensure_dir("/Temp")
+    state.ensure_dir("/Temp/test")
+    state.ensure_dir("/Temp/test/FTP")
+    state.files["/Temp/test/FTP/u64ftp_1K_1_1.bin"] = b"one"
+    state.files["/Temp/test/FTP/u64ftp_1K_1_2.bin.rn"] = b"two"
+    state.files["/Temp/test/FTP/not-managed.bin"] = b"keep"
+    state.files["/Temp/test/OTHER/u64ftp_1K_9_9.bin"] = b"elsewhere"
+
+    ftp = FakeFTP(state)
+    ftp.cwd("/Temp/test/FTP")
+
+    assert module.list_managed_test_filenames(ftp) == ["u64ftp_1K_1_1.bin", "u64ftp_1K_1_2.bin.rn"]
+
+
+def test_cleanup_remote_test_files_deletes_only_managed_files_in_selected_directory():
+    module = load_module()
+    state = install_fake_ftp(module)
+    state.ensure_dir("/Temp")
+    state.ensure_dir("/Temp/test")
+    state.ensure_dir("/Temp/test/FTP")
+    state.ensure_dir("/Temp/test/OTHER")
+    state.files["/Temp/test/FTP/u64ftp_20K_1_1.bin"] = b"one"
+    state.files["/Temp/test/FTP/u64ftp_20K_1_2.bin.rn"] = b"two"
+    state.files["/Temp/test/FTP/keep.txt"] = b"keep"
+    state.files["/Temp/test/OTHER/u64ftp_20K_9_9.bin"] = b"elsewhere"
+    args = module.build_parser().parse_args(["--remote-dir", "/Temp/test/FTP"])
+
+    deleted_count, error = module.cleanup_remote_test_files(args)
+
+    assert error is None
+    assert deleted_count == 2
+    assert state.deleted_paths == [
+        "/Temp/test/FTP/u64ftp_20K_1_1.bin",
+        "/Temp/test/FTP/u64ftp_20K_1_2.bin.rn",
+    ]
+    assert "/Temp/test/FTP/keep.txt" in state.files
+    assert "/Temp/test/OTHER/u64ftp_20K_9_9.bin" in state.files
+
+
+def test_cleanup_remote_test_files_reports_open_session_errors(monkeypatch):
+    module = load_module()
+    args = module.build_parser().parse_args(["--remote-dir", "/Temp/test/FTP"])
+
+    def raise_open(_args):
+        raise module.FtpOpenError("cwd_failed", module.ftplib.error_perm("550 missing"))
+
+    monkeypatch.setattr(module, "open_session", raise_open)
+
+    deleted_count, error = module.cleanup_remote_test_files(args)
+
+    assert deleted_count == 0
+    assert error == "cwd_failed: 550 missing"
 
 
 def test_connect_failure_yields_classified_transfers_and_nonzero_exit():
@@ -480,8 +558,9 @@ def test_connect_failure_yields_classified_transfers_and_nonzero_exit():
     )
 
     assert exit_code == 1
-    assert "phase=connect_failed" in output
-    assert "protocol=summary result=FAIL" in output
+    assert "protocol=setup result=FAIL" in output
+    assert "phase=cleanup" in output
+    assert "connect_failed:_refused" in output
 
 
 def test_verify_mismatch_is_reported_when_download_corrupts_payload():
@@ -1222,6 +1301,7 @@ def test_run_emits_setup_fail_partial_and_ops_failure(monkeypatch):
         return stage
 
     monkeypatch.setattr(module, "ensure_remote_dir", lambda _args: (False, "mkdir failed"))
+    monkeypatch.setattr(module, "cleanup_remote_test_files", lambda _args: (0, None))
     monkeypatch.setattr(module, "run_stage", lambda *args, **kwargs: success_stage(args[2]))
     monkeypatch.setattr(module, "run_ops_stage", lambda *_args, **_kwargs: module.OpsResult(success=False))
     setup_code, setup_output = run_main(module, ["--sizes", "1K", "--target-bytes", "1K"])
@@ -1235,8 +1315,23 @@ def test_run_emits_setup_fail_partial_and_ops_failure(monkeypatch):
     times = iter([0.0, 0.0, 1.0, 1.0])
     monkeypatch.setattr(module.time, "monotonic", lambda: next(times))
     monkeypatch.setattr(module, "ensure_remote_dir", lambda _args: (True, None))
+    monkeypatch.setattr(module, "cleanup_remote_test_files", lambda _args: (0, None))
     monkeypatch.setattr(module, "run_stage", lambda *args, **kwargs: success_stage(args[2]))
     assert module.run(partial_args) == 2
+
+
+def test_run_fails_when_startup_cleanup_fails(monkeypatch):
+    module = load_module()
+
+    monkeypatch.setattr(module, "ensure_remote_dir", lambda _args: (True, None))
+    monkeypatch.setattr(module, "cleanup_remote_test_files", lambda _args: (3, "550 denied"))
+
+    exit_code, output = run_main(module, ["--sizes", "1K", "--target-bytes", "1K"])
+
+    assert exit_code == 1
+    assert "protocol=setup result=FAIL" in output
+    assert "phase=cleanup" in output
+    assert "550_denied" in output
 
 
 def test_run_ops_stage_closes_session_when_connect_sequence_fails(monkeypatch):
