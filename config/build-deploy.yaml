@@ -26,6 +26,12 @@ service:
   base_url: ${VIVIPI_SERVICE_BASE_URL}
   default_prefix: adb
 
+check_state:
+  failures_to_degraded: 1
+  failures_to_failed: 2
+  successes_to_recover: 1
+  visible_degraded: false
+
 probe_schedule:
   allow_concurrent_same_host: false
   same_host_backoff_ms: 500

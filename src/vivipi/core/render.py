@@ -92,14 +92,14 @@ def _about_rows(state: AppState, row_width: int, page_size: int) -> tuple[str, .
     return tuple(rows[:page_size])
 
 
-def _legacy_overview_frame(state: AppState, checks: tuple[CheckRuntime, ...]) -> Frame:
+def _legacy_overview_frame(state: AppState, checks: tuple[CheckRuntime, ...], highlight_selection: bool) -> Frame:
     rows = _blank_rows(state.row_width, state.page_size)
     failure_spans: list[TextSpan] = []
     inverted_row = None
     for row_index, check in enumerate(checks):
         status_text = _enum_text(check.status)
         rows[row_index] = overview_row(check.name, status_text, state.row_width)
-        if check.identifier == state.selected_id:
+        if highlight_selection and check.identifier == state.selected_id:
             inverted_row = row_index
         if check.status == Status.FAIL:
             failure_spans.append(_status_span(row_index, state.row_width, status_text))
@@ -111,7 +111,7 @@ def _legacy_overview_frame(state: AppState, checks: tuple[CheckRuntime, ...]) ->
     )
 
 
-def _compact_overview_frame(state: AppState, checks: tuple[CheckRuntime, ...]) -> Frame:
+def _compact_overview_frame(state: AppState, checks: tuple[CheckRuntime, ...], highlight_selection: bool) -> Frame:
     rows = _blank_rows(state.row_width, state.page_size)
     inverted_spans: list[InvertedSpan] = []
     separator = state.column_separator
@@ -132,7 +132,7 @@ def _compact_overview_frame(state: AppState, checks: tuple[CheckRuntime, ...]) -
             else:
                 display_text = compact_overview_cell(check.name, _enum_text(check.status), width)
                 cell = _pad_right(display_text, width)
-                if check.identifier == state.selected_id:
+                if highlight_selection and check.identifier == state.selected_id:
                     inverted_spans.append(
                         InvertedSpan(
                             row_index=row_index,
@@ -165,7 +165,7 @@ def _compact_overview_frame(state: AppState, checks: tuple[CheckRuntime, ...]) -
     )
 
 
-def _overview_frame(state: AppState) -> Frame:
+def _overview_frame(state: AppState, highlight_selection: bool) -> Frame:
     checks = visible_checks(state)
     if not checks:
         rows = _blank_rows(state.row_width, state.page_size)
@@ -174,12 +174,12 @@ def _overview_frame(state: AppState) -> Frame:
         return Frame(rows=tuple(rows), shift_offset=state.shift_offset)
 
     if state.display_mode == DisplayMode.STANDARD and state.overview_columns == 1:
-        return _legacy_overview_frame(state, checks)
+        return _legacy_overview_frame(state, checks, highlight_selection)
 
-    return _compact_overview_frame(state, checks)
+    return _compact_overview_frame(state, checks, highlight_selection)
 
 
-def render_frame(state: AppState, now_s: float | None = None) -> Frame:
+def render_frame(state: AppState, now_s: float | None = None, highlight_selection: bool = True) -> Frame:
     if state.mode == AppMode.DETAIL:
         selected = selected_check(state)
         failure_spans = ()
@@ -202,4 +202,4 @@ def render_frame(state: AppState, now_s: float | None = None) -> Frame:
             rows=_about_rows(state, state.row_width, state.page_size),
             shift_offset=state.shift_offset,
         )
-    return _overview_frame(state)
+    return _overview_frame(state, highlight_selection)

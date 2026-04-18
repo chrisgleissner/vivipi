@@ -167,6 +167,96 @@ def test_runtime_app_applies_immediate_failure_thresholds_when_configured():
     assert app.state.checks[0].status == Status.FAIL
 
 
+def test_runtime_app_can_hide_degraded_state_in_rendering_only():
+    display = FakeDisplay()
+    definition = make_definition("router", check_type=CheckType.HTTP)
+
+    def executor(check_definition, now_s):
+        return CheckExecutionResult(
+            source_identifier=check_definition.identifier,
+            observations=(
+                CheckObservation(
+                    identifier=check_definition.identifier,
+                    name=check_definition.name,
+                    status=Status.FAIL,
+                    details="timeout",
+                    observed_at_s=now_s,
+                ),
+            ),
+        )
+
+    app = RuntimeApp(
+        definitions=(definition,),
+        executor=executor,
+        display=display,
+        page_interval_s=0,
+        transition_thresholds=TransitionThresholds(failures_to_degraded=1, failures_to_failed=2),
+        visible_degraded=False,
+    )
+
+    app.tick(0.0)
+
+    assert app.state.checks[0].status == Status.DEG
+    assert display.frames[-1].rows[0].endswith("FAIL")
+
+
+def test_runtime_app_hidden_degraded_state_skips_redundant_fail_render():
+    display = FakeDisplay()
+    definition = make_definition("router", check_type=CheckType.HTTP)
+
+    app = RuntimeApp(
+        definitions=(definition,),
+        executor=lambda check_definition, now_s: None,
+        display=display,
+        page_interval_s=0,
+        visible_degraded=False,
+    )
+
+    degraded_state = replace(
+        app.state,
+        checks=(
+            replace(
+                app.state.checks[0],
+                status=Status.DEG,
+                details="timeout",
+                last_update_s=1.0,
+            ),
+        ),
+    )
+    failed_state = replace(
+        degraded_state,
+        checks=(
+            replace(
+                degraded_state.checks[0],
+                status=Status.FAIL,
+                last_update_s=2.0,
+            ),
+        ),
+    )
+
+    app.state = degraded_state
+    assert app.render_once(1.0) == "bootstrap"
+    assert len(display.frames) == 1
+
+    app.state = failed_state
+
+    assert app.render_once(2.0) == "none"
+    assert len(display.frames) == 1
+
+
+def test_runtime_app_button_press_feedback_stays_visible_long_enough_to_notice():
+    display = FakeDisplay()
+    app = RuntimeApp(definitions=(), executor=lambda definition, now_s: None, display=display, probe_time_provider=lambda: 1.0)
+    app.background_workers_enabled = False
+
+    app.tick(0.0)
+    app.tick(1.0, button_events=(ButtonEvent(button=Button.A, held_ms=30),))
+
+    assert display.frames[-1].rows[-1].strip() == "BTN A"
+    assert app._press_feedback_text(1.5) == "BTN A"
+    assert app._press_feedback_text(1.8) is None
+
+
 def test_runtime_app_starts_with_unknown_rows_before_the_first_check_runs():
     display = FakeDisplay()
     definition = make_definition("router")
@@ -361,9 +451,9 @@ def test_apply_button_events_sets_and_clears_press_feedback_for_no_op_button_pre
     app._apply_button_events((ButtonEvent(button=Button.A, held_ms=30),))
 
     assert app.state == unchanged_state
-    assert app.press_feedback_until_s == pytest.approx(2.15)
+    assert app.press_feedback_until_s == pytest.approx(2.75)
     assert app._press_feedback_text(2.0) == "BTN A"
-    assert app._press_feedback_text(2.2) is None
+    assert app._press_feedback_text(2.8) is None
 
 
 def test_runtime_app_validates_page_interval_and_uses_button_reader_when_present():

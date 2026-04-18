@@ -90,8 +90,9 @@ checks:
                 "  base_url: ${VIVIPI_SERVICE_BASE_URL}",
                 "check_state:",
                 "  failures_to_degraded: 1",
-                "  failures_to_failed: 1",
+                "  failures_to_failed: 2",
                 "  successes_to_recover: 1",
+                "  visible_degraded: false",
                 "probe_schedule:",
                 "  allow_concurrent_same_host: false",
                 "  same_host_backoff_ms: 250",
@@ -114,7 +115,8 @@ def test_load_build_deploy_settings_substitutes_environment_placeholders(tmp_pat
     assert settings["wifi"]["ssid"] == "TestWifi"
     assert settings["wifi"]["password"] == "TestPassword"
     assert settings["service"]["base_url"] == FIXTURE_ENV["VIVIPI_SERVICE_BASE_URL"]
-    assert settings["check_state"]["failures_to_failed"] == 1
+    assert settings["check_state"]["failures_to_failed"] == 2
+    assert settings["check_state"]["visible_degraded"] is False
     assert settings["device"]["display"]["type"] == "waveshare-pico-oled-1.3"
     assert settings["device"]["display"]["width_px"] == 128
     assert settings["device"]["display"]["height_px"] == 64
@@ -167,7 +169,8 @@ def test_write_runtime_config_embeds_wifi_and_checks(tmp_path: Path):
 
     assert rendered["wifi"]["ssid"] == "TestWifi"
     assert rendered["checks"][0]["id"] == "router"
-    assert rendered["check_state"]["failures_to_failed"] == 1
+    assert rendered["check_state"]["failures_to_failed"] == 2
+    assert rendered["check_state"]["visible_degraded"] is False
     assert rendered["probe_schedule"]["same_host_backoff_ms"] == 250
 
 
@@ -818,8 +821,9 @@ def test_render_device_runtime_config_serializes_optional_check_state():
         "service": {},
         "check_state": {
             "failures_to_degraded": 1,
-            "failures_to_failed": 1,
+            "failures_to_failed": 2,
             "successes_to_recover": 1,
+            "visible_degraded": False,
         },
     }
     checks = (
@@ -833,7 +837,8 @@ def test_render_device_runtime_config_serializes_optional_check_state():
 
     rendered = render_device_runtime_config(settings, checks)
 
-    assert rendered["check_state"]["failures_to_failed"] == 1
+    assert rendered["check_state"]["failures_to_failed"] == 2
+    assert rendered["check_state"]["visible_degraded"] is False
 
 
 def test_render_device_runtime_config_serializes_probe_schedule():
@@ -1219,7 +1224,7 @@ def test_deploy_firmware_defaults_to_auto_port_when_not_configured(tmp_path: Pat
     )
 
     assert commands[0][:4] == ["mpremote", "connect", "auto", "fs"]
-    assert commands[-1] == ["mpremote", "connect", "auto", "soft-reset"]
+    assert commands[-1] == ["mpremote", "connect", "auto", "reset"]
 
 
 def test_deploy_firmware_copies_files_via_mpremote(tmp_path: Path, monkeypatch):
@@ -1239,7 +1244,7 @@ def test_deploy_firmware_copies_files_via_mpremote(tmp_path: Path, monkeypatch):
     assert any(command[:4] == ["mpremote", "connect", "/dev/ttyUSB0", "fs"] for command in commands)
     assert any(command[-1] == ":boot.py" for command in commands)
     assert any(command[-1] == ":config.json" for command in commands)
-    assert commands[-1] == ["mpremote", "connect", "/dev/ttyUSB0", "soft-reset"]
+    assert commands[-1] == ["mpremote", "connect", "/dev/ttyUSB0", "reset"]
 
 
 def test_build_firmware_bundle_staged_entrypoint_imports_on_flattened_filesystem(tmp_path: Path):
@@ -1282,7 +1287,7 @@ def test_deploy_firmware_uses_sg_dialout_when_process_lacks_group_membership(tmp
 
     assert all(command[:3] == ["sg", "dialout", "-c"] for command in commands)
     assert "exec mpremote connect /dev/ttyUSB0 fs cp" in commands[0][3]
-    assert commands[-1] == ["sg", "dialout", "-c", "exec mpremote connect /dev/ttyUSB0 soft-reset"]
+    assert commands[-1] == ["sg", "dialout", "-c", "exec mpremote connect /dev/ttyUSB0 reset"]
 
 
 def test_deploy_firmware_retries_mpremote_after_timeout(tmp_path: Path, monkeypatch):
@@ -1309,8 +1314,10 @@ def test_deploy_firmware_retries_mpremote_after_timeout(tmp_path: Path, monkeypa
 
     fs_commands = [command for command, _, _ in commands if command[:4] == ["mpremote", "connect", "/dev/ttyUSB0", "fs"]]
     soft_resets = [command for command, _, _ in commands if command == ["mpremote", "connect", "/dev/ttyUSB0", "soft-reset"]]
+    final_resets = [command for command, _, _ in commands if command == ["mpremote", "connect", "/dev/ttyUSB0", "reset"]]
     assert len(fs_commands) >= 2
-    assert len(soft_resets) >= 2
+    assert len(soft_resets) == 1
+    assert len(final_resets) == 1
 
 
 def test_deploy_firmware_reports_missing_mpremote(tmp_path: Path):
@@ -1409,6 +1416,30 @@ def test_parse_bool_covers_default_and_string_branches():
 
     with pytest.raises(ValueError, match="flag must be a boolean"):
         build_deploy._parse_bool("maybe", "flag", False)
+
+
+def test_load_build_deploy_settings_validates_check_state_shape_and_integer_context(tmp_path: Path):
+    config_path = tmp_path / "build-deploy.yaml"
+    config_path.write_text("check_state: []\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="check_state must be a mapping"):
+        load_build_deploy_settings(config_path, env={})
+
+    config_path.write_text(
+        "check_state:\n  failures_to_failed: nope\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="check_state.failures_to_failed must be an integer"):
+        load_build_deploy_settings(config_path, env={})
+
+    config_path.write_text(
+        "check_state:\n  failures_to_failed:\n    - still-not-an-int\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="check_state.failures_to_failed must be an integer"):
+        load_build_deploy_settings(config_path, env={})
 
 
 def test_build_deploy_module_entrypoint_executes_main(monkeypatch):

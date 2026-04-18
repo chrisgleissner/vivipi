@@ -1,10 +1,138 @@
 # Plans
 
+## ViviPi Probe Productionization Plan
+
+Authoritative execution plan for fixing ViviPi direct-probe correctness on the Pico, improving display responsiveness, preserving the internal `OK -> DEG -> FAIL` model while making the visible degraded phase configurable, and validating the result on the attached Pico against the live U64, C64U, and Pixel 4 environment.
+
+### Problem Statement
+
+- The Pico-side `U64 TELNET` probe currently reports `FAIL` on the live device even though the repository's host-side `scripts/u64_connection_test.py` probe succeeds and is the behavioral source of truth.
+- Displayed health transitions are slower than desired when targets power off or recover.
+- The codebase must preserve its existing internal degraded-state model but allow users to choose whether the display visibly steps through `DEG` or transitions directly between `OK` and `FAIL`.
+- The Waveshare Pico OLED 1.3 buttons on `GP15` and `GP17` need live verification and production-suitable observable behavior.
+
+### Assumptions
+
+- `docs/spec.md` is the product source of truth.
+- Core behavior should stay in `src/vivipi/core` or testable runtime code unless firmware glue must change.
+- The attached Pico is deployable through `./build deploy` and the repo-local config in `config/build-deploy.local.yaml` is the active deployment profile.
+- `scripts/u64_connection_test.py` and its protocol runners define the intended U64 probe semantics.
+
+### Constraints
+
+- Keep changes minimal and architecture-consistent.
+- Preserve the strict fixed-grid rendering model and selection identity semantics.
+- Preserve the internal `DEG` state model even if visible transitions become direct by default.
+- Reuse existing config structures such as `check_state`, `probe_schedule`, and `device.buttons` where possible.
+- Update `docs/spec-traceability.md` if requirement coverage changes.
+- Finish with build, deploy, and real-hardware validation rather than code-only reasoning.
+
+### Research Findings So Far
+
+- Active local deployment config already uses `GP15` and `GP17`, enables `startup_self_test_s: 30`, and sets `check_state` thresholds to `1/1/1`, so slow visible fail/recover transitions are not currently caused by multi-step degradation thresholds alone.
+- Active local checks in `config/checks.local.yaml` still run at `interval_s: 10` / `timeout_s: 8`, which is slower than the requested preferred default and leaves little headroom for fast failure/recovery.
+- The Pico FTP probe in `src/vivipi/runtime/checks.py` already aligns with the remembered source-of-truth semantics: `USER`, optional `PASS`, `PWD`, `QUIT`, no PASV/NLST smoke path.
+- The Pico telnet probe already treats post-connect timeout/reset as healthy connectivity, which also matches the remembered source-of-truth semantics.
+- The button path is not absent: `firmware/input.py` polls `GP15`/`GP17`, `src/vivipi/core/input.py` maps button `A` to navigation and button `B` to detail/overview toggling, and `firmware/runtime.py` already has a startup self-test frame plus short press-feedback overlay support.
+- Remaining unknowns to prove on hardware: the exact on-device cause of `U64 TELNET` failing, whether the current rendered feedback is sufficiently observable in normal operation, and the measured before/after fail/recover times.
+
+### Phased Task List
+
+Phase 1: Ground-truth research and baseline capture  
+Status: COMPLETED
+
+- Inspect runtime, scheduler, display, config-rendering, deploy, and button code paths.
+- Compare Pico `FTP` and `TELNET` smoke behavior against `scripts/u64_connection_test.py` and its protocol runners.
+- Capture current local config, active probe intervals/timeouts, transition thresholds, and button configuration.
+- Reproduce baseline probe behavior locally and on hardware where possible.
+
+Phase 2: Fix U64 telnet probe correctness  
+Status: COMPLETED
+
+- Identify the exact behavioral difference between Pico telnet probing and the source-of-truth host runner.
+- Implement the smallest robust Pico-side telnet change needed to make the real U64 report healthy.
+- Add or adjust targeted tests around the discovered edge case.
+
+Phase 3: Improve responsiveness while preserving the model  
+Status: COMPLETED
+
+- Reduce default direct-probe cadence toward a preferred `5s` interval with appropriately smaller timeouts.
+- Preserve internal `DEG` modeling while making the visible degraded phase explicitly configurable.
+- Reuse existing `check_state` and runtime/rendering paths rather than inventing parallel state machinery.
+- Add code coverage proving both visible behaviors.
+
+Phase 4: Review adjacent probes for consistency  
+Status: COMPLETED
+
+- Re-check REST/HTTP and FTP direct probes for consistency with the source-of-truth U64 probe structure.
+- Make only targeted correctness or consistency fixes that improve probe behavior.
+
+Phase 5: Button completion and observability  
+Status: COMPLETED
+
+- Verify live `GP15` / `GP17` behavior on the Pico OLED 1.3.
+- Ensure button activity is visibly testable in a production-suitable way during normal operation and startup.
+- Update docs/config comments if the intended behavior was previously unclear.
+
+Phase 6: Validation, deployment, and documentation  
+Status: COMPLETED
+
+- Run targeted tests, then `./build`.
+- Deploy with the supported USB flow.
+- Validate on the attached Pico against live U64, C64U, and Pixel 4 targets.
+- Measure and record old/new fail and recovery timings, button evidence, and final healthy status.
+- Update docs and traceability coverage as required.
+
+### Acceptance Criteria
+
+- Real Pico `U64 TELNET` becomes healthy against the live U64.
+- Default direct-probe responsiveness moves to a preferred `5s` cadence unless hard evidence supports a narrower equivalent.
+- Failures surface materially faster than the current `10s/8s` configuration and recoveries also surface faster.
+- Internal `OK / DEG / FAIL` state logic remains intact.
+- Visible degraded behavior is explicitly configurable and integrated through the existing config model.
+- FTP and REST/HTTP direct probes are reviewed and aligned where needed.
+- `GP15` and `GP17` button behavior is verified live and made observable without debug-only churn.
+- Required tests pass, `./build` passes, deployment succeeds, and live probes end in healthy `OK` state for the powered-on environment.
+
+### Validation Checklist
+
+- Read and compare relevant code and docs.
+- Run targeted unit tests for runtime checks, state transitions, build/deploy config, and button/runtime behavior.
+- Run `./build`.
+- Render config and inspect the produced runtime config if config fields change.
+- Deploy to the attached Pico via `./build deploy`.
+- Observe serial/runtime logs and displayed probe state on-device.
+- Verify `U64`, `C64U`, and `Pixel 4` checks reach healthy state.
+- Measure time-to-fail and time-to-recover before/after on at least one powered target.
+- Verify `GP15` and `GP17` press observability on hardware.
+
+### Current Status Per Task
+
+- Research baseline: COMPLETED
+- U64 telnet root cause: COMPLETED
+- Responsiveness change set: COMPLETED
+- Visible degraded configuration: COMPLETED
+- FTP/REST consistency review: COMPLETED
+- Button live validation: COMPLETED
+- Tests/docs/config updates: COMPLETED
+- Build/deploy/hardware validation: COMPLETED
+
+### Completion Notes
+
+- Root cause confirmed on real hardware: the Pico-side telnet runner classified MicroPython `OSError(110, "ETIMEDOUT")` as generic `io` instead of `timeout`, so post-connect idle timeouts were not treated as successful telnet reachability even though the source-of-truth host semantics allow them.
+- The fix preserves the existing telnet design and only corrects timeout classification for the MicroPython path.
+- Visible degradation is now configurable through `check_state.visible_degraded`; the active config preserves the internal `OK -> DEG -> FAIL` model with `1/2/1` thresholds while rendering direct visible `OK <-> FAIL` transitions by setting `visible_degraded: false`.
+- Checked-in direct-probe defaults now run at `interval_s: 5` and `timeout_s: 4`.
+- Normal-runtime button feedback is now visible long enough to notice, and live GPIO monitoring on the attached Pico confirmed press/release events for both `GP15` and `GP17`.
+- Validation completed: targeted tests passed, `./build` passed at `617 passed` and `98.46%` coverage, deploy completed, and the redeployed Pico reported `OK` for `C64U REST`, `C64U FTP`, `C64U TELNET`, `PIXEL4 ADB`, `U64 REST`, `U64 FTP`, and `U64 TELNET`.
+- Follow-up production hardening: deploy now finishes with a full `mpremote ... reset` instead of only `soft-reset`, so the Pico is forced back into autonomous `boot.py` / `main.py` execution after USB tooling interactions rather than being left in a stale interactive state.
+- Follow-up live-tuning: direct-probe timing was relaxed from `5s / 4s` to `7s / 5s` to reduce transient false negatives while keeping single-probe worst-case detection under the 15-second budget, and the overview selection highlight is now suppressed on the device runtime path so the first row no longer appears inverted while buttons remain non-functional.
+
 ## U64 FTP Benchmark Reproducibility Plan
 
 Authoritative execution plan for hardening `scripts/u64_ftp_test.py` with time-normalized stage sizing, deterministic scoring, and minimal output extensions.
 
-### Execution Phases
+### Metrics Hardening Phases
 
 Phase 1: Pin current behavior and update the active plan  
 Status: COMPLETED
@@ -35,7 +163,7 @@ Status: COMPLETED
 - Run `./.venv/bin/python -m pytest -o addopts='' tests/unit/tooling/test_u64_ftp_test.py`.
 - Run `./build` after the targeted tests pass.
 
-### Completion Criteria
+### Metrics Hardening Criteria
 
 Done only when:
 

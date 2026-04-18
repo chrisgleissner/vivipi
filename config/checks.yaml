@@ -2,19 +2,19 @@ checks:
   - name: Router
     type: ping
     target: 192.168.1.1
-    interval_s: 15
-    timeout_s: 10
+    interval_s: 7
+    timeout_s: 5
 
   - name: NAS API
     type: http
     target: https://nas.example.local/health
     method: GET
-    interval_s: 15
-    timeout_s: 10
+    interval_s: 7
+    timeout_s: 5
 
   - name: Android Devices
     type: service
     target: ${VIVIPI_SERVICE_BASE_URL}
     prefix: adb
-    interval_s: 15
-    timeout_s: 10
+    interval_s: 7
+    timeout_s: 5

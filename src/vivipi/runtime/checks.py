@@ -44,6 +44,7 @@ POLLHUP = getattr(select, "POLLHUP", 0x0010)
 SOCKET_CONNECT_IN_PROGRESS_ERRNOS = frozenset({11, 36, 114, 115, 10035})
 SOCKET_ALREADY_CONNECTED_ERRNOS = frozenset({56, 106, 127})
 SOCKET_WOULD_BLOCK_ERRNOS = frozenset({11, 35, 36, 10035})
+SOCKET_TIMEOUT_ERRNOS = frozenset({110})
 
 
 def _fold(value: object) -> str:
@@ -156,8 +157,8 @@ def _is_would_block(error: BaseException) -> bool:
 
 def _classify_network_error(error: BaseException) -> str:
     message = _fold(_normalize_error_text(error))
-    errno = getattr(error, "errno", None)
-    if isinstance(error, TimeoutError) or "timeout" in message or "timed out" in message:
+    errno = _error_errno(error)
+    if isinstance(error, TimeoutError) or errno in SOCKET_TIMEOUT_ERRNOS or "timeout" in message or "timed out" in message or "etimedout" in message:
         return "timeout"
     if errno in {-2, -3} or "name or service not known" in message or "name resolution" in message:
         return "dns"

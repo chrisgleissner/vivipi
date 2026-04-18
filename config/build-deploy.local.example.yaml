@@ -14,6 +14,8 @@ device:
   # buttons:
   #   a: { pin: GP15, pull: auto }
   #   b: { pin: GP17, pull: auto }
+  # Optional startup confirmation overlay on boot for hardware validation:
+  # startup_self_test_s: 30
   display:
     type: waveshare-pico-oled-1.3
     # Advanced override only. The Waveshare Pico OLED 1.3 infers SH1107 column_offset: 32.
@@ -31,6 +33,12 @@ service:
   # Leave base_url commented out if you do not want SERVICE checks in config.json.
   # base_url: http://192.168.1.10:8080/checks
   default_prefix: adb
+
+check_state:
+  failures_to_degraded: 1
+  failures_to_failed: 2
+  successes_to_recover: 1
+  visible_degraded: false
 
 probe_schedule:
   allow_concurrent_same_host: false

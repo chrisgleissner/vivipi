@@ -456,6 +456,7 @@ def test_deadline_and_error_helpers_cover_remaining_fallbacks(monkeypatch):
     assert runtime_checks._error_errno(OSError(115, "in progress")) == 115
     assert runtime_checks._is_already_connected(OSError("already connected")) is True
     assert runtime_checks._contains_any(b"Welcome READY", (b"ready",)) is True
+    assert runtime_checks._classify_network_error(OSError(110, "ETIMEDOUT")) == "timeout"
 
 
 def test_socket_wait_and_nonblocking_helpers_cover_timeout_and_fallback_paths(monkeypatch):
@@ -772,6 +773,34 @@ def test_telnet_chunk_compat_and_output_helpers_cover_remaining_branches(monkeyp
     assert runtime_checks._recv_telnet_chunk(DeadlineRecvSocket(), deadline=("perf", 1.0)) == b""
 
     assert runtime_checks._looks_like_telnet_output("   ") is False
+
+
+def test_portable_telnet_runner_treats_micropython_etimedout_after_connect_as_success(monkeypatch):
+    class TimeoutSocket:
+        def __init__(self):
+            self.timeout_values = []
+            self.closed = False
+
+        def settimeout(self, value):
+            self.timeout_values.append(value)
+
+        def recv(self, size):
+            raise OSError(110, "ETIMEDOUT")
+
+        def close(self):
+            self.closed = True
+
+    handle = TimeoutSocket()
+
+    monkeypatch.setattr(runtime_checks, "_is_micropython_runtime", lambda: True)
+    monkeypatch.setattr(runtime_checks, "_open_socket_compat", lambda host, port, timeout_s, deadline, trace=None: handle)
+
+    result = portable_telnet_runner("192.0.2.10:23", 8)
+
+    assert result.ok is True
+    assert result.details == "connected"
+    assert handle.timeout_values == [runtime_checks.TELNET_IDLE_TIMEOUT_S]
+    assert handle.closed is True
 
 
 def test_portable_ftp_runner_stdlib_paths_cover_success_and_failures(monkeypatch):

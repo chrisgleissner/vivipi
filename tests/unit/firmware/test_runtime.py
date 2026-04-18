@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 import firmware.runtime as firmware_runtime
 from vivipi.core.models import DiagnosticEvent, DisplayMode, ProbeSchedulingPolicy, TransitionThresholds
 
@@ -146,6 +148,8 @@ def test_build_runtime_app_uses_injected_factories_and_defers_wifi_startup():
             column_separator,
             transition_thresholds,
             probe_scheduling,
+            visible_degraded,
+            highlight_selection,
             sleep_ms,
             probe_time_provider,
             version="",
@@ -164,6 +168,8 @@ def test_build_runtime_app_uses_injected_factories_and_defers_wifi_startup():
             called["column_separator"] = column_separator
             called["transition_thresholds"] = transition_thresholds
             called["probe_scheduling"] = probe_scheduling
+            called["visible_degraded"] = visible_degraded
+            called["highlight_selection"] = highlight_selection
             called["sleep_ms"] = sleep_ms
             called["probe_time_provider"] = probe_time_provider
             called["version"] = version
@@ -192,8 +198,9 @@ def test_build_runtime_app_uses_injected_factories_and_defers_wifi_startup():
             "project": {"version": "1.2.3", "build_time": "2025-04-05T12:00Z"},
             "check_state": {
                 "failures_to_degraded": 1,
-                "failures_to_failed": 1,
+                "failures_to_failed": 2,
                 "successes_to_recover": 1,
+                "visible_degraded": False,
             },
             "device": {
                 "display": {
@@ -234,9 +241,11 @@ def test_build_runtime_app_uses_injected_factories_and_defers_wifi_startup():
     assert called["column_separator"] == "|"
     assert called["transition_thresholds"] == TransitionThresholds(
         failures_to_degraded=1,
-        failures_to_failed=1,
+        failures_to_failed=2,
         successes_to_recover=1,
     )
+    assert called["visible_degraded"] is False
+    assert called["highlight_selection"] is False
     assert called["probe_scheduling"] == ProbeSchedulingPolicy()
     assert called["version"] == "1.2.3"
     assert called["build_time"] == "2025-04-05T12:00Z"
@@ -262,6 +271,15 @@ def test_build_executor_with_optional_trace_uses_trace_sink_when_runtime_app_exp
 
     assert built.__self__ is app
     assert built.__func__ is FakeApp.emit_probe_trace
+
+
+def test_visible_degraded_from_config_defaults_true_and_parses_boolean_strings():
+    assert firmware_runtime._visible_degraded_from_config({}) is True
+    assert firmware_runtime._visible_degraded_from_config({"check_state": {"visible_degraded": False}}) is False
+    assert firmware_runtime._visible_degraded_from_config({"check_state": {"visible_degraded": "no"}}) is False
+
+    with pytest.raises(ValueError, match="check_state.visible_degraded must be a boolean"):
+        firmware_runtime._visible_degraded_from_config({"check_state": {"visible_degraded": object()}})
 
 def test_build_runtime_app_forces_serial_probe_execution_when_background_workers_are_enabled():
     trace_sinks = []
