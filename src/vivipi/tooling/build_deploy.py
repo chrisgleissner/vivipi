@@ -127,15 +127,36 @@ def _normalize_check_state_settings(settings: dict[str, object]):
         raise ValueError("check_state must be a mapping")
 
     settings["check_state"] = {
-        "failures_to_degraded": int(raw.get("failures_to_degraded", 1)),
-        "failures_to_failed": int(raw.get("failures_to_failed", 2)),
-        "successes_to_recover": int(raw.get("successes_to_recover", 1)),
+        "failures_to_degraded": _parse_int(
+            raw.get("failures_to_degraded"),
+            "check_state.failures_to_degraded",
+            1,
+        ),
+        "failures_to_failed": _parse_int(
+            raw.get("failures_to_failed"),
+            "check_state.failures_to_failed",
+            2,
+        ),
+        "successes_to_recover": _parse_int(
+            raw.get("successes_to_recover"),
+            "check_state.successes_to_recover",
+            1,
+        ),
         "visible_degraded": _parse_bool(
             raw.get("visible_degraded"),
             "check_state.visible_degraded",
             True,
         ),
     }
+
+
+def _parse_int(value: object, context: str, default: int) -> int:
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{context} must be an integer") from error
 
 
 def _parse_bool(value: object, context: str, default: bool) -> bool:

@@ -1418,6 +1418,17 @@ def test_parse_bool_covers_default_and_string_branches():
         build_deploy._parse_bool("maybe", "flag", False)
 
 
+def test_load_build_deploy_settings_reports_check_state_integer_context(tmp_path: Path):
+    config_path = tmp_path / "build-deploy.yaml"
+    config_path.write_text(
+        "check_state:\n  failures_to_failed: nope\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="check_state.failures_to_failed must be an integer"):
+        load_build_deploy_settings(config_path, env={})
+
+
 def test_build_deploy_module_entrypoint_executes_main(monkeypatch):
     monkeypatch.setattr(
         build_deploy.argparse.ArgumentParser,

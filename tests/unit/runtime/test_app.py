@@ -200,6 +200,50 @@ def test_runtime_app_can_hide_degraded_state_in_rendering_only():
     assert display.frames[-1].rows[0].endswith("FAIL")
 
 
+def test_runtime_app_hidden_degraded_state_skips_redundant_fail_render():
+    display = FakeDisplay()
+    definition = make_definition("router", check_type=CheckType.HTTP)
+
+    app = RuntimeApp(
+        definitions=(definition,),
+        executor=lambda check_definition, now_s: None,
+        display=display,
+        page_interval_s=0,
+        visible_degraded=False,
+    )
+
+    degraded_state = replace(
+        app.state,
+        checks=(
+            replace(
+                app.state.checks[0],
+                status=Status.DEG,
+                details="timeout",
+                last_update_s=1.0,
+            ),
+        ),
+    )
+    failed_state = replace(
+        degraded_state,
+        checks=(
+            replace(
+                degraded_state.checks[0],
+                status=Status.FAIL,
+                last_update_s=2.0,
+            ),
+        ),
+    )
+
+    app.state = degraded_state
+    assert app.render_once(1.0) == "bootstrap"
+    assert len(display.frames) == 1
+
+    app.state = failed_state
+
+    assert app.render_once(2.0) == "none"
+    assert len(display.frames) == 1
+
+
 def test_runtime_app_button_press_feedback_stays_visible_long_enough_to_notice():
     display = FakeDisplay()
     app = RuntimeApp(definitions=(), executor=lambda definition, now_s: None, display=display, probe_time_provider=lambda: 1.0)

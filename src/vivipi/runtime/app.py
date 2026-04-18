@@ -194,6 +194,7 @@ class RuntimeApp:
             build_time=build_time,
         )
         self.last_rendered_state: AppState | None = None
+        self.last_rendered_frame = None
         self.logger = StructuredLogger()
         self.metrics = MetricsStore(tuple(definition.identifier for definition in self.definitions))
         self.error_records = RingBuffer(capacity=16)
@@ -302,7 +303,8 @@ class RuntimeApp:
         boot_logo_until_s = getattr(self, "boot_logo_until_s", None)
         if self.last_rendered_state is None and boot_logo_until_s is not None and now_s < float(boot_logo_until_s):
             return "boot-logo"
-        reason = render_reason(self.last_rendered_state, self.state)
+        display_state = self._display_state()
+        reason = render_reason(self.last_rendered_state, display_state)
         feedback_text = self._overlay_feedback_text(now_s) or ""
         if (
             reason == "none"
@@ -314,17 +316,24 @@ class RuntimeApp:
             reason = "overlay"
         if self.display_retry_at_s is not None and now_s < self.display_retry_at_s:
             return reason
+        frame = self._decorate_frame(
+            render_frame(display_state, now_s=now_s, highlight_selection=self.highlight_selection),
+            now_s,
+        )
+        if frame == self.last_rendered_frame:
+            self.last_rendered_state = display_state
+            self.last_render_reason = "none"
+            self.last_rendered_debug_mode = self.debug_mode
+            self.last_rendered_feedback = feedback_text
+            return "none"
         try:
-            frame = self._decorate_frame(
-                render_frame(self._display_state(), now_s=now_s, highlight_selection=self.highlight_selection),
-                now_s,
-            )
             self.display.draw_frame(frame)
         except Exception as error:
             self._record_display_failure(error, now_s)
         else:
             self._reset_display_failure_state()
-            self.last_rendered_state = self.state
+            self.last_rendered_state = display_state
+            self.last_rendered_frame = frame
             self.last_render_at_s = now_s
             self.last_render_reason = reason
             self.last_rendered_debug_mode = self.debug_mode
@@ -1143,6 +1152,7 @@ class RuntimeApp:
             build_time=self.state.build_time,
         )
         self.last_rendered_state = None
+        self.last_rendered_frame = None
         self.metrics.reset()
         self.error_records.clear()
         self._last_result_signatures.clear()

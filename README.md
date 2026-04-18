@@ -107,7 +107,7 @@ Requirements:
 
 For day-to-day editor workflows, copy `config/build-deploy.local.example.yaml` to `config/build-deploy.local.yaml` and put your Wi-Fi credentials there. `./build render-config`, `./build build-firmware`, and `./build deploy` automatically prefer that local file when it exists. Pass `--config config/build-deploy.yaml` when you need to bypass a sibling local override.
 
-The checked-in defaults now use a `5s` probe interval with a `4s` timeout. Internal check hysteresis remains `OK -> DEG -> FAIL`, while `check_state.visible_degraded: false` lets the display jump directly between visible `OK` and `FAIL` without losing the internal degraded state. The default button pins remain `GP15` and `GP17`, and button presses render a short on-screen acknowledgement so hardware input is observable during normal use.
+The checked-in defaults now use a `7s` probe interval with a `5s` timeout. Internal check hysteresis remains `OK -> DEG -> FAIL`, while `check_state.visible_degraded: false` lets the display jump directly between visible `OK` and `FAIL` without losing the internal degraded state. The default button pins remain `GP15` and `GP17`, and button presses render a short on-screen acknowledgement so hardware input is observable during normal use.
 
 1. Set Wi-Fi credentials. Add `VIVIPI_SERVICE_BASE_URL` only if you want `SERVICE` checks.
 

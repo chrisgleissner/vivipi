@@ -319,8 +319,8 @@ Thresholds MUST be configurable.
 
 ## 7. Polling & Timing
 
-- Default interval: 5 seconds (configurable)
-- Timeout: 4 seconds (configurable)
+- Default interval: 7 seconds (configurable)
+- Timeout: 5 seconds (configurable)
 
 Constraint:
 
