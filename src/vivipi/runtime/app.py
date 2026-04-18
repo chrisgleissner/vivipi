@@ -14,6 +14,7 @@ except ImportError:  # pragma: no cover - CPython fallback
     _thread = None
 
 from vivipi.core.input import Button, InputController
+from vivipi.core.freshness import clamp_freshness_width, decay_freshness_width, missed_interval_windows, reset_freshness_width
 from vivipi.core.models import CheckRuntime
 from vivipi.core.render import render_frame
 from vivipi.core.scheduler import due_checks, probe_backoff_remaining_s, probe_host_key, render_reason
@@ -119,7 +120,8 @@ class PendingCheckRun:
 @dataclass(frozen=True)
 class CompletedCheckRun:
     definition: CheckDefinition
-    observed_at_s: float
+    started_at_s: float
+    completed_at_s: float
     duration_ms: float
     manual: bool = False
     result: object | None = None
@@ -166,7 +168,10 @@ class RuntimeApp:
         self.sleep_ms = sleep_ms
         self.probe_time_provider = probe_time_provider
         self.last_started_at: dict[str, float] = {}
+        self.last_completed_at: dict[str, float] = {}
         self.last_completed_at_by_host: dict[str, float] = {}
+        self.freshness_width_by_check = {definition.identifier: 0 for definition in self.definitions}
+        self.freshness_accounted_misses_by_check = {definition.identifier: 0 for definition in self.definitions}
         self.background_lock = _allocate_lock()
         self.background_workers_enabled = self.background_lock is not None and (
             threading is not None or _thread is not None
@@ -342,10 +347,15 @@ class RuntimeApp:
         return reason
 
     def _display_state(self) -> AppState:
-        if self.visible_degraded:
-            return self.state
         display_checks = tuple(
-            replace(check, status=Status.FAIL) if check.status == Status.DEG else check
+            replace(
+                check,
+                status=Status.FAIL if (not self.visible_degraded and check.status == Status.DEG) else check.status,
+                freshness_width_px=self.freshness_width_by_check.get(
+                    check.identifier,
+                    getattr(check, "freshness_width_px", 0),
+                ),
+            )
             for check in self.state.checks
         )
         if display_checks == self.state.checks:
@@ -419,6 +429,9 @@ class RuntimeApp:
                     "target": definition.target,
                     "interval_s": definition.interval_s,
                     "timeout_s": definition.timeout_s,
+                    "freshness_width_px": self.freshness_width_by_check.get(definition.identifier, 0),
+                    "last_started_s": self.last_started_at.get(definition.identifier),
+                    "last_completed_s": self.last_completed_at.get(definition.identifier),
                 }
             )
             items.append(current)
@@ -434,6 +447,12 @@ class RuntimeApp:
                 "latency_ms": check.latency_ms,
                 "last_update_s": check.last_update_s,
                 "last_success_s": self.last_success_at.get(check.identifier),
+                "last_started_s": self.last_started_at.get(check.identifier),
+                "last_completed_s": self.last_completed_at.get(check.identifier),
+                "freshness_width_px": self.freshness_width_by_check.get(
+                    check.identifier,
+                    getattr(check, "freshness_width_px", 0),
+                ),
                 "last_error": self.last_error_by_check.get(check.identifier),
                 "source_identifier": check.source_identifier,
             }
@@ -900,15 +919,18 @@ class RuntimeApp:
             lock_acquired = _lock_context(self.background_lock)
             try:
                 self.last_started_at[definition.identifier] = started_now_s
+                self.freshness_accounted_misses_by_check[definition.identifier] = 0
             finally:
                 if lock_acquired:
                     self.background_lock.release()
         else:
             self.last_started_at[definition.identifier] = started_now_s
+            self.freshness_accounted_misses_by_check[definition.identifier] = 0
         try:
             result = self.executor(definition, started_now_s)
         except Exception as error:
             duration_ms = elapsed_ms(started_at, timer_kind)
+            completed_at_s = started_now_s + (duration_ms / 1000.0)
             self._mark_probe_complete(definition)
             self.logger.debug(
                 "CHECK",
@@ -922,13 +944,15 @@ class RuntimeApp:
             )
             return CompletedCheckRun(
                 definition=definition,
-                observed_at_s=started_now_s,
+                started_at_s=started_now_s,
+                completed_at_s=completed_at_s,
                 duration_ms=duration_ms,
                 manual=manual,
                 error=error,
             )
 
         duration_ms = elapsed_ms(started_at, timer_kind)
+        completed_at_s = started_now_s + (duration_ms / 1000.0)
         self._mark_probe_complete(definition)
         status = "?"
         if result.observations:
@@ -945,16 +969,61 @@ class RuntimeApp:
         )
         return CompletedCheckRun(
             definition=definition,
-            observed_at_s=started_now_s,
+            started_at_s=started_now_s,
+            completed_at_s=completed_at_s,
             duration_ms=duration_ms,
             manual=manual,
             result=result,
         )
 
+    def _freshness_grace_s(self) -> float:
+        return float(self.probe_scheduling.interval_grace_ms) / 1000.0
+
+    def _update_freshness_width(self, identifier: str, width_px: int):
+        self.freshness_width_by_check[identifier] = clamp_freshness_width(int(width_px))
+
+    def _apply_freshness_decay(self, now_s: float):
+        grace_s = self._freshness_grace_s()
+        for definition in self.definitions:
+            identifier = definition.identifier
+            started_at_s = self.last_started_at.get(identifier)
+            completed_at_s = self.last_completed_at.get(identifier)
+            if started_at_s is None:
+                continue
+            if completed_at_s is not None and completed_at_s >= started_at_s:
+                continue
+
+            accounted_misses = int(self.freshness_accounted_misses_by_check.get(identifier, 0))
+            total_misses = missed_interval_windows(started_at_s, now_s, definition.interval_s, grace_s)
+            new_misses = max(0, total_misses - accounted_misses)
+            if new_misses <= 0:
+                continue
+
+            self._update_freshness_width(
+                identifier,
+                decay_freshness_width(self.freshness_width_by_check.get(identifier, 0), steps=new_misses),
+            )
+            self.freshness_accounted_misses_by_check[identifier] = total_misses
+
     def _apply_completed_check(self, completed: CompletedCheckRun):
         definition = completed.definition
         previous_status = self.registered_results.get(definition.identifier, {}).get("status")
+        self.last_completed_at[definition.identifier] = completed.completed_at_s
+        missed_windows = missed_interval_windows(
+            completed.started_at_s,
+            completed.completed_at_s,
+            definition.interval_s,
+            self._freshness_grace_s(),
+        )
         if completed.error is not None:
+            accounted_misses = int(self.freshness_accounted_misses_by_check.get(definition.identifier, 0))
+            new_misses = max(0, missed_windows - accounted_misses)
+            if new_misses:
+                self._update_freshness_width(
+                    definition.identifier,
+                    decay_freshness_width(self.freshness_width_by_check.get(definition.identifier, 0), steps=new_misses),
+                )
+            self.freshness_accounted_misses_by_check[definition.identifier] = missed_windows
             self.metrics.record_check(definition.identifier, completed.duration_ms, None)
             self.registered_results[definition.identifier] = {
                 "id": definition.identifier,
@@ -962,7 +1031,7 @@ class RuntimeApp:
                 "status": "FAIL",
                 "details": "executor exception",
                 "latency_ms": None,
-                "last_update_s": completed.observed_at_s,
+                "last_update_s": completed.completed_at_s,
                 "last_success_s": self.last_success_at.get(definition.identifier),
                 "last_error": str(completed.error) or type(completed.error).__name__,
             }
@@ -974,18 +1043,33 @@ class RuntimeApp:
                         name=definition.name,
                         status=Status.FAIL,
                         details="executor exception",
-                        observed_at_s=completed.observed_at_s,
+                        observed_at_s=completed.completed_at_s,
                         source_identifier=definition.identifier,
                     ),
                 ),
                 thresholds=self.transition_thresholds,
                 replace_source_identifier=definition.identifier if _enum_text(definition.check_type) == "SERVICE" else None,
             )
-            self._record_exception("check", completed.error, observed_at_s=completed.observed_at_s, identifier=definition.identifier)
-            self._track_status_transition(definition.identifier, previous_status, "FAIL", completed.observed_at_s)
+            self._record_exception("check", completed.error, observed_at_s=completed.completed_at_s, identifier=definition.identifier)
+            self._track_status_transition(definition.identifier, previous_status, "FAIL", completed.completed_at_s)
             return None
 
         result = completed.result
+        primary_status = None
+        if result is not None and result.observations:
+            primary_status = _enum_text(result.observations[0].status)
+        if primary_status == "OK":
+            self._update_freshness_width(definition.identifier, reset_freshness_width())
+            self.freshness_accounted_misses_by_check[definition.identifier] = 0
+        else:
+            accounted_misses = int(self.freshness_accounted_misses_by_check.get(definition.identifier, 0))
+            new_misses = max(0, missed_windows - accounted_misses)
+            if new_misses:
+                self._update_freshness_width(
+                    definition.identifier,
+                    decay_freshness_width(self.freshness_width_by_check.get(definition.identifier, 0), steps=new_misses),
+                )
+            self.freshness_accounted_misses_by_check[definition.identifier] = missed_windows
         self._record_result(definition, result, completed.duration_ms, manual=completed.manual)
         self.state = integrate_observations(
             self.state,
@@ -999,7 +1083,7 @@ class RuntimeApp:
             definition.identifier,
             previous_status,
             self.registered_results.get(definition.identifier, {}).get("status"),
-            completed.observed_at_s,
+            completed.completed_at_s,
         )
         return result
 
@@ -1123,6 +1207,7 @@ class RuntimeApp:
 
     def reset_runtime_state(self):
         self.last_started_at.clear()
+        self.last_completed_at.clear()
         self.last_completed_at_by_host.clear()
         if self._background_enabled():
             lock_acquired = _lock_context(self.background_lock)
@@ -1159,6 +1244,8 @@ class RuntimeApp:
         self._check_log_counts = {definition.identifier: 0 for definition in self.definitions}
         self.display_failure_count = 0
         self.display_retry_at_s = None
+        self.freshness_width_by_check = {definition.identifier: 0 for definition in self.definitions}
+        self.freshness_accounted_misses_by_check = {definition.identifier: 0 for definition in self.definitions}
         self.feedback_message = ""
         self.feedback_until_s = None
         self.last_rendered_feedback = ""
@@ -1352,6 +1439,7 @@ class RuntimeApp:
         self._drain_probe_traces()
         self._drain_completed_checks()
         self._maybe_reconnect_network(now_s)
+        self._apply_freshness_decay(now_s)
         self._run_due_checks(now_s)
         self._drain_probe_traces()
         self._drain_completed_checks()

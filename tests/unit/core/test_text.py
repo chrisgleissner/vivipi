@@ -1,6 +1,6 @@
 import pytest
 
-from vivipi.core.text import center_text, column_widths, compact_overview_cell, compact_status_suffix, overview_row, truncate_text
+from vivipi.core.text import center_text, column_widths, compact_overview_cell, compact_status_suffix, overview_row, overview_row_layout, truncate_text
 
 
 def test_truncate_text_uses_ellipsis_when_required():
@@ -25,8 +25,17 @@ def test_center_text_returns_fixed_width_idle_row():
 def test_overview_row_reserves_status_column_and_truncates_name():
     row = overview_row("Android Devices", "FAIL")
     assert len(row) == 16
-    assert row.endswith("FAIL")
-    assert row.startswith("Android Dev…")
+    assert row.endswith("FAIL ")
+    assert row.startswith("Android D…")
+
+
+def test_overview_row_layout_reserves_the_rightmost_indicator_cell():
+    layout = overview_row_layout("Router", "FAIL")
+
+    assert layout.text == "Router     FAIL "
+    assert layout.status_start_column == 11
+    assert layout.status_end_column == 15
+    assert layout.freshness_column == 15
 
 
 def test_column_widths_distribute_remainder_across_supported_column_counts():

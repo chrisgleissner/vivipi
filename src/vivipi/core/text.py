@@ -1,4 +1,15 @@
+from dataclasses import dataclass
+
+
 ELLIPSIS = "…"
+
+
+@dataclass(frozen=True)
+class OverviewRowLayout:
+    text: str
+    status_start_column: int
+    status_end_column: int
+    freshness_column: int | None
 
 
 def _pad_right(value: str, width: int) -> str:
@@ -73,11 +84,35 @@ def compact_overview_cell(name: str, status: str, column_width: int) -> str:
     return hard_truncate_text(display_name + suffix, column_width)
 
 
-def overview_row(name: str, status: str, total_width: int = 16, status_width: int = 4) -> str:
+def overview_row_layout(
+    name: str,
+    status: str,
+    total_width: int = 16,
+    status_width: int = 4,
+    freshness_width: int = 1,
+    separator: str = " ",
+) -> OverviewRowLayout:
     if total_width <= 0:
-        return ""
-    display_status_width = min(status_width, total_width)
+        return OverviewRowLayout(text="", status_start_column=0, status_end_column=0, freshness_column=None)
+
+    reserved_freshness_width = max(0, min(freshness_width, total_width))
+    body_width = max(0, total_width - reserved_freshness_width)
+    separator_text = separator if body_width > status_width else ""
+    display_status_width = min(status_width, body_width)
     display_status = _pad_left(truncate_text(status, display_status_width), display_status_width)
-    name_width = max(total_width - display_status_width, 0)
+    name_width = max(body_width - len(separator_text) - display_status_width, 0)
     display_name = _pad_right(truncate_text(name, name_width), name_width)
-    return _pad_right(display_name + display_status, total_width)
+    body_text = _pad_right(display_name + separator_text + display_status, body_width)
+    status_start_column = min(len(display_name + separator_text), body_width)
+    status_end_column = min(status_start_column + display_status_width, body_width)
+    freshness_column = body_width if reserved_freshness_width else None
+    return OverviewRowLayout(
+        text=_pad_right(body_text, body_width) + (" " * reserved_freshness_width),
+        status_start_column=status_start_column,
+        status_end_column=status_end_column,
+        freshness_column=freshness_column,
+    )
+
+
+def overview_row(name: str, status: str, total_width: int = 16, status_width: int = 4) -> str:
+    return overview_row_layout(name, status, total_width=total_width, status_width=status_width).text

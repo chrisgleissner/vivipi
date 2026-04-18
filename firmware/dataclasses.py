@@ -149,8 +149,17 @@ def dataclass(_cls=None, *, frozen=False):
                     parts.append("%s=%r" % (name, getattr(self, name)))
             return "%s(%s)" % (cls.__name__, ", ".join(parts))
 
+        def __eq__(self, other):
+            if other.__class__ is not cls:
+                return False
+            for name, _spec in field_specs:
+                if getattr(self, name) != getattr(other, name):
+                    return False
+            return True
+
         cls.__init__ = __init__
         cls.__repr__ = __repr__
+        cls.__eq__ = __eq__
         cls.__dataclass_fields__ = tuple(field_specs)
 
         if frozen:

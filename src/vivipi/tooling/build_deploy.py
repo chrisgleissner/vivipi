@@ -188,6 +188,13 @@ def _normalize_probe_schedule_settings(settings: dict[str, object]):
     same_host_backoff_ms = int(raw.get("same_host_backoff_ms", 250))
     if same_host_backoff_ms < 0:
         raise ValueError("probe_schedule.same_host_backoff_ms must not be negative")
+    interval_grace_ms = _parse_int(
+        raw.get("interval_grace_ms"),
+        "probe_schedule.interval_grace_ms",
+        1000,
+    )
+    if interval_grace_ms < 0 or interval_grace_ms > 1000:
+        raise ValueError("probe_schedule.interval_grace_ms must be between 0 and 1000")
 
     settings["probe_schedule"] = {
         "allow_concurrent_hosts": _parse_bool(
@@ -201,6 +208,7 @@ def _normalize_probe_schedule_settings(settings: dict[str, object]):
             False,
         ),
         "same_host_backoff_ms": same_host_backoff_ms,
+        "interval_grace_ms": interval_grace_ms,
     }
 
 

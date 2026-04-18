@@ -307,6 +307,24 @@ def _draw_text(surface, value, origin_x, origin_y, font_width, text_color, glyph
             surface.set_pixel(cell_x + delta_x, origin_y + delta_y, text_color(column_index))
 
 
+def _scaled_indicator_width(width_px: int, font_width: int) -> int:
+    if width_px <= 0:
+        return 0
+    return max(1, min(font_width, int(((int(width_px) * font_width) + 7) // 8)))
+
+
+def _draw_freshness_indicator(surface, indicator, x_offset, y_offset, font_width, font_height, color_name):
+    cell_x = x_offset + (indicator.column_index * font_width)
+    cell_y = y_offset + (indicator.row_index * font_height)
+    rendered_width = _scaled_indicator_width(getattr(indicator, "width_px", 0), font_width)
+    if rendered_width > 0:
+        surface.fill_rect(cell_x, cell_y, rendered_width, font_height, color_name)
+        return
+
+    sentinel_y = cell_y + max(0, min(font_height - 1, font_height // 2))
+    surface.set_pixel(cell_x, sentinel_y, color_name)
+
+
 def render_to_surface(frame, surface, font_width, font_height, glyph_lookup, failure_color="red"):
     surface.clear(surface.background_color)
     x_offset, y_offset = frame.shift_offset
@@ -318,6 +336,9 @@ def render_to_surface(frame, surface, font_width, font_height, glyph_lookup, fai
         failure_by_row.setdefault(span.row_index, []).append((span.start_column, span.end_column))
 
     failure_color_supported = surface.can_render_color(failure_color)
+    freshness_indicators_by_row = {}
+    for indicator in getattr(frame, "freshness_indicators", ()):
+        freshness_indicators_by_row.setdefault(indicator.row_index, []).append(indicator)
 
     # Hot path: rendering stays deterministic and free of logging or dynamic state growth.
     for row_index, row in enumerate(frame.rows):
@@ -348,6 +369,17 @@ def render_to_surface(frame, surface, font_width, font_height, glyph_lookup, fai
             return surface.foreground_color
 
         _draw_text(surface, row, x_offset, y, font_width, text_color, glyph_lookup)
+        indicator_color = surface.background_color if row_inverted else surface.foreground_color
+        for indicator in freshness_indicators_by_row.get(row_index, ()):
+            _draw_freshness_indicator(
+                surface,
+                indicator,
+                x_offset,
+                y_offset,
+                font_width,
+                font_height,
+                indicator_color,
+            )
 
     return surface
 

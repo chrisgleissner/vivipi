@@ -111,6 +111,7 @@ def parse_probe_schedule_config(raw: object) -> ProbeSchedulingPolicy:
             False,
         ),
         same_host_backoff_ms=int(raw.get("same_host_backoff_ms", 250)),
+        interval_grace_ms=int(raw.get("interval_grace_ms", 1000)),
     )
 
 

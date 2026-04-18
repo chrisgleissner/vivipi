@@ -1,5 +1,40 @@
 # ViviPi Work Log
 
+## 2026-04-18T15:10:00Z
+
+- Completed the probe freshness indicator and timing stabilization task end-to-end.
+- Core/runtime/render/config changes:
+  - added `src/vivipi/core/freshness.py` with bounded freshness math and missed-window accounting helpers
+  - extended the standard overview render path to reserve the rightmost cell for a bitmap freshness indicator and updated `firmware/displays/rendering.py` to draw widths `{8, 6, 4, 2, 0}` with a visible zero-width sentinel pixel
+  - updated `src/vivipi/runtime/app.py` to track `last_started_at`, `last_completed_at`, per-check freshness widths, and missed overdue windows with `probe_schedule.interval_grace_ms`
+  - updated checked-in configs and runtime-config plumbing to use direct-probe defaults `interval_s: 10`, `timeout_s: 8`, `allow_concurrent_hosts: false`, and `interval_grace_ms: 1000`
+  - slowed pixel shifting to the requested low-distraction range by changing the default cadence to `180s` and validating the `120..300s` config range
+- Docs and test coverage:
+  - updated `docs/spec.md` and `docs/spec-traceability.md` for the new freshness requirement, 10s/8s timing contract, calm healthy-display behavior, and slower burn-in shift cadence
+  - added/updated focused coverage in `tests/unit/core/test_freshness.py`, `tests/unit/core/test_text.py`, `tests/unit/core/test_render.py`, `tests/unit/core/test_shift.py`, `tests/unit/core/test_config.py`, `tests/unit/runtime/test_app.py`, `tests/unit/firmware/test_display.py`, `tests/unit/tooling/test_build_deploy.py`, `tests/unit/core/test_vivipulse.py`, and `tests/spec/test_traceability.py`
+  - focused validation after docs alignment: `217 passed`
+  - full repo validation: `./build` -> `627 passed`, coverage `98.30%`
+- Hardware verification on the attached Pico:
+  - redeployed with the supported `./build deploy` flow and read the live `config.json` back from the board to confirm `interval_s: 10`, `timeout_s: 8`, `allow_concurrent_hosts: false`, and `interval_grace_ms: 1000`
+  - live baseline after final deploy via `artifacts/device/pico_probe_runner.py` was healthy for all configured targets: `c64u-rest`, `c64u-ftp`, `c64u-telnet`, `pixel4-adb`, `u64-rest`, `u64-ftp`, and `u64-telnet` all reported `OK` with full `freshness_width_px: 8`
+  - device-side runtime probes confirmed the calm path and shift cadence: steady healthy ticks were suppressed after the initial state settled, and the first automatic shift occurred at `180.1s` with no earlier shift at `60.0s` or `119.9s`
+  - device-side in-flight miss simulation confirmed freshness behavior on the Pico interpreter itself: `8 -> 6 -> 4 -> 8` across success, first overdue window, second overdue window, and recovery
+- Late hardware-only bug found and fixed:
+  - while validating calm rendering on the Pico, discovered that identical `AppState` and `Frame` objects compared unequal on-device even though their contents matched
+  - root cause was the MicroPython dataclass shim in `firmware/dataclasses.py`, which implemented `__init__` and `__repr__` but not value-based `__eq__`
+  - added structural equality to the shim and a regression assertion in `tests/unit/firmware/test_dataclasses.py`; after redeploy, the Pico render-dedup path behaved as intended
+
+## 2026-04-18T00:20:00Z
+
+- Started the probe freshness indicator and timing stabilization task.
+- Replaced the active top section in `PLANS.md` with a task-specific execution plan covering analysis, implementation, integration, validation, and deployment.
+- Reviewed the current runtime, scheduler, renderer, display transport, config parsing, and deployment paths before code changes.
+- Confirmed the current checked-in direct-probe defaults are still `7s / 5s` in `config/checks.yaml` and `config/checks.local.yaml`.
+- Confirmed the device runtime already forces serial probe execution, so the new timing work needs deterministic missed-window accounting rather than new concurrency controls.
+- Confirmed the current standard overview row consumes the full 16-column width, so the freshness indicator requires an explicit fixed-width row-layout change.
+- Confirmed the SH1107 OLED path still relies on the rotated `128x64 -> 64x128` transport with `column_offset = 32`; that mapping must remain unchanged.
+- No code changes yet beyond execution tracking files.
+
 ## 2026-04-17T17:45:00Z
 
 - Follow-up tuning after live validation showed intermittent single-probe false negatives.

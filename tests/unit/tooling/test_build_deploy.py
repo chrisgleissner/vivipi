@@ -94,8 +94,10 @@ checks:
                 "  successes_to_recover: 1",
                 "  visible_degraded: false",
                 "probe_schedule:",
+                "  allow_concurrent_hosts: false",
                 "  allow_concurrent_same_host: false",
                 "  same_host_backoff_ms: 250",
+                "  interval_grace_ms: 1000",
                 "checks_config: checks.yaml",
             ]
         ),
@@ -133,6 +135,7 @@ def test_load_build_deploy_settings_substitutes_environment_placeholders(tmp_pat
         "allow_concurrent_hosts": False,
         "allow_concurrent_same_host": False,
         "same_host_backoff_ms": 250,
+        "interval_grace_ms": 1000,
     }
 
 
@@ -172,6 +175,7 @@ def test_write_runtime_config_embeds_wifi_and_checks(tmp_path: Path):
     assert rendered["check_state"]["failures_to_failed"] == 2
     assert rendered["check_state"]["visible_degraded"] is False
     assert rendered["probe_schedule"]["same_host_backoff_ms"] == 250
+    assert rendered["probe_schedule"]["interval_grace_ms"] == 1000
 
 
 def test_build_firmware_bundle_creates_a_releaseable_zip_archive(tmp_path: Path):
@@ -849,6 +853,7 @@ def test_render_device_runtime_config_serializes_probe_schedule():
         "probe_schedule": {
             "allow_concurrent_same_host": False,
             "same_host_backoff_ms": 250,
+            "interval_grace_ms": 1000,
         },
     }
     checks = (
@@ -865,6 +870,7 @@ def test_render_device_runtime_config_serializes_probe_schedule():
     assert rendered["probe_schedule"] == {
         "allow_concurrent_same_host": False,
         "same_host_backoff_ms": 250,
+        "interval_grace_ms": 1000,
     }
 
 
@@ -1358,7 +1364,10 @@ def test_wrap_with_dialout_returns_original_command_for_non_posix_and_non_member
 
 def test_load_build_deploy_settings_handles_missing_device_and_validates_probe_schedule(tmp_path: Path):
     config_path = tmp_path / "build-deploy.yaml"
-    config_path.write_text("probe_schedule:\n  allow_concurrent_same_host: on\n  same_host_backoff_ms: 0\n", encoding="utf-8")
+    config_path.write_text(
+        "probe_schedule:\n  allow_concurrent_same_host: on\n  same_host_backoff_ms: 0\n  interval_grace_ms: 1000\n",
+        encoding="utf-8",
+    )
 
     settings = load_build_deploy_settings(config_path, env={})
 
@@ -1366,6 +1375,7 @@ def test_load_build_deploy_settings_handles_missing_device_and_validates_probe_s
         "allow_concurrent_hosts": False,
         "allow_concurrent_same_host": True,
         "same_host_backoff_ms": 0,
+        "interval_grace_ms": 1000,
     }
 
     config_path.write_text("device: []\nprobe_schedule: []\n", encoding="utf-8")
@@ -1374,18 +1384,18 @@ def test_load_build_deploy_settings_handles_missing_device_and_validates_probe_s
         load_build_deploy_settings(config_path, env={})
 
     config_path.write_text(
-        "probe_schedule:\n  allow_concurrent_same_host: maybe\n  same_host_backoff_ms: -1\n",
+        "probe_schedule:\n  allow_concurrent_same_host: maybe\n  same_host_backoff_ms: -1\n  interval_grace_ms: 1200\n",
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="probe_schedule.same_host_backoff_ms|must be a boolean"):
+    with pytest.raises(ValueError, match="probe_schedule.same_host_backoff_ms|probe_schedule.interval_grace_ms|must be a boolean"):
         load_build_deploy_settings(config_path, env={})
 
 
 def test_load_build_deploy_settings_parses_false_probe_schedule_values(tmp_path: Path):
     config_path = tmp_path / "build-deploy.yaml"
     config_path.write_text(
-        "probe_schedule:\n  allow_concurrent_same_host: off\n  same_host_backoff_ms: 25\n",
+        "probe_schedule:\n  allow_concurrent_same_host: off\n  same_host_backoff_ms: 25\n  interval_grace_ms: 250\n",
         encoding="utf-8",
     )
 
@@ -1395,6 +1405,7 @@ def test_load_build_deploy_settings_parses_false_probe_schedule_values(tmp_path:
         "allow_concurrent_hosts": False,
         "allow_concurrent_same_host": False,
         "same_host_backoff_ms": 25,
+        "interval_grace_ms": 250,
     }
 
 

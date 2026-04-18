@@ -33,7 +33,9 @@ check_state:
   visible_degraded: false
 
 probe_schedule:
+  allow_concurrent_hosts: false
   allow_concurrent_same_host: false
   same_host_backoff_ms: 500
+  interval_grace_ms: 1000
 
 checks_config: checks.yaml

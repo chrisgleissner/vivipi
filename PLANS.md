@@ -1,5 +1,89 @@
 # Plans
 
+## Probe Freshness Indicator And Timing Stabilization Plan
+
+Authoritative execution plan for implementing a deterministic per-probe freshness indicator, stabilizing on-device probe timing at 10s/8s, slowing OLED burn-in shifting to a low-distraction cadence, validating the behavior under tests, and deploying the updated runtime to the attached Pico.
+
+### Problem Statement
+
+- The current runtime has no dedicated per-probe freshness indicator, so the display cannot show whether a probe is keeping up with schedule independent of its health state.
+- The current checked-in probe defaults are 7s interval and 5s timeout, which conflicts with the requested 10s/8s contract and still allows visible FAIL to OK churn during transient conditions.
+- The standard 16x8 SH1107 overview layout currently consumes the entire row width with text, so adding a one-cell indicator requires an explicit row-budget change with deterministic fixed-width rendering.
+- Burn-in mitigation exists, but its cadence is currently too aggressive for the requested calm static UX.
+
+### Constraints
+
+- `docs/spec.md` remains the product source of truth, so behavioral changes must update the spec and `docs/spec-traceability.md` together.
+- Keep the strict 16x8 grid invariant for the default OLED and preserve deterministic event-driven rendering.
+- Keep SH1107 rotation and `column_offset = 32` transport calibration intact.
+- Keep business logic in `src/vivipi/core` where practical and keep firmware glue thin.
+- Do not re-enable overlapping probe execution on the Pico path.
+- Preserve or exceed the `96%` branch coverage gate.
+
+### Design Decisions
+
+- Add freshness as explicit per-check runtime state rather than deriving it indirectly from health status.
+- Extend the frame model with an explicit 8x8 bitmap indicator primitive instead of font-glyph hacks.
+- Reserve one character cell at the right edge of standard overview rows for the freshness indicator and rebalance the fixed-width text layout accordingly.
+- Keep the current four-position pixel-shift path but move the interval into the requested 2 to 5 minute range.
+- Treat missed freshness windows deterministically with a bounded grace period and no repeated decay inside the same overdue window.
+
+### Phases
+
+Phase 1: Analysis  
+Status: COMPLETED
+
+- Confirm the runtime scheduling, render, display transport, config, and deploy paths.
+- Pin the exact 16-column overview row budget for the added indicator cell.
+- Identify the smallest set of files to change for state, rendering, config, docs, tests, and deployment.
+
+Phase 2: Implementation  
+Status: COMPLETED
+
+- Add pure freshness state helpers and data plumbing.
+- Extend the render/frame model to carry the bitmap indicator.
+- Update the runtime scheduler to track missed windows with grace and instant success reset.
+- Slow the pixel-shift cadence to the new low-distraction range.
+
+Phase 3: Integration  
+Status: COMPLETED
+
+- Wire the new settings through config parsing, runtime config rendering, and firmware app construction.
+- Update checked-in probe defaults to 10s interval and 8s timeout.
+- Preserve deterministic rendering and non-overlapping on-device execution.
+
+Phase 4: Validation  
+Status: COMPLETED
+
+- Add and run targeted tests for freshness math, runtime scheduling, rendering, display config, and firmware integration.
+- Run `./build` after targeted validation passes.
+- Verify branch coverage remains above the gate.
+
+Phase 5: Deployment  
+Status: COMPLETED
+
+- Build the runtime bundle with the existing tooling.
+- Deploy to the attached Pico with the supported deploy flow.
+- Restart and verify the display layout, probe cadence, freshness transitions, and burn-in shift on hardware.
+
+### Acceptance Criteria
+
+- All direct probes use `interval_s: 10` and `timeout_s: 8` in checked-in defaults and deployed runtime config.
+- Each standard overview row renders a stable one-cell freshness indicator with widths `{8, 6, 4, 2, 0}` and a visible sentinel pixel at `0`.
+- Freshness decays only on missed schedule windows, never twice for the same overdue window, and resets instantly on success.
+- The display remains event-driven and static when healthy.
+- The global one-pixel shift remains active at a 2 to 5 minute cadence.
+- Tests, `./build`, deployment, and on-device verification all complete successfully.
+
+### Completion Notes
+
+- Implemented the freshness model in `src/vivipi/core/freshness.py` and threaded `freshness_width_px` through runtime state, pure rendering, and firmware surface rendering so the standard 16x8 overview now reserves one right-edge cell for an 8x8 bitmap freshness indicator.
+- Updated checked-in probe defaults to `interval_s: 10` and `timeout_s: 8`, added `probe_schedule.interval_grace_ms: 1000`, and kept `allow_concurrent_hosts: false` so the Pico path remains serial and deterministic.
+- Slowed the pixel-shift cadence from the old 30 to 60 second range to the requested 120 to 300 second range with a default of 180 seconds.
+- Updated `docs/spec.md` and `docs/spec-traceability.md` so the product spec now explicitly covers the 10s/8s defaults, the new freshness requirement, the static healthy-display expectation, and the slower burn-in cadence.
+- During final hardware verification, found and fixed an additional Pico-only redraw bug in `firmware/dataclasses.py`: the MicroPython dataclass shim was missing value-based `__eq__`, so identical `AppState` and `Frame` instances compared unequal on-device and defeated render deduplication.
+- Final validation completed: targeted suites passed, `./build` passed at `627 passed` and `98.30%` coverage, deploy succeeded, the Pico reported healthy live probe results for all configured targets, the on-device runtime stayed quiet on steady ticks, the shift fired at 180s and not earlier, and a Pico-side in-flight miss simulation showed freshness widths `8 -> 6 -> 4 -> 8` across success, missed windows, and recovery.
+
 ## ViviPi Probe Productionization Plan
 
 Authoritative execution plan for fixing ViviPi direct-probe correctness on the Pico, improving display responsiveness, preserving the internal `OK -> DEG -> FAIL` model while making the visible degraded phase configurable, and validating the result on the attached Pico against the live U64, C64U, and Pixel 4 environment.

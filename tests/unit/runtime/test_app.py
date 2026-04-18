@@ -197,7 +197,7 @@ def test_runtime_app_can_hide_degraded_state_in_rendering_only():
     app.tick(0.0)
 
     assert app.state.checks[0].status == Status.DEG
-    assert display.frames[-1].rows[0].endswith("FAIL")
+    assert display.frames[-1].rows[0].endswith("FAIL ")
 
 
 def test_runtime_app_hidden_degraded_state_skips_redundant_fail_render():
@@ -266,7 +266,7 @@ def test_runtime_app_starts_with_unknown_rows_before_the_first_check_runs():
 
     assert reason == "bootstrap"
     assert display.frames[-1].rows[0].startswith("Router")
-    assert display.frames[-1].rows[0].endswith("?")
+    assert display.frames[-1].rows[0].endswith("? ")
 
 
 def test_runtime_app_renders_when_shift_changes_without_other_state_changes():
@@ -274,7 +274,7 @@ def test_runtime_app_renders_when_shift_changes_without_other_state_changes():
     app = RuntimeApp(definitions=(), executor=lambda definition, now_s: None, display=display)
 
     app.tick(0.0)
-    reason = app.tick(30.0)
+    reason = app.tick(180.0)
 
     assert reason == "shift"
     assert len(display.frames) == 2
@@ -759,7 +759,8 @@ def test_runtime_app_background_worker_queue_controls_and_reset_paths(monkeypatc
         "_execute_check_once",
         lambda definition, now_s, manual=False: runtime_app_module.CompletedCheckRun(
             definition=definition,
-            observed_at_s=now_s,
+            started_at_s=now_s,
+            completed_at_s=now_s + 1.0,
             duration_ms=1.0,
             manual=manual,
             result=executor(definition, now_s),
@@ -782,7 +783,13 @@ def test_runtime_app_background_worker_queue_controls_and_reset_paths(monkeypatc
     app.inflight_check_ids.add(definition.identifier)
     app.pending_status_updates[definition.identifier] = {"status": "OK", "observed_at_s": 4.0}
     app.completed_checks.append(
-        runtime_app_module.CompletedCheckRun(definition=definition, observed_at_s=4.0, duration_ms=1.0, result=executor(definition, 4.0))
+        runtime_app_module.CompletedCheckRun(
+            definition=definition,
+            started_at_s=4.0,
+            completed_at_s=5.0,
+            duration_ms=1.0,
+            result=executor(definition, 4.0),
+        )
     )
 
     snapshot = app.reset_runtime_state()
@@ -813,6 +820,51 @@ def test_runtime_app_can_opt_into_cross_host_parallel_workers():
     )
 
     assert app._worker_key(first) != app._worker_key(second)
+
+
+def test_runtime_app_freshness_decay_occurs_once_per_missed_window():
+    definition = make_definition("router")
+    definition = replace(definition, interval_s=10, timeout_s=8)
+    app = RuntimeApp(definitions=(definition,), executor=lambda definition, now_s: None, display=FakeDisplay(), page_interval_s=0)
+
+    app.last_started_at[definition.identifier] = 0.0
+    app.freshness_width_by_check[definition.identifier] = 8
+
+    app._apply_freshness_decay(11.0)
+    assert app.freshness_width_by_check[definition.identifier] == 6
+
+    app._apply_freshness_decay(11.5)
+    assert app.freshness_width_by_check[definition.identifier] == 6
+
+    app._apply_freshness_decay(21.0)
+    assert app.freshness_width_by_check[definition.identifier] == 4
+
+
+def test_runtime_app_successful_completion_resets_freshness_to_full():
+    display = FakeDisplay()
+    definition = make_definition("router")
+
+    def executor(check_definition, now_s):
+        return CheckExecutionResult(
+            source_identifier=check_definition.identifier,
+            observations=(
+                CheckObservation(
+                    identifier=check_definition.identifier,
+                    name=check_definition.name,
+                    status=Status.OK,
+                    details="reachable",
+                    observed_at_s=now_s,
+                ),
+            ),
+        )
+
+    app = RuntimeApp(definitions=(definition,), executor=executor, display=display, page_interval_s=0)
+    app.freshness_width_by_check[definition.identifier] = 2
+
+    app._run_check(definition, 0.0)
+
+    assert app.freshness_width_by_check[definition.identifier] == 8
+    assert app.get_checks_snapshot()[0]["freshness_width_px"] == 8
 
 
 def test_runtime_app_queues_probe_traces_from_background_workers_and_drains_them():

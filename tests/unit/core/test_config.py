@@ -265,12 +265,14 @@ def test_parse_probe_schedule_config_validates_mapping_and_boolean_values():
             "allow_concurrent_hosts": "false",
             "allow_concurrent_same_host": "yes",
             "same_host_backoff_ms": 900,
+            "interval_grace_ms": 750,
         }
     )
 
     assert policy.allow_concurrent_hosts is False
     assert policy.allow_concurrent_same_host is True
     assert policy.same_host_backoff_ms == 900
+    assert policy.interval_grace_ms == 750
 
     with pytest.raises(ValueError, match="probe_schedule must be a mapping"):
         parse_probe_schedule_config([])
@@ -299,15 +301,18 @@ def test_parse_probe_schedule_config_defaults_and_validates_boolean_strings():
     defaults = parse_probe_schedule_config(None)
     assert defaults.allow_concurrent_same_host is False
     assert defaults.same_host_backoff_ms == 250
+    assert defaults.interval_grace_ms == 1000
 
     custom = parse_probe_schedule_config(
         {
             "allow_concurrent_same_host": "true",
             "same_host_backoff_ms": 750,
+            "interval_grace_ms": 250,
         }
     )
     assert custom.allow_concurrent_same_host is True
     assert custom.same_host_backoff_ms == 750
+    assert custom.interval_grace_ms == 250
 
     with pytest.raises(ValueError, match="password must be a string"):
         parse_checks_config(

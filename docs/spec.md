@@ -105,22 +105,23 @@ Each row represents exactly one check.
 
 Format per row:
 
-    <NAME........><STATUS>
+  <NAME......> <STATUS><FRESH>
 
 Rules:
 
 - NAME is left-aligned
 - STATUS is right-aligned
 - STATUS occupies up to 4 characters
+- FRESH occupies exactly 1 character cell and is rendered as a bitmap indicator, not text
 - NAME is truncated only if necessary using "…"
 - Maximum visible checks per page equals the number of rows that fit on screen
 
 Example:
 
-    ROUTER        OK
-    NAS           OK
-    BACKUP        DEG
-    API           FAIL
+  ROUTER       OK#
+  NAS          OK#
+  BACKUP      DEG#
+  API        FAIL#
 
 [VIVIPI-UX-GRID-001]
 
@@ -319,8 +320,8 @@ Thresholds MUST be configurable.
 
 ## 7. Polling & Timing
 
-- Default interval: 7 seconds (configurable)
-- Timeout: 5 seconds (configurable)
+- Default interval: 10 seconds (configurable)
+- Timeout: 8 seconds (configurable)
 
 Constraint:
 
@@ -333,12 +334,24 @@ Timeout is treated as FAIL.
 Probe pacing against the same device MUST be configurable and deterministic.
 
 - Same-device identity is derived from the normalized target host name or IP address.
-- Checks against different devices MAY run concurrently.
+- On-device direct probes MUST execute without overlap.
 - Concurrent probes against the same device MUST default to disabled.
 - The minimum time between the end of one probe and the start of the next probe against the same device MUST default to 250ms.
 - Same-device concurrency and backoff MUST both be configurable from settings.
+- Probe freshness decay MUST use a deterministic grace window of at most 1 second to avoid false misses from normal scheduler jitter.
 
 [VIVIPI-CHECK-SCHED-001]
+
+Freshness MUST be tracked independently from the displayed health state.
+
+- Each standard-overview row includes one freshness indicator cell with logical widths `0`, `2`, `4`, `6`, and `8`.
+- Width `8` means the latest successful probe completion reset freshness to full.
+- Widths `6`, `4`, and `2` mean one, two, or three missed interval windows since the last successful completion.
+- Width `0` MUST still render a single sentinel pixel and MUST NOT render as an empty cell.
+- Freshness decays only when an interval window is missed and MUST NOT decay more than once for the same missed window.
+- Freshness recovers instantly to full on success and MUST remain otherwise static between scheduler events.
+
+[VIVIPI-CHECK-FRESH-001]
 
 Probe transport failures MUST use single-attempt classification with stable failure detail.
 
@@ -476,6 +489,7 @@ Rendering must be:
 - deterministic
 - flicker-free
 - stable
+- visually static while probes are healthy
 
 [VIVIPI-RENDER-001]
 
@@ -483,7 +497,7 @@ Rendering must be:
 
 ## 14. Burn-In Prevention
 
-Global framebuffer shift every 30–60 seconds:
+Global framebuffer shift every 120–300 seconds:
 
   (0,0)
   (1,0)
