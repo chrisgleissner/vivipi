@@ -29,6 +29,7 @@
 - `config/build-deploy.yaml` and `config/checks.yaml` resolve the service endpoint from `VIVIPI_SERVICE_BASE_URL`; the value must be reachable from the Pico over Wi-Fi.
 - `./build deploy` uses `mpremote connect auto` to copy the prepared device filesystem to the first connected Pico. It does not flash a UF2 image onto a blank board.
 - `./build build-firmware`, `./build render-config`, and `./build deploy` automatically prefer `config/build-deploy.local.yaml` when that file exists.
+- The tracked `config/build-deploy.local.yaml` is treated as the active real-device deploy profile on this machine. Keep startup-only overlays like button self-test disabled there unless the current task is explicitly about validating that startup mode.
 
 ## Implementation boundaries
 
@@ -44,3 +45,5 @@
 - Every requirement ID from `docs/spec.md` must remain mapped in `docs/spec-traceability.md`.
 - Branch coverage must stay at or above `96%`.
 - Prefer pure-function tests before hardware integration tests.
+- For Pico runtime, display, deploy, or probe behavior changes, completion requires real-device proof after `./build deploy`: the attached Pico must be observed showing the health-probe overview, not just a boot screen or synthetic serial-only evidence.
+- Acceptable proof for device completion is a hardware-facing artifact such as a live camera capture or equivalent direct observation that the OLED is rendering health probes on the deployed board.
