@@ -14,7 +14,9 @@ except ImportError:  # pragma: no cover - CPython fallback
     _thread = None
 
 from vivipi.core.input import Button, InputController
-from vivipi.core.freshness import clamp_freshness_width, decay_freshness_width, missed_interval_windows, reset_freshness_width
+from vivipi.core.liveness import (
+    bottom_heartbeat_pixels,
+)
 from vivipi.core.models import CheckRuntime
 from vivipi.core.render import render_frame
 from vivipi.core.scheduler import due_checks, probe_backoff_remaining_s, probe_host_key, render_reason
@@ -39,11 +41,21 @@ from vivipi.runtime.state import make_error_record
 
 
 def _enum_text(value) -> str:
-    return str(getattr(value, "value", value))
+    candidate = getattr(value, "value", None)
+    if isinstance(candidate, str) and candidate and candidate != "<property>":
+        return candidate
+    name = getattr(value, "name", None)
+    if isinstance(name, str) and name:
+        return name
+    return str(value)
 
 
 def _button_text(value) -> str:
     return str(getattr(value, "value", value))
+
+
+def _target_summary(definition: CheckDefinition) -> str:
+    return bound_text(definition.target, 40)
 
 
 def _sleep_ms(value_ms: int):
@@ -128,6 +140,71 @@ class CompletedCheckRun:
     error: BaseException | None = None
 
 
+def _coerce_bool(value: object, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "1", "on"}:
+            return True
+        if normalized in {"false", "no", "0", "off"}:
+            return False
+    raise ValueError("display liveness settings must use boolean values")
+
+
+def _normalize_display_liveness(display_liveness: object) -> dict[str, dict[str, object]]:
+    defaults = {
+        "contrast_breathing": {"enabled": False, "period_s": 45, "amplitude": 8},
+        "per_row_micro": {"enabled": False, "period_s": 15, "stagger": True},
+        "bottom_heartbeat": {"enabled": False, "period_s": 1, "pixel_count": 1, "position": "left"},
+    }
+    if display_liveness is None:
+        return defaults
+    if not isinstance(display_liveness, dict):
+        raise ValueError("display_liveness must be a mapping when provided")
+
+    normalized = {
+        "contrast_breathing": dict(defaults["contrast_breathing"]),
+        "per_row_micro": dict(defaults["per_row_micro"]),
+        "bottom_heartbeat": dict(defaults["bottom_heartbeat"]),
+    }
+    for section_name in normalized:
+        raw_section = display_liveness.get(section_name)
+        if raw_section is None:
+            continue
+        if not isinstance(raw_section, dict):
+            raise ValueError(f"display_liveness.{section_name} must be a mapping")
+        normalized[section_name].update(raw_section)
+
+    normalized["contrast_breathing"]["enabled"] = _coerce_bool(
+        normalized["contrast_breathing"].get("enabled"),
+        False,
+    )
+    normalized["contrast_breathing"]["period_s"] = int(normalized["contrast_breathing"].get("period_s", 45))
+    normalized["contrast_breathing"]["amplitude"] = int(normalized["contrast_breathing"].get("amplitude", 8))
+
+    normalized["per_row_micro"]["enabled"] = _coerce_bool(
+        normalized["per_row_micro"].get("enabled"),
+        False,
+    )
+    normalized["per_row_micro"]["period_s"] = int(normalized["per_row_micro"].get("period_s", 15))
+    normalized["per_row_micro"]["stagger"] = _coerce_bool(
+        normalized["per_row_micro"].get("stagger"),
+        True,
+    )
+
+    normalized["bottom_heartbeat"]["enabled"] = _coerce_bool(
+        normalized["bottom_heartbeat"].get("enabled"),
+        False,
+    )
+    normalized["bottom_heartbeat"]["period_s"] = int(normalized["bottom_heartbeat"].get("period_s", 1))
+    normalized["bottom_heartbeat"]["pixel_count"] = 1
+    normalized["bottom_heartbeat"]["position"] = str(normalized["bottom_heartbeat"].get("position", "left"))
+    return normalized
+
+
 class RuntimeApp:
     def __init__(
         self,
@@ -147,6 +224,7 @@ class RuntimeApp:
         probe_scheduling: ProbeSchedulingPolicy | None = None,
         visible_degraded: bool = True,
         highlight_selection: bool = True,
+        display_liveness: dict[str, object] | None = None,
         sleep_ms=_sleep_ms,
         probe_time_provider=_monotonic_now_s,
         version: str = "",
@@ -165,13 +243,13 @@ class RuntimeApp:
         self.probe_scheduling = probe_scheduling or ProbeSchedulingPolicy()
         self.visible_degraded = bool(visible_degraded)
         self.highlight_selection = bool(highlight_selection)
+        self.display_liveness = _normalize_display_liveness(display_liveness)
         self.sleep_ms = sleep_ms
         self.probe_time_provider = probe_time_provider
+        self.base_display_contrast = int(getattr(display, "contrast", 128)) if hasattr(display, "contrast") else None
         self.last_started_at: dict[str, float] = {}
         self.last_completed_at: dict[str, float] = {}
         self.last_completed_at_by_host: dict[str, float] = {}
-        self.freshness_width_by_check = {definition.identifier: 0 for definition in self.definitions}
-        self.freshness_accounted_misses_by_check = {definition.identifier: 0 for definition in self.definitions}
         self.background_lock = _allocate_lock()
         self.background_workers_enabled = self.background_lock is not None and (
             threading is not None or _thread is not None
@@ -250,6 +328,8 @@ class RuntimeApp:
         self.last_cycle_ms: float | None = None
         self.last_render_at_s: float | None = None
         self.last_render_reason = "bootstrap"
+        self.last_logged_liveness_signature = None
+        self.bottom_heartbeat_step = 0
         self.last_rendered_feedback = ""
         self.last_rendered_debug_mode = False
         self.last_success_at = {definition.identifier: None for definition in self.definitions}
@@ -311,12 +391,6 @@ class RuntimeApp:
         display_state = self._display_state()
         reason = render_reason(self.last_rendered_state, display_state)
         feedback_text = self._overlay_feedback_text(now_s) or ""
-        if (
-            reason == "none"
-            and self.last_rendered_debug_mode == self.debug_mode
-            and self.last_rendered_feedback == feedback_text
-        ):
-            return reason
         if reason == "none":
             reason = "overlay"
         if self.display_retry_at_s is not None and now_s < self.display_retry_at_s:
@@ -343,6 +417,7 @@ class RuntimeApp:
             self.last_render_reason = reason
             self.last_rendered_debug_mode = self.debug_mode
             self.last_rendered_feedback = feedback_text
+            self._log_liveness_state(frame)
             self._log_display_propagation(now_s, reason)
         return reason
 
@@ -351,10 +426,6 @@ class RuntimeApp:
             replace(
                 check,
                 status=Status.FAIL if (not self.visible_degraded and check.status == Status.DEG) else check.status,
-                freshness_width_px=self.freshness_width_by_check.get(
-                    check.identifier,
-                    getattr(check, "freshness_width_px", 0),
-                ),
             )
             for check in self.state.checks
         )
@@ -429,7 +500,6 @@ class RuntimeApp:
                     "target": definition.target,
                     "interval_s": definition.interval_s,
                     "timeout_s": definition.timeout_s,
-                    "freshness_width_px": self.freshness_width_by_check.get(definition.identifier, 0),
                     "last_started_s": self.last_started_at.get(definition.identifier),
                     "last_completed_s": self.last_completed_at.get(definition.identifier),
                 }
@@ -449,10 +519,6 @@ class RuntimeApp:
                 "last_success_s": self.last_success_at.get(check.identifier),
                 "last_started_s": self.last_started_at.get(check.identifier),
                 "last_completed_s": self.last_completed_at.get(check.identifier),
-                "freshness_width_px": self.freshness_width_by_check.get(
-                    check.identifier,
-                    getattr(check, "freshness_width_px", 0),
-                ),
                 "last_error": self.last_error_by_check.get(check.identifier),
                 "source_identifier": check.source_identifier,
             }
@@ -590,11 +656,15 @@ class RuntimeApp:
         )
         summary_fields = [
             log_field("id", definition.identifier),
+            log_field("type", _enum_text(definition.check_type)),
+            log_field("target", _target_summary(definition)),
             log_field("status", status),
             log_field("dur_ms", f"{duration_ms:.1f}"),
         ]
         if latency_ms is not None:
             summary_fields.append(log_field("lat_ms", f"{float(latency_ms):.1f}"))
+        summary_fields.append(log_field("manual", manual))
+        summary_fields.append(log_field("detail", details))
         if emit_summary:
             self.logger.info("CHECK", "run", tuple(summary_fields))
 
@@ -609,6 +679,8 @@ class RuntimeApp:
                 "failure",
                 (
                     log_field("id", definition.identifier),
+                    log_field("type", _enum_text(definition.check_type)),
+                    log_field("target", _target_summary(definition)),
                     log_field("status", status),
                     log_field("detail", details),
                     log_field("manual", manual),
@@ -803,19 +875,39 @@ class RuntimeApp:
                     button = Button(button)
                 except ValueError:
                     button = event.button
+            self.logger.info(
+                "BTN",
+                "press",
+                (
+                    log_field("button", _button_text(button)),
+                    log_field("held_ms", event.held_ms),
+                    log_field("mode", _enum_text(self.state.mode)),
+                    log_field("selected", self.state.selected_id or "-"),
+                ),
+            )
             previous_mode = self.state.mode
             previous_selection = self.state.selected_id
             self.state = self.input_controller.apply(self.state, button, held_ms=event.held_ms)
             if button in (Button.A, Button.B):
                 self._set_press_feedback(button, now_s)
             if self.state.mode == previous_mode and self.state.selected_id == previous_selection:
+                self.logger.debug(
+                    "BTN",
+                    "noop",
+                    (
+                        log_field("button", _button_text(button)),
+                        log_field("mode", _enum_text(self.state.mode)),
+                        log_field("selected", self.state.selected_id or "-"),
+                    ),
+                )
                 continue
             self.logger.info(
-                "BTN",
+                "NAV",
                 "action",
                 (
                     log_field("button", _button_text(button)),
                     log_field("held_ms", event.held_ms),
+                    log_field("from", _enum_text(previous_mode)),
                     log_field("mode", _enum_text(self.state.mode)),
                     log_field("selected", self.state.selected_id or "-"),
                 ),
@@ -919,13 +1011,11 @@ class RuntimeApp:
             lock_acquired = _lock_context(self.background_lock)
             try:
                 self.last_started_at[definition.identifier] = started_now_s
-                self.freshness_accounted_misses_by_check[definition.identifier] = 0
             finally:
                 if lock_acquired:
                     self.background_lock.release()
         else:
             self.last_started_at[definition.identifier] = started_now_s
-            self.freshness_accounted_misses_by_check[definition.identifier] = 0
         try:
             result = self.executor(definition, started_now_s)
         except Exception as error:
@@ -976,54 +1066,13 @@ class RuntimeApp:
             result=result,
         )
 
-    def _freshness_grace_s(self) -> float:
-        return float(self.probe_scheduling.interval_grace_ms) / 1000.0
-
-    def _update_freshness_width(self, identifier: str, width_px: int):
-        self.freshness_width_by_check[identifier] = clamp_freshness_width(int(width_px))
-
-    def _apply_freshness_decay(self, now_s: float):
-        grace_s = self._freshness_grace_s()
-        for definition in self.definitions:
-            identifier = definition.identifier
-            started_at_s = self.last_started_at.get(identifier)
-            completed_at_s = self.last_completed_at.get(identifier)
-            if started_at_s is None:
-                continue
-            if completed_at_s is not None and completed_at_s >= started_at_s:
-                continue
-
-            accounted_misses = int(self.freshness_accounted_misses_by_check.get(identifier, 0))
-            total_misses = missed_interval_windows(started_at_s, now_s, definition.interval_s, grace_s)
-            new_misses = max(0, total_misses - accounted_misses)
-            if new_misses <= 0:
-                continue
-
-            self._update_freshness_width(
-                identifier,
-                decay_freshness_width(self.freshness_width_by_check.get(identifier, 0), steps=new_misses),
-            )
-            self.freshness_accounted_misses_by_check[identifier] = total_misses
-
     def _apply_completed_check(self, completed: CompletedCheckRun):
         definition = completed.definition
         previous_status = self.registered_results.get(definition.identifier, {}).get("status")
         self.last_completed_at[definition.identifier] = completed.completed_at_s
-        missed_windows = missed_interval_windows(
-            completed.started_at_s,
-            completed.completed_at_s,
-            definition.interval_s,
-            self._freshness_grace_s(),
-        )
+        if self.display_liveness["bottom_heartbeat"].get("enabled"):
+            self.bottom_heartbeat_step += 1
         if completed.error is not None:
-            accounted_misses = int(self.freshness_accounted_misses_by_check.get(definition.identifier, 0))
-            new_misses = max(0, missed_windows - accounted_misses)
-            if new_misses:
-                self._update_freshness_width(
-                    definition.identifier,
-                    decay_freshness_width(self.freshness_width_by_check.get(definition.identifier, 0), steps=new_misses),
-                )
-            self.freshness_accounted_misses_by_check[definition.identifier] = missed_windows
             self.metrics.record_check(definition.identifier, completed.duration_ms, None)
             self.registered_results[definition.identifier] = {
                 "id": definition.identifier,
@@ -1055,21 +1104,6 @@ class RuntimeApp:
             return None
 
         result = completed.result
-        primary_status = None
-        if result is not None and result.observations:
-            primary_status = _enum_text(result.observations[0].status)
-        if primary_status == "OK":
-            self._update_freshness_width(definition.identifier, reset_freshness_width())
-            self.freshness_accounted_misses_by_check[definition.identifier] = 0
-        else:
-            accounted_misses = int(self.freshness_accounted_misses_by_check.get(definition.identifier, 0))
-            new_misses = max(0, missed_windows - accounted_misses)
-            if new_misses:
-                self._update_freshness_width(
-                    definition.identifier,
-                    decay_freshness_width(self.freshness_width_by_check.get(definition.identifier, 0), steps=new_misses),
-                )
-            self.freshness_accounted_misses_by_check[definition.identifier] = missed_windows
         self._record_result(definition, result, completed.duration_ms, manual=completed.manual)
         self.state = integrate_observations(
             self.state,
@@ -1088,7 +1122,10 @@ class RuntimeApp:
         return result
 
     def _run_check(self, definition: CheckDefinition, now_s: float, manual: bool = False):
-        return self._apply_completed_check(self._execute_check_once(definition, now_s, manual=manual))
+        completed = self._execute_check_once(definition, now_s, manual=manual)
+        result = self._apply_completed_check(completed)
+        self._render_probe_progress(completed.completed_at_s)
+        return result
 
     def _background_worker(self, worker_key: str):
         while True:
@@ -1169,6 +1206,12 @@ class RuntimeApp:
     def _drain_completed_checks(self):
         for completed in self._pop_completed_checks():
             self._apply_completed_check(completed)
+            self._render_probe_progress(completed.completed_at_s)
+
+    def _render_probe_progress(self, now_s: float):
+        if not self.display_liveness["bottom_heartbeat"].get("enabled"):
+            return
+        self.render_once(float(now_s))
 
     def _run_due_checks(self, now_s: float):
         # Hot path: keep metrics on every execution but only log state transitions.
@@ -1209,6 +1252,7 @@ class RuntimeApp:
         self.last_started_at.clear()
         self.last_completed_at.clear()
         self.last_completed_at_by_host.clear()
+        self.bottom_heartbeat_step = 0
         if self._background_enabled():
             lock_acquired = _lock_context(self.background_lock)
             try:
@@ -1244,10 +1288,9 @@ class RuntimeApp:
         self._check_log_counts = {definition.identifier: 0 for definition in self.definitions}
         self.display_failure_count = 0
         self.display_retry_at_s = None
-        self.freshness_width_by_check = {definition.identifier: 0 for definition in self.definitions}
-        self.freshness_accounted_misses_by_check = {definition.identifier: 0 for definition in self.definitions}
         self.feedback_message = ""
         self.feedback_until_s = None
+        self.last_logged_liveness_signature = None
         self.last_rendered_feedback = ""
         self.last_rendered_debug_mode = False
         self.pending_status_updates.clear()
@@ -1353,6 +1396,22 @@ class RuntimeApp:
             self._pad_row(f"NET:{network_text} RF:{len(self.pending_status_updates)}"),
         )
 
+    def _frame_contrast(self, now_s: float) -> int | None:
+        return None
+
+    def _frame_bottom_pixels(self, now_s: float) -> tuple[int, ...]:
+        config = self.display_liveness["bottom_heartbeat"]
+        if not config.get("enabled"):
+            return ()
+        display_width_px = int(getattr(self.display, "width", self.state.row_width * 8))
+        return bottom_heartbeat_pixels(
+            display_width_px,
+            int(config.get("pixel_count", 1)),
+            str(config.get("position", "left")),
+            step_index=self.bottom_heartbeat_step,
+            step_px=1,
+        )
+
     def _decorate_frame(self, frame, now_s: float):
         rows = list(frame.rows)
         if self.debug_mode and rows:
@@ -1364,7 +1423,37 @@ class RuntimeApp:
         feedback = self._overlay_feedback_text(now_s)
         if feedback and rows:
             rows[-1] = self._pad_row(feedback)
-        return replace(frame, rows=tuple(rows))
+        return replace(
+            frame,
+            rows=tuple(rows),
+            bottom_pixels=self._frame_bottom_pixels(now_s),
+            contrast=self._frame_contrast(now_s),
+        )
+
+    def _liveness_signature(self, frame) -> tuple[int | None, tuple[int, ...]]:
+        return (
+            getattr(frame, "contrast", None),
+            tuple(int(pixel_x) for pixel_x in getattr(frame, "bottom_pixels", ())),
+        )
+
+    def _log_liveness_state(self, frame):
+        signature = self._liveness_signature(frame)
+        if signature == self.last_logged_liveness_signature:
+            return
+        self.last_logged_liveness_signature = signature
+
+        contrast, heartbeat_pixels = signature
+        if contrast is None and not heartbeat_pixels:
+            return
+
+        self.logger.info(
+            "DISP",
+            "liveness",
+            (
+                log_field("contrast", "-" if contrast is None else int(contrast)),
+                log_field("heartbeat", "off" if not heartbeat_pixels else ",".join(str(pixel_x) for pixel_x in heartbeat_pixels)),
+            ),
+        )
 
     def _track_status_transition(self, identifier: str, previous_status: object, current_status: object, observed_at_s: float | None):
         previous = "?" if previous_status is None else str(previous_status)
@@ -1439,7 +1528,6 @@ class RuntimeApp:
         self._drain_probe_traces()
         self._drain_completed_checks()
         self._maybe_reconnect_network(now_s)
-        self._apply_freshness_decay(now_s)
         self._run_due_checks(now_s)
         self._drain_probe_traces()
         self._drain_completed_checks()

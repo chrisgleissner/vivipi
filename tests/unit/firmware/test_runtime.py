@@ -150,6 +150,7 @@ def test_build_runtime_app_uses_injected_factories_and_defers_wifi_startup():
             probe_scheduling,
             visible_degraded,
             highlight_selection,
+            display_liveness,
             sleep_ms,
             probe_time_provider,
             version="",
@@ -170,6 +171,7 @@ def test_build_runtime_app_uses_injected_factories_and_defers_wifi_startup():
             called["probe_scheduling"] = probe_scheduling
             called["visible_degraded"] = visible_degraded
             called["highlight_selection"] = highlight_selection
+            called["display_liveness"] = display_liveness
             called["sleep_ms"] = sleep_ms
             called["probe_time_provider"] = probe_time_provider
             called["version"] = version
@@ -210,6 +212,11 @@ def test_build_runtime_app_uses_injected_factories_and_defers_wifi_startup():
                     "mode": "compact",
                     "columns": 3,
                     "column_separator": "|",
+                    "liveness": {
+                        "contrast_breathing": {"enabled": False, "period_s": 30, "amplitude": 16},
+                        "per_row_micro": {"enabled": False, "period_s": 15, "stagger": True},
+                        "bottom_heartbeat": {"enabled": True, "period_s": 1, "pixel_count": 1, "position": "left"},
+                    },
                     "font": {"width_px": 8, "height_px": 8},
                 },
                 "buttons": {"a": "GP15", "b": "GP17"},
@@ -247,6 +254,11 @@ def test_build_runtime_app_uses_injected_factories_and_defers_wifi_startup():
     assert called["visible_degraded"] is False
     assert called["highlight_selection"] is False
     assert called["probe_scheduling"] == ProbeSchedulingPolicy()
+    assert called["display_liveness"] == {
+        "contrast_breathing": {"enabled": False, "period_s": 30, "amplitude": 16},
+        "per_row_micro": {"enabled": False, "period_s": 15, "stagger": True},
+        "bottom_heartbeat": {"enabled": True, "period_s": 1, "pixel_count": 1, "position": "left"},
+    }
     assert called["version"] == "1.2.3"
     assert called["build_time"] == "2025-04-05T12:00Z"
     assert called["diagnostics"] is None

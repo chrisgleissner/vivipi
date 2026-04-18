@@ -22,6 +22,7 @@ from vivipi.core.models import DiagnosticEvent, DisplayMode, TransitionThreshold
 from vivipi.core.probe_trace import ProbeTraceCollector
 from vivipi.core.render import Frame
 from vivipi.runtime import state as runtime_state
+from vivipi.runtime.syslog import build_syslog_sink, resolve_syslog_config
 from vivipi.runtime import RuntimeApp, build_executor, build_runtime_definitions
 
 try:
@@ -41,6 +42,7 @@ except ImportError as error:  # pragma: no cover - used by CPython tests
 
 DEFAULT_BUTTON_PINS = {"a": "GP15", "b": "GP17"}
 BUTTON_SELF_TEST_DISCOVERY_PINS = (15, 17, 21, 22)
+_BOOT_LOG_SINK = None
 
 
 class HeadlessDisplay:
@@ -64,10 +66,33 @@ def load_config(path="config.json"):
 
 
 def _serial_log(stage: str, message: str, **fields):
-    parts = [f"[BOOT][{stage}] {message}"]
+    parts = [f"[vivipi] [BOOT][{stage}] {message}"]
     for key in sorted(fields):
         parts.append(f"{key}={fields[key]}")
-    print(" ".join(parts))
+    line = " ".join(parts)
+    print(line)
+    if _BOOT_LOG_SINK is not None:
+        warning_line = _BOOT_LOG_SINK.emit(line)
+        if warning_line:
+            print(warning_line)
+
+
+def _set_boot_log_sink(sink):
+    global _BOOT_LOG_SINK
+    _BOOT_LOG_SINK = sink
+
+
+def _compose_runtime_log_sink(logger, syslog_sink):
+    def emit(line):
+        print(line)
+        if syslog_sink is None:
+            return
+        warning_line = syslog_sink.emit(line)
+        if warning_line:
+            logger.buffer.append(warning_line)
+            print(warning_line)
+
+    return emit
 
 
 def _diagnostic_message(value: object, limit: int = 11) -> str:
@@ -477,6 +502,8 @@ def build_runtime_app(
     boot_errors=(),
 ):
     config = _normalize_runtime_config(config)
+    boot_syslog_sink = build_syslog_sink(config, now_provider=now_provider)
+    _set_boot_log_sink(boot_syslog_sink)
     _serial_log("BOOT", "config normalized")
     input_controller = input_controller_factory()
     device = config.get("device", {}) if isinstance(config.get("device"), dict) else {}
@@ -498,6 +525,14 @@ def build_runtime_app(
         spi_mode=display_config.get("spi_mode", "?"),
         width=display_config.get("width_px", "?"),
         height=display_config.get("height_px", "?"),
+    )
+    liveness_config = dict(display_config.get("liveness", {})) if isinstance(display_config, dict) else {}
+    _serial_log(
+        "BOOT",
+        "display liveness",
+        contrast=bool(dict(liveness_config.get("contrast_breathing", {})).get("enabled", False)),
+        micro=bool(dict(liveness_config.get("per_row_micro", {})).get("enabled", False)),
+        heartbeat=bool(dict(liveness_config.get("bottom_heartbeat", {})).get("enabled", False)),
     )
 
     display, display_config, display_diagnostics, display_errors = _build_display_with_fallback(display_factory, display_config)
@@ -553,12 +588,14 @@ def build_runtime_app(
         probe_scheduling=_probe_scheduling_from_config(config),
         visible_degraded=_visible_degraded_from_config(config),
         highlight_selection=False,
+        display_liveness=dict(display_config.get("liveness", {})),
         sleep_ms=sleep_ms,
         probe_time_provider=_steady_now_s,
         version=version,
         build_time=build_time_value,
     )
     app = _force_serial_probe_execution(app)
+    syslog_settings = resolve_syslog_config(config, definitions)
     trace_sink = None
     if not getattr(app, "background_workers_enabled", False):
         trace_sink = getattr(app, "emit_probe_trace", None)
@@ -569,7 +606,10 @@ def build_runtime_app(
         boot_logo_duration_s = max(float(boot_logo_min_s), float(display_config.get("boot_logo_duration_s", boot_logo_min_s)))
     app.boot_logo_until_s = boot_start_s + boot_logo_duration_s
     if hasattr(app, "logger"):
-        app.logger.sink = print
+        syslog_sink = boot_syslog_sink
+        if syslog_sink is None and syslog_settings.get("enabled"):
+            syslog_sink = build_syslog_sink(config, definitions, now_provider=now_provider)
+        app.logger.sink = _compose_runtime_log_sink(app.logger, syslog_sink)
     if button_reader is not None and hasattr(button_reader, "bind_logger") and hasattr(app, "logger"):
         button_reader.bind_logger(app.logger)
     if hasattr(app, "configure_observability"):

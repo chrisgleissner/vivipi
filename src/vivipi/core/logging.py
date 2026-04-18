@@ -6,11 +6,12 @@ from vivipi.core.ring_buffer import RingBuffer
 
 
 DEFAULT_LOG_BUFFER_CAPACITY = 32
-DEFAULT_LOG_LINE_LIMIT = 96
-DEFAULT_LOG_FIELD_LIMIT = 4
+DEFAULT_LOG_LINE_LIMIT = 160
+DEFAULT_LOG_FIELD_LIMIT = 8
 DEFAULT_COMPONENT_LIMIT = 8
-DEFAULT_MESSAGE_LIMIT = 20
-DEFAULT_FIELD_LIMIT = 24
+DEFAULT_MESSAGE_LIMIT = 28
+DEFAULT_FIELD_LIMIT = 48
+LOG_PREFIX = "[vivipi]"
 
 
 class LogLevel(IntEnum):
@@ -62,8 +63,8 @@ def format_log_line(
     normalized_component = _hard_limit(component.upper(), DEFAULT_COMPONENT_LIMIT) or "CORE"
     normalized_message = bound_text(message, DEFAULT_MESSAGE_LIMIT) or "event"
 
-    level_name = getattr(normalized_level, "_name_", str(normalized_level))
-    parts = [f"[{level_name}][{normalized_component}] {normalized_message}"]
+    level_name = getattr(normalized_level, "name", None) or getattr(normalized_level, "_name_", None) or str(normalized_level)
+    parts = [LOG_PREFIX, f"[{level_name}][{normalized_component}] {normalized_message}"]
     for field in fields[:field_limit]:
         if field:
             parts.append(bound_text(field, DEFAULT_FIELD_LIMIT))

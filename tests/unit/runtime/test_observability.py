@@ -73,9 +73,9 @@ def test_state_module_exposes_checks_metrics_network_logs_and_failures():
     assert failures[0]["id"] == "router"
     assert metrics["checks"]["router"]["duration_ms"]["count"] == 1
     assert network_state["connected"] is True
-    assert any(line.startswith("[INFO][NET] connected") for line in logs)
-    assert any(line.startswith("[INFO][CHECK] run") and "status=FAIL" in line for line in logs)
-    assert any(line.startswith("[ERROR][CHECK] failure") and "detail=timeout" in line for line in logs)
+    assert any(line.startswith("[vivipi] [INFO][NET] connected") for line in logs)
+    assert any(line.startswith("[vivipi] [INFO][CHECK] run") and "status=FAIL" in line for line in logs)
+    assert any(line.startswith("[vivipi] [ERROR][CHECK] failure") and "detail=timeout" in line for line in logs)
 
 
 def test_control_surface_runs_checks_resets_state_and_restores_log_level():
@@ -172,8 +172,8 @@ def test_healthy_checks_emit_sampled_summary_logs_but_no_failure_detail_logs():
     app.last_started_at.clear()
     app.tick(1.0)
 
-    summary_logs = [line for line in app.get_logs() if line.startswith("[INFO][CHECK] run")]
-    detail_logs = [line for line in app.get_logs() if line.startswith("[ERROR][CHECK] failure")]
+    summary_logs = [line for line in app.get_logs() if line.startswith("[vivipi] [INFO][CHECK] run")]
+    detail_logs = [line for line in app.get_logs() if line.startswith("[vivipi] [ERROR][CHECK] failure")]
 
     assert len(summary_logs) == 1
     assert detail_logs == []
@@ -204,7 +204,7 @@ def test_healthy_checks_emit_sampled_summary_logs_on_cadence_boundary():
         app.last_started_at.clear()
         app.tick(float(index))
 
-    summary_logs = [line for line in app.get_logs() if line.startswith("[INFO][CHECK] run")]
+    summary_logs = [line for line in app.get_logs() if line.startswith("[vivipi] [INFO][CHECK] run")]
 
     assert len(summary_logs) == 2
 
@@ -234,12 +234,12 @@ def test_failed_health_checks_emit_extra_detail_logs_every_time():
     app.last_started_at.clear()
     app.tick(1.0)
 
-    summary_logs = [line for line in app.get_logs() if line.startswith("[INFO][CHECK] run")]
-    detail_logs = [line for line in app.get_logs() if line.startswith("[ERROR][CHECK] failure")]
+    summary_logs = [line for line in app.get_logs() if line.startswith("[vivipi] [INFO][CHECK] run")]
+    detail_logs = [line for line in app.get_logs() if line.startswith("[vivipi] [ERROR][CHECK] failure")]
 
     assert len(summary_logs) == 2
     assert len(detail_logs) == 2
-    assert all("detail=tcp timeout afte…" in line for line in detail_logs)
+    assert all("detail=tcp timeout after SYN" in line for line in detail_logs)
 
 
 def test_runtime_app_covers_service_snapshot_network_failures_and_control_error_paths():
@@ -269,7 +269,7 @@ def test_runtime_app_covers_service_snapshot_network_failures_and_control_error_
     assert registered["details"] == "loaded 0 checks"
     assert network_state["last_error"] == "connect fail"
     assert network_state["reconnect_count"] == 1
-    assert any(line.startswith("[WARN][NET] connect-failed") for line in app.get_logs())
+    assert any(line.startswith("[vivipi] [WARN][NET] connect-failed") for line in app.get_logs())
 
     with pytest.raises(RuntimeError, match="not configured"):
         RuntimeApp(definitions=(definition,), executor=executor, display=FakeDisplay()).reconnect_network()
@@ -307,7 +307,7 @@ def test_runtime_app_covers_current_time_log_level_error_limit_and_network_excep
         app.reconnect_network()
 
     assert app.get_errors(limit=1)[0]["scope"] == "network"
-    assert app.get_logs(limit=1)[0].startswith("[ERROR][ERR] exception")
+    assert app.get_logs(limit=1)[0].startswith("[vivipi] [ERROR][ERR] exception")
 
 
 def test_runtime_app_reconnects_before_running_due_checks_when_network_is_down():

@@ -68,6 +68,9 @@ Display brightness MUST be configurable at build time for display types that sup
 - LCD backlight PWM range: 0 to 255
 - Default brightness: medium
 - E-paper display types do not expose brightness control
+- `device.display.liveness` MAY configure an optional bottom-row device-health indicator
+- When enabled on the default OLED overview, the bottom heartbeat SHOULD use a single pixel that advances by one pixel for each completed probe
+- If `device.display.liveness` is omitted, all liveness indicators MUST default to disabled
 
 [VIVIPI-DISPLAY-002]
 
@@ -105,23 +108,22 @@ Each row represents exactly one check.
 
 Format per row:
 
-  <NAME......> <STATUS><FRESH>
+  <NAME.......> <STATUS>
 
 Rules:
 
 - NAME is left-aligned
 - STATUS is right-aligned
 - STATUS occupies up to 4 characters
-- FRESH occupies exactly 1 character cell and is rendered as a bitmap indicator, not text
 - NAME is truncated only if necessary using "…"
 - Maximum visible checks per page equals the number of rows that fit on screen
 
 Example:
 
-  ROUTER       OK#
-  NAS          OK#
-  BACKUP      DEG#
-  API        FAIL#
+  ROUTER        OK
+  NAS           OK
+  BACKUP       DEG
+  API         FAIL
 
 [VIVIPI-UX-GRID-001]
 
@@ -338,20 +340,8 @@ Probe pacing against the same device MUST be configurable and deterministic.
 - Concurrent probes against the same device MUST default to disabled.
 - The minimum time between the end of one probe and the start of the next probe against the same device MUST default to 250ms.
 - Same-device concurrency and backoff MUST both be configurable from settings.
-- Probe freshness decay MUST use a deterministic grace window of at most 1 second to avoid false misses from normal scheduler jitter.
 
 [VIVIPI-CHECK-SCHED-001]
-
-Freshness MUST be tracked independently from the displayed health state.
-
-- Each standard-overview row includes one freshness indicator cell with logical widths `0`, `2`, `4`, `6`, and `8`.
-- Width `8` means the latest successful probe completion reset freshness to full.
-- Widths `6`, `4`, and `2` mean one, two, or three missed interval windows since the last successful completion.
-- Width `0` MUST still render a single sentinel pixel and MUST NOT render as an empty cell.
-- Freshness decays only when an interval window is missed and MUST NOT decay more than once for the same missed window.
-- Freshness recovers instantly to full on success and MUST remain otherwise static between scheduler events.
-
-[VIVIPI-CHECK-FRESH-001]
 
 Probe transport failures MUST use single-attempt classification with stable failure detail.
 
@@ -483,6 +473,7 @@ Redraw only when:
 
 - state changes
 - pixel shift occurs
+- bottom-row heartbeat progress occurs
 
 Rendering must be:
 
@@ -490,6 +481,9 @@ Rendering must be:
 - flicker-free
 - stable
 - visually static while probes are healthy
+- Bottom-row heartbeat MAY move a 1 to 3 pixel cluster along the unused bottom scanline without altering layout or text.
+- When enabled, the bottom-row heartbeat MUST advance left-to-right and wrap back to the left after reaching the final slot.
+- Bottom-row heartbeat progress MUST be driven by completed probes so continued movement proves the runtime is still issuing probes.
 
 [VIVIPI-RENDER-001]
 
@@ -631,10 +625,15 @@ The build time is recorded at firmware build time in UTC.
 Runtime observability MUST provide structured, bounded, machine-parseable logs.
 
 - Supported levels: `DEBUG`, `INFO`, `WARN`, `ERROR`
+- Every line MUST be prefixed with `[vivipi]`
 - Every line MUST include a component tag
 - Log records MUST be retained in a fixed-size in-memory ring buffer
+- Runtime logs MUST continue to emit to the local serial/REPL sink and MAY additionally mirror to a configured UDP syslog sink without changing primary runtime behavior
+- When syslog mirroring is enabled but unavailable, the device MUST emit at most one bounded warning about syslog unavailability while continuing to retry later deliveries
 - Hot paths MUST avoid per-iteration debug spam and MUST keep repeated healthy-check summaries sampled and bounded
 - Unhealthy checks MUST log a summary plus additional bounded failure detail
+- Every completed probe attempt MUST emit a concise summary including the check identity, type, target, status, and timing details
+- Button presses and resulting navigation transitions MUST be logged as distinct bounded events
 
 [VIVIPI-OBS-001]
 
@@ -646,6 +645,7 @@ Critical runtime state MUST be inspectable through REPL-safe APIs.
 - Network state
 - Retained logs
 - Retained errors
+- Effective syslog configuration and delivery behavior MUST remain diagnosable from retained logs even when the remote sink is unavailable
 
 [VIVIPI-OBS-002]
 

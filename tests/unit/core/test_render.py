@@ -9,7 +9,6 @@ def make_check(
     details: str = "",
     latency_ms: float | None = None,
     last_update_s: float | None = None,
-    freshness_width_px: int = 0,
 ) -> CheckRuntime:
     return CheckRuntime(
         identifier=identifier,
@@ -18,7 +17,6 @@ def make_check(
         details=details,
         latency_ms=latency_ms,
         last_update_s=last_update_s,
-        freshness_width_px=freshness_width_px,
     )
 
 
@@ -53,7 +51,7 @@ def test_render_frame_respects_dynamic_grid_dimensions():
 
     assert len(frame.rows) == 3
     assert all(len(row) == 12 for row in frame.rows)
-    assert frame.rows[2].startswith("Charl…")
+    assert frame.rows[2] == "Charlie   OK"
     assert frame.inverted_row == 2
 
 
@@ -81,12 +79,12 @@ def test_overview_displays_unknown_status_as_question_mark():
 
     frame = render_frame(state)
 
-    assert frame.rows[0].endswith("? ")
+    assert frame.rows[0].endswith(" ?")
 
 
 def test_standard_single_column_overview_keeps_legacy_output_exactly():
     state = AppState(
-        checks=(make_check("router", "Router", status=Status.FAIL, freshness_width_px=6),),
+        checks=(make_check("router", "Router", status=Status.FAIL),),
         selected_id="router",
         display_mode=DisplayMode.STANDARD,
         overview_columns=1,
@@ -94,25 +92,10 @@ def test_standard_single_column_overview_keeps_legacy_output_exactly():
 
     frame = render_frame(state)
 
-    assert frame.rows[0] == "Router     FAIL "
+    assert frame.rows[0] == "Router      FAIL"
     assert frame.inverted_row == 0
     assert frame.inverted_spans == ()
-    assert frame.failure_spans == (InvertedSpan(row_index=0, start_column=11, end_column=15),)
-    assert frame.freshness_indicators[0].column_index == 15
-    assert frame.freshness_indicators[0].width_px == 6
-
-
-def test_standard_single_column_overview_carries_the_freshness_indicator_cell():
-    state = AppState(
-        checks=(make_check("router", "Router", status=Status.OK, freshness_width_px=8),),
-        selected_id="router",
-    )
-
-    frame = render_frame(state)
-
-    assert frame.freshness_indicators[0].row_index == 0
-    assert frame.freshness_indicators[0].column_index == 15
-    assert frame.freshness_indicators[0].width_px == 8
+    assert frame.failure_spans == (InvertedSpan(row_index=0, start_column=12, end_column=16),)
 
 
 def test_compact_mode_shows_all_healthy_checks_without_suffixes_when_no_failures_exist():

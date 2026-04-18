@@ -25,17 +25,16 @@ def test_center_text_returns_fixed_width_idle_row():
 def test_overview_row_reserves_status_column_and_truncates_name():
     row = overview_row("Android Devices", "FAIL")
     assert len(row) == 16
-    assert row.endswith("FAIL ")
-    assert row.startswith("Android D…")
+    assert row.endswith("FAIL")
+    assert row.startswith("Android De…")
 
 
-def test_overview_row_layout_reserves_the_rightmost_indicator_cell():
+def test_overview_row_layout_uses_full_row_width_for_status_and_name():
     layout = overview_row_layout("Router", "FAIL")
 
-    assert layout.text == "Router     FAIL "
-    assert layout.status_start_column == 11
-    assert layout.status_end_column == 15
-    assert layout.freshness_column == 15
+    assert layout.text == "Router      FAIL"
+    assert layout.status_start_column == 12
+    assert layout.status_end_column == 16
 
 
 def test_column_widths_distribute_remainder_across_supported_column_counts():

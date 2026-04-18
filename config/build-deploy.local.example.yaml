@@ -24,6 +24,20 @@ device:
     columns: 1
     column_separator: " "
     page_interval: 15s
+    liveness:
+      contrast_breathing:
+        enabled: false
+        period_s: 30
+        amplitude: 16
+      per_row_micro:
+        enabled: false
+        period_s: 15
+        stagger: true
+      bottom_heartbeat:
+        enabled: true
+        period_s: 1
+        pixel_count: 1
+        position: left
 
 wifi:
   ssid: YourWifiName
@@ -33,6 +47,10 @@ service:
   # Leave base_url commented out if you do not want SERVICE checks in config.json.
   # base_url: http://192.168.1.10:8080/checks
   default_prefix: adb
+  # When base_url is set, syslog defaults to the same host on UDP 514.
+  # syslog:
+  #   host: 192.168.1.10
+  #   port: 514
 
 check_state:
   failures_to_degraded: 1

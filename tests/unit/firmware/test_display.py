@@ -37,12 +37,39 @@ def test_draw_frame_writes_the_rendered_buffer_and_shows_it():
             shift_offset=(0, 0),
             inverted_spans=(),
             failure_spans=(),
-            freshness_indicators=(),
         )
     )
 
     assert list(display.buffer) == [0x01, 0x01, 0x00, 0x00]
     assert marker["shown"] is True
+
+
+def test_draw_frame_applies_frame_contrast_when_requested():
+    display = SH1107Display.__new__(SH1107Display)
+    display.width = 4
+    display.height = 8
+    display.font_width = 1
+    display.font_height = 8
+    display.contrast = 128
+    display.buffer = bytearray(4)
+    display._glyph_lookup = fake_glyph_lookup
+    display._show = lambda: None
+    applied = []
+    display.set_contrast = lambda value: applied.append(value)
+
+    display.draw_frame(
+        SimpleNamespace(
+            rows=("A   ",),
+            inverted_row=None,
+            shift_offset=(0, 0),
+            inverted_spans=(),
+            failure_spans=(),
+            contrast=132,
+        )
+    )
+
+    assert applied == [132]
+    assert display.contrast == 132
 
 
 def test_set_contrast_emits_the_sh1107_contrast_commands():
@@ -204,7 +231,6 @@ def test_render_framebuffer_inverts_only_the_requested_text_span():
         shift_offset=(0, 0),
         inverted_spans=(InvertedSpan(row_index=0, start_column=2, end_column=3),),
         failure_spans=(),
-        freshness_indicators=(),
     )
 
     buffer = render_framebuffer(frame, width=4, height=8, font_width=1, font_height=8, glyph_lookup=fake_glyph_lookup)
@@ -212,29 +238,19 @@ def test_render_framebuffer_inverts_only_the_requested_text_span():
     assert list(buffer) == [0x01, 0x01, 0xFE, 0x00]
 
 
-def test_render_framebuffer_draws_freshness_indicator_widths_and_sentinel_pixel():
-    full_frame = SimpleNamespace(
+def test_render_framebuffer_draws_bottom_heartbeat():
+    frame = SimpleNamespace(
         rows=("        ",),
         inverted_row=None,
         shift_offset=(0, 0),
         inverted_spans=(),
         failure_spans=(),
-        freshness_indicators=(SimpleNamespace(row_index=0, column_index=0, width_px=6),),
-    )
-    sentinel_frame = SimpleNamespace(
-        rows=("        ",),
-        inverted_row=None,
-        shift_offset=(0, 0),
-        inverted_spans=(),
-        failure_spans=(),
-        freshness_indicators=(SimpleNamespace(row_index=0, column_index=0, width_px=0),),
+        bottom_pixels=(5, 6, 7),
     )
 
-    full_buffer = render_framebuffer(full_frame, width=8, height=8, font_width=8, font_height=8, glyph_lookup=fake_glyph_lookup)
-    sentinel_buffer = render_framebuffer(sentinel_frame, width=8, height=8, font_width=8, font_height=8, glyph_lookup=fake_glyph_lookup)
+    buffer = render_framebuffer(frame, width=8, height=8, font_width=8, font_height=8, glyph_lookup=fake_glyph_lookup)
 
-    assert list(full_buffer) == [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00]
-    assert list(sentinel_buffer) == [0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+    assert list(buffer) == [0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x80, 0x80]
 
 
 def test_render_returns_a_deterministic_buffer_for_compact_failed_columns():

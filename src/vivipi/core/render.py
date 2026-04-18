@@ -22,20 +22,14 @@ InvertedSpan = TextSpan
 
 
 @dataclass(frozen=True)
-class FreshnessIndicator:
-    row_index: int
-    column_index: int
-    width_px: int
-
-
-@dataclass(frozen=True)
 class Frame:
     rows: tuple[str, ...]
     inverted_row: int | None = None
     shift_offset: tuple[int, int] = (0, 0)
     inverted_spans: tuple[InvertedSpan, ...] = ()
     failure_spans: tuple[TextSpan, ...] = ()
-    freshness_indicators: tuple[FreshnessIndicator, ...] = ()
+    bottom_pixels: tuple[int, ...] = ()
+    contrast: int | None = None
 
 
 def _blank_rows(row_width: int, page_size: int) -> list[str]:
@@ -101,7 +95,6 @@ def _about_rows(state: AppState, row_width: int, page_size: int) -> tuple[str, .
 def _legacy_overview_frame(state: AppState, checks: tuple[CheckRuntime, ...], highlight_selection: bool) -> Frame:
     rows = _blank_rows(state.row_width, state.page_size)
     failure_spans: list[TextSpan] = []
-    freshness_indicators: list[FreshnessIndicator] = []
     inverted_row = None
     for row_index, check in enumerate(checks):
         status_text = _enum_text(check.status)
@@ -111,20 +104,11 @@ def _legacy_overview_frame(state: AppState, checks: tuple[CheckRuntime, ...], hi
             inverted_row = row_index
         if check.status == Status.FAIL:
             failure_spans.append(_status_span(row_index, layout.status_start_column, layout.status_end_column))
-        if layout.freshness_column is not None:
-            freshness_indicators.append(
-                FreshnessIndicator(
-                    row_index=row_index,
-                    column_index=layout.freshness_column,
-                    width_px=int(getattr(check, "freshness_width_px", 0)),
-                )
-            )
     return Frame(
         rows=tuple(rows),
         inverted_row=inverted_row,
         shift_offset=state.shift_offset,
         failure_spans=tuple(failure_spans),
-        freshness_indicators=tuple(freshness_indicators),
     )
 
 

@@ -13,8 +13,8 @@ def test_format_log_line_uses_fixed_prefix_and_bounded_fields():
         line_limit=64,
     )
 
-    assert line.startswith("[INFO][NETWORKI] connected to access…")
-    assert "ssid=Office Wifi With A…" in line
+    assert line.startswith("[vivipi] [INFO][NETWORKI] connected to access point")
+    assert "ssid=Office…" in line
     assert len(line) <= 64
 
 
@@ -28,13 +28,13 @@ def test_structured_logger_honors_level_gating_and_ring_buffer_capacity():
     logger.error("CORE", "boom", ())
 
     assert logger.dump() == (
-        "[ERROR][CORE] error id=router",
-        "[ERROR][CORE] boom",
+        "[vivipi] [ERROR][CORE] error id=router",
+        "[vivipi] [ERROR][CORE] boom",
     )
 
     logger.set_level(LogLevel.DEBUG)
 
-    assert logger.debug("CORE", "trace") == "[DEBUG][CORE] trace"
+    assert logger.debug("CORE", "trace") == "[vivipi] [DEBUG][CORE] trace"
 
 
 def test_logging_helpers_cover_parse_validation_sink_and_clear_paths():
@@ -56,9 +56,9 @@ def test_logging_helpers_cover_parse_validation_sink_and_clear_paths():
         field_limit=1,
     )
 
-    assert line == "[INFO][CORE] event"
-    assert logger.emit(LogLevel.INFO, "CORE", "boot") == "[INFO][CORE] boot"
-    assert emitted == ["[INFO][CORE] boot"]
+    assert line == "[vivipi] [INFO][CORE] event"
+    assert logger.emit(LogLevel.INFO, "CORE", "boot") == "[vivipi] [INFO][CORE] boot"
+    assert emitted == ["[vivipi] [INFO][CORE] boot"]
 
     logger.clear()
 

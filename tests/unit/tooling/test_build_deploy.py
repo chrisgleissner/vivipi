@@ -83,6 +83,20 @@ checks:
                 "    columns: 1",
                 "    column_separator: ' '",
                 "    boot_logo_duration: 2s",
+                "    liveness:",
+                "      contrast_breathing:",
+                "        enabled: false",
+                "        period_s: 30",
+                "        amplitude: 16",
+                "      per_row_micro:",
+                "        enabled: false",
+                "        period_s: 15",
+                "        stagger: true",
+                "      bottom_heartbeat:",
+                "        enabled: true",
+                "        period_s: 1",
+                "        pixel_count: 1",
+                "        position: left",
                 "wifi:",
                 "  ssid: ${VIVIPI_WIFI_SSID}",
                 "  password: ${VIVIPI_WIFI_PASSWORD}",
@@ -126,6 +140,14 @@ def test_load_build_deploy_settings_substitutes_environment_placeholders(tmp_pat
     assert settings["device"]["display"]["page_interval_s"] == 15
     assert settings["device"]["display"]["boot_logo_duration_s"] == 2
     assert settings["device"]["display"]["brightness"] == 128
+    assert settings["device"]["display"]["liveness"]["contrast_breathing"] == {"enabled": False, "period_s": 30, "amplitude": 16}
+    assert settings["device"]["display"]["liveness"]["per_row_micro"] == {"enabled": False, "period_s": 15, "stagger": True}
+    assert settings["device"]["display"]["liveness"]["bottom_heartbeat"] == {
+        "enabled": True,
+        "period_s": 1,
+        "pixel_count": 1,
+        "position": "left",
+    }
     assert settings["device"]["display"]["mode"] == "standard"
     assert settings["device"]["display"]["columns"] == 1
     assert settings["device"]["display"]["column_separator"] == " "
@@ -176,6 +198,7 @@ def test_write_runtime_config_embeds_wifi_and_checks(tmp_path: Path):
     assert rendered["check_state"]["visible_degraded"] is False
     assert rendered["probe_schedule"]["same_host_backoff_ms"] == 250
     assert rendered["probe_schedule"]["interval_grace_ms"] == 1000
+    assert rendered["device"]["display"]["liveness"]["bottom_heartbeat"]["position"] == "left"
 
 
 def test_build_firmware_bundle_creates_a_releaseable_zip_archive(tmp_path: Path):

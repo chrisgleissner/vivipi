@@ -63,6 +63,16 @@ flowchart TB
 
 Direct probes run from the Pico itself. `SERVICE` is the extension point for any kind of check driven not by the Pico, but by another device.
 
+### Probe Freshness Verification
+
+Each standard overview row ends with a dedicated freshness cell to the right of the status text.
+
+- A full white bar means the latest scheduled probe completed on time.
+- Shorter bars mean one or more probe intervals were missed.
+- A single sentinel pixel means the probe is fully overdue.
+
+The bottom scanline shows a 3-pixel health indicator that moves from left to right and then wraps back to the left. It advances when a probe completes, so continued movement means the device is healthy and still issuing probes.
+
 ### Probe Reference
 
 | Probe | Performs | Success condition | Failure condition or note |

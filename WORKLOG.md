@@ -1,5 +1,126 @@
 # ViviPi Work Log
 
+## 2026-04-18T21:30:00Z
+
+- Completed the runtime syslog and observability expansion and fixed the stuck-looking bottom heartbeat behavior.
+- Implementation changes:
+  - updated `src/vivipi/core/logging.py` so every retained/runtime log line now starts with `[vivipi]` and supports wider bounded fields for concise probe summaries
+  - added `src/vivipi/runtime/syslog.py` with non-blocking UDP syslog mirroring, config derivation from the normal YAML/runtime config flow, and one-time unavailability warnings with continued retry behavior
+  - updated `firmware/runtime.py` so boot logs and retained runtime logs continue to print locally while also mirroring to syslog when configured
+  - updated `src/vivipi/runtime/app.py` so each completed probe logs its identity, type, target, status, duration, latency, detail, and manual flag; button presses and resulting navigation changes are now logged separately
+  - updated checked-in deploy configs so the default build profile derives syslog host from `service.base_url` and the active local profile explicitly points syslog at `mickey:514`
+  - updated `docs/spec.md`, `docs/spec-traceability.md`, and `PLANS.md` to reflect the current observability behavior and the in-progress hardware proof phase
+- Validation:
+  - focused logging/runtime/syslog/firmware/build-deploy test slice passed: `148 passed`
+  - full repository validation passed again: `./build` -> `641 passed`, coverage `96.50%`
+
+## 2026-04-18T19:05:00Z
+
+- Completed the liveness visibility follow-up.
+- Implementation changes:
+  - updated `src/vivipi/core/liveness.py` so the bottom heartbeat can move a 3-pixel cluster through a visible lane over time instead of blinking a single fixed edge pixel
+  - updated `src/vivipi/runtime/app.py` to feed time into heartbeat placement while keeping the same low-frequency deterministic decoration model
+  - updated `firmware/displays/rendering.py` so full-width freshness bars use a larger two-pixel vertical notch instead of a single cleared pixel
+  - raised the checked-in OLED liveness defaults in `config/build-deploy.yaml`, `config/build-deploy.local.yaml`, and `config/build-deploy.local.example.yaml` to more visible values
+  - updated `README.md` with concise probe-freshness verification guidance and updated `docs/spec.md` wording to match the more visible indicators
+- Validation:
+  - focused liveness slice passed
+  - full repository validation passed again: `./build` -> `636 passed`, coverage `97.48%`
+- Deployment and live Pico verification:
+  - redeployed with `./build deploy`
+  - live Pico runtime now reports boot config `display liveness contrast=True heartbeat=True micro=True`
+  - live Pico liveness samples now show:
+    - `t=0.0`: heartbeat pixels `[63, 64, 65]`, contrast `128`, micro rows `0/7`
+    - `t=10.0`: heartbeat pixels `[64, 65, 66]`, contrast `142`, micro rows `2/7`
+    - `t=20.0`: heartbeat pixels `[65, 66, 67]`, contrast `114`, micro rows `7/7`
+  - live Pico liveness logs now show visible-state transitions such as `heartbeat=64,65,66` and `heartbeat=65,66,67`
+  - framebuffer inspection on the deployed board confirmed the healthy full-width bars now contain a larger two-pixel notch in active rows, replacing the old single-pixel dot
+
+## 2026-04-18T18:40:00Z
+
+- Started the liveness visibility follow-up after user feedback that the current healthy-state markers are too hard to see on the Pico OLED.
+- Root-cause confirmation before edits:
+  - `per_row_micro` currently renders as a single cleared pixel inside each full-width freshness bar
+  - `bottom_heartbeat` currently defaults to one pixel at the far-right bottom scanline
+  - checked-in contrast breathing defaults still use `period_s: 45` and `amplitude: 8`, which is likely too subtle for normal viewing
+  - `README.md` does not yet describe a concise operator-facing procedure for verifying probe freshness
+- Next step is to redesign the visible markers, retune the checked-in defaults, update tests/spec/docs, and redeploy to the Pico for live verification.
+
+## 2026-04-18T18:25:50Z
+
+- Follow-up verification after the report that the Pico display still showed no obvious liveness indicators.
+- Investigation outcome:
+  - confirmed the built firmware bundle and deployed Pico filesystem both include the new liveness modules and updated runtime/display code
+  - confirmed on-device normalized config still enables all three features: `contrast_breathing`, `per_row_micro`, and `bottom_heartbeat`
+  - confirmed the deployed Pico runtime was changing live frame metadata as expected at representative healthy-state timestamps: contrast `128 -> 135 -> 130`, heartbeat `on -> on -> off`, and per-row micro rows `0/7 -> 6/7 -> 7/7`
+  - confirmed the missing observability gap was real: the feature worked, but there were no dedicated serial log lines for liveness state changes
+- Repo changes in this follow-up:
+  - added a boot-time serial line in `firmware/runtime.py` summarizing whether contrast, micro variation, and heartbeat are enabled in the deployed display config
+  - added deduplicated `[INFO][DISP] liveness ...` runtime logs in `src/vivipi/runtime/app.py` so OLED liveness state changes can be verified from serial output without relying only on image capture
+  - added focused runtime coverage in `tests/unit/runtime/test_app.py` for the new liveness log summaries
+- Validation and deploy:
+  - focused runtime liveness tests passed
+  - full repo validation passed again: `./build` -> `636 passed`, coverage `97.50%`
+  - redeployed to the attached Pico with `./build deploy`
+  - post-deploy Pico serial verification now shows:
+    - boot config log: `[BOOT][BOOT] display liveness contrast=True heartbeat=True micro=True`
+    - runtime liveness logs: `[20][DISP] liveness contrast=135 heartbeat=120 micro_on=6/7 full_rows=7` and `[20][DISP] liveness contrast=130 heartbeat=off micro_on=7/7 full_rows=7`
+    - direct frame samples from the deployed board still report the baseline healthy-state values at `t=0`: contrast `128`, heartbeat pixel `[120]`, micro rows `0/7`
+
+## 2026-04-18T17:25:00Z
+
+- Completed the OLED liveness indicators task end-to-end.
+- Core/runtime/render changes:
+  - added `src/vivipi/core/liveness.py` with deterministic helper functions for quantized contrast breathing, per-row micro phases, and heartbeat pixel placement
+  - extended `src/vivipi/core/render.py` frame metadata so runtime decoration can carry per-frame contrast, bottom-row pixels, and optional freshness micro-pixel inversion without altering layout text
+  - updated `src/vivipi/runtime/app.py` to normalize `display_liveness`, apply low-frequency liveness decorations during frame build, and allow liveness-only redraws even when the app state is otherwise unchanged
+  - fixed `firmware/displays/rendering.py` freshness drawing so each indicator leaves the bottom logical pixel row dark and can optionally clear one deterministic micro pixel at full freshness
+  - updated `firmware/displays/sh1107.py` and `firmware/displays/ssd1305.py` to honor per-frame contrast targets
+- Config and docs:
+  - extended display config normalization and runtime JSON generation to include `device.display.liveness.*`
+  - enabled conservative defaults in `config/build-deploy.yaml`, `config/build-deploy.local.yaml`, and `config/build-deploy.local.example.yaml`
+  - updated `docs/spec.md` and `docs/spec-traceability.md` to cover liveness config, the separator row, the per-row micro variation, and the bottom heartbeat constraints
+- Validation:
+  - focused pytest slice for liveness/config/runtime/display/build-deploy/traceability: `195 passed`
+  - full repository validation: `./build` -> `635 passed`, coverage `97.49%`
+  - firmware bundle rebuild task completed successfully
+- Deployment and hardware verification:
+  - `./build deploy` completed to the attached Pico
+  - read back the deployed `config.json` and confirmed the SH1107 OLED profile now carries enabled `contrast_breathing`, `per_row_micro`, and `bottom_heartbeat` settings
+  - on-device probe runner remained healthy for all configured targets and reported `freshness_width_px: 8` across the board
+  - captured deployed OLED frame artifacts under `artifacts/display-capture/current/liveness/`
+  - pixel-level analysis of the deployed OLED captures confirmed:
+    - separator rows at `y = 7, 15, 23, 31, 39, 47, 55` are all dark
+    - healthy-state heartbeat toggles a single pixel at `x = 120` on the bottom scanline and is absent in the heartbeat-off sample
+    - per-row micro variation toggles one deterministic non-left-edge pixel within the full-width freshness bars
+    - contrast targets on the device changed conservatively from `128` to `135` to `130` across the sampled healthy-state timestamps
+
+## 2026-04-18T16:35:00Z
+
+- Started the OLED liveness indicators task.
+- Replaced the active top-level section in `PLANS.md` with a task-specific plan covering analysis, rendering fixes, the three liveness features, config integration, validation, and deployment.
+- Repository inspection completed before edits:
+  - confirmed the existing freshness indicator already flows through `CheckRuntime -> Frame.freshness_indicators -> firmware.displays.rendering._draw_freshness_indicator`
+  - confirmed `RuntimeApp._decorate_frame(...)` is the right hook for low-frequency, deterministic liveness decoration without changing layout or text
+  - confirmed SH1107 and SSD1305 backends already expose `set_contrast(...)`, while the active deployment target remains the SH1107 `waveshare-pico-oled-1.3`
+  - confirmed display config normalization currently owns brightness, paging, and boot-logo timing, so `device.display.liveness` should be normalized there and passed through `build_deploy` unchanged
+- No implementation changes yet beyond execution tracking; next step is the core/runtime/firmware patch set plus focused tests.
+
+## 2026-04-18T16:05:00Z
+
+- Follow-up on the reported cold-boot regression where the Pico appeared stuck on the boot logo after replug.
+- Root cause confirmed at the active deploy-profile level:
+  - the tracked `config/build-deploy.local.yaml` was still enabling `device.buttons.startup_self_test_s: 30`
+  - that meant real cold boots could spend 30 seconds in startup-only UI before health probes appeared, which is incompatible with treating the board as "done" for probe-display work
+- Device-level isolation and proof:
+  - direct on-device probe execution via `artifacts/device/pico_probe_runner.py` stayed healthy, proving the runtime/check stack itself was not dead
+  - a direct OLED test pattern written through the live `SH1107Display` backend rendered successfully on the physical panel, proving the panel + transport path were healthy
+  - a controlled on-device replay of the startup sequence showed Wi-Fi connect, live probe execution, state transitions, and an overview frame with all checks rendered after the boot-logo window expired
+  - after disabling startup self-test in the active deploy profile, redeploying, and replugging, the user directly observed the correct health-probe overview on the Pico a few seconds after boot
+- Preventive repo changes already in place:
+  - `config/build-deploy.local.yaml` now sets `startup_self_test_s: 0`
+  - `AGENTS.md` now explicitly requires that real-device Pico work is only complete when the attached board itself is observed showing the health-probe overview, not merely a boot screen or serial-only evidence
+
 ## 2026-04-18T15:10:00Z
 
 - Completed the probe freshness indicator and timing stabilization task end-to-end.

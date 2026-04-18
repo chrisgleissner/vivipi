@@ -96,7 +96,6 @@ class CheckRuntime:
     consecutive_failures: int = 0
     consecutive_successes: int = 0
     source_identifier: str | None = None
-    freshness_width_px: int = 0
 
 
 @dataclass(frozen=True)
