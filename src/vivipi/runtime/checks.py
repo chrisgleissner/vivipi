@@ -109,6 +109,65 @@ def _emit_probe_trace(trace, event: str, **fields):
     trace(event, **fields)
 
 
+def _check_type_name(definition: CheckDefinition) -> str:
+    candidate = getattr(definition.check_type, "value", None)
+    if isinstance(candidate, str) and candidate and candidate != "<property>":
+        return candidate.strip().upper()
+    name = getattr(definition.check_type, "name", None)
+    if isinstance(name, str) and name:
+        return name.strip().upper()
+    return str(definition.check_type).strip().upper() or "UNKNOWN"
+
+
+def _status_text(value: object) -> str:
+    candidate = getattr(value, "value", None)
+    if isinstance(candidate, str) and candidate and candidate != "<property>":
+        return candidate
+    name = getattr(value, "name", None)
+    if isinstance(name, str) and name:
+        return name
+    return str(value)
+
+
+def _probe_end_status(definition: CheckDefinition, result) -> str:
+    for observation in getattr(result, "observations", ()):
+        if getattr(observation, "identifier", None) == definition.identifier:
+            return _status_text(getattr(observation, "status", "?"))
+    if definition.check_type == CheckType.SERVICE:
+        return "OK"
+    observations = getattr(result, "observations", ())
+    if observations:
+        return _status_text(getattr(observations[0], "status", "?"))
+    return "?"
+
+
+def _probe_end_detail(definition: CheckDefinition, result) -> str:
+    for observation in getattr(result, "observations", ()):
+        if getattr(observation, "identifier", None) == definition.identifier:
+            return str(getattr(observation, "details", "") or "")
+    if definition.check_type == CheckType.SERVICE:
+        return ""
+    observations = getattr(result, "observations", ())
+    if observations:
+        return str(getattr(observations[0], "details", "") or "")
+    return ""
+
+
+def _probe_end_latency_ms(definition: CheckDefinition, result):
+    probe_latency_ms = getattr(result, "probe_latency_ms", None)
+    if probe_latency_ms is not None:
+        return probe_latency_ms
+    for observation in getattr(result, "observations", ()):
+        if getattr(observation, "identifier", None) == definition.identifier:
+            return getattr(observation, "latency_ms", None)
+    if definition.check_type == CheckType.SERVICE:
+        return None
+    observations = getattr(result, "observations", ())
+    if observations:
+        return getattr(observations[0], "latency_ms", None)
+    return None
+
+
 def _format_socket_address(address) -> str:
     try:
         host = address[0]
@@ -985,6 +1044,16 @@ def _portable_http_runner_socket(method: str, target: str, timeout_s: int, trace
 
 
 def build_executor(ping_runner=None, http_runner=None, ftp_runner=None, telnet_runner=None, trace_sink=None):
+    probe_counts_by_type: dict[str, dict[str, int]] = {}
+
+    def _type_counts_for(definition: CheckDefinition) -> dict[str, int]:
+        type_name = _check_type_name(definition)
+        counts = probe_counts_by_type.get(type_name)
+        if counts is None:
+            counts = {"issued": 0, "succeeded": 0, "failed": 0}
+            probe_counts_by_type[type_name] = counts
+        return counts
+
     if ping_runner is None:
         def ping(target: str, timeout_s: int, trace=None):
             return portable_ping_runner(target, timeout_s)
@@ -1016,6 +1085,8 @@ def build_executor(ping_runner=None, http_runner=None, ftp_runner=None, telnet_r
             return telnet_runner(target, timeout_s, username=username, password=password)
 
     def executor(definition: CheckDefinition, now_s: float):
+        counts = _type_counts_for(definition)
+        counts["issued"] += 1
         trace = None
         if trace_sink is not None:
             def trace(event, **fields):
@@ -1051,18 +1122,34 @@ def build_executor(ping_runner=None, http_runner=None, ftp_runner=None, telnet_r
                 ),
             )
         except Exception as error:
+            counts["failed"] += 1
             if trace is not None:
-                trace("probe-error", detail=_normalize_error_text(error))
+                trace(
+                    "probe-error",
+                    detail=_normalize_error_text(error),
+                    probe_type=_check_type_name(definition),
+                    issued=counts["issued"],
+                    succeeded=counts["succeeded"],
+                    failed=counts["failed"],
+                )
             raise
+        status = _probe_end_status(definition, result)
+        if status == "OK":
+            counts["succeeded"] += 1
+        else:
+            counts["failed"] += 1
         if trace is not None:
-            observation = result.observations[0] if result.observations else None
             trace(
                 "probe-end",
-                status=getattr(getattr(observation, "status", None), "value", getattr(observation, "status", "?")),
-                detail=getattr(observation, "details", "") if observation is not None else "",
-                latency_ms=getattr(observation, "latency_ms", None) if observation is not None else None,
+                status=status,
+                detail=_probe_end_detail(definition, result),
+                latency_ms=_probe_end_latency_ms(definition, result),
                 observations=len(result.observations),
                 replace_source=result.replace_source,
+                probe_type=_check_type_name(definition),
+                issued=counts["issued"],
+                succeeded=counts["succeeded"],
+                failed=counts["failed"],
             )
         return result
 

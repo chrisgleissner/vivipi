@@ -27,6 +27,7 @@ class CheckExecutionResult:
     observations: tuple[CheckObservation, ...]
     diagnostics: tuple[DiagnosticEvent, ...] = field(default_factory=tuple)
     replace_source: bool = False
+    probe_latency_ms: float | None = None
 
 
 def _direct_observation(
@@ -70,6 +71,7 @@ def _execution_error(
                 source_identifier=definition.identifier,
             ),
         ),
+        probe_latency_ms=None,
     )
 
 
@@ -99,6 +101,7 @@ def _probe_execution_result(
                 latency_ms=result.latency_ms,
             ),
         ),
+        probe_latency_ms=result.latency_ms,
     )
 
 
@@ -200,6 +203,7 @@ def execute_check(
                     latency_ms=result.latency_ms,
                 ),
             ),
+            probe_latency_ms=result.latency_ms,
         )
 
     try:
@@ -217,6 +221,7 @@ def execute_check(
             observations=(service_failure,),
             diagnostics=failure.diagnostics,
             replace_source=True,
+            probe_latency_ms=None,
         )
 
     if result.status_code is None or not 200 <= result.status_code < 400:
@@ -235,6 +240,7 @@ def execute_check(
                 ),
             ),
             replace_source=True,
+            probe_latency_ms=result.latency_ms,
         )
 
     try:
@@ -265,10 +271,12 @@ def execute_check(
                 ),
             ),
             replace_source=True,
+            probe_latency_ms=result.latency_ms,
         )
 
     return CheckExecutionResult(
         source_identifier=definition.identifier,
         observations=observations,
         replace_source=True,
+        probe_latency_ms=result.latency_ms,
     )

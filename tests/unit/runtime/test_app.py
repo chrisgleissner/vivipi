@@ -967,6 +967,29 @@ def test_runtime_app_queues_probe_traces_from_background_workers_and_drains_them
     assert any(line.startswith("[vivipi] [INFO][PROBE] socket-open") and "id=router" in line for line in app.get_logs())
 
 
+def test_runtime_app_probe_end_logs_latency_and_type_counters():
+    app = RuntimeApp(
+        definitions=(make_definition("router", check_type=CheckType.PING),),
+        executor=lambda definition, now_s: None,
+        display=FakeDisplay(),
+    )
+
+    app._log_probe_trace(
+        app.definitions[0],
+        "probe-end",
+        {
+            "status": "OK",
+            "latency_ms": 12.0,
+            "probe_type": "PING",
+            "issued": 3,
+            "succeeded": 2,
+            "failed": 1,
+        },
+    )
+
+    assert app.get_logs(limit=1)[0] == "[vivipi] [INFO][PROBE] probe-end id=router evt=probe-end type=PING status=OK lat_ms=12.0 issued=3 ok=2 fail=1"
+
+
 def test_runtime_app_probe_trace_overlay_and_button_edge_paths_cover_remaining_branches():
     definition = make_definition("router", check_type=CheckType.HTTP)
     trace_calls = []

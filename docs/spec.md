@@ -633,6 +633,7 @@ Runtime observability MUST provide structured, bounded, machine-parseable logs.
 - Hot paths MUST avoid per-iteration debug spam and MUST keep repeated healthy-check summaries sampled and bounded
 - Unhealthy checks MUST log a summary plus additional bounded failure detail
 - Every completed probe attempt MUST emit a concise summary including the check identity, type, target, status, and timing details
+- Probe-end logs MUST include the probe latency in milliseconds plus per-check-type issued, succeeded, and failed counters that reset on device restart
 - Button presses and resulting navigation transitions MUST be logged as distinct bounded events
 
 [VIVIPI-OBS-001]

@@ -33,8 +33,10 @@ def test_execute_check_maps_ping_success_and_failure_without_diagnostics():
 
     assert ok.observations[0].status == Status.OK
     assert ok.diagnostics == ()
+    assert ok.probe_latency_ms == 12.3
     assert failed.observations[0].status == Status.FAIL
     assert failed.observations[0].details == "timeout"
+    assert failed.probe_latency_ms is None
 
 
 def test_execute_check_maps_http_status_codes_to_observations():
@@ -53,6 +55,7 @@ def test_execute_check_maps_http_status_codes_to_observations():
 
     assert result.observations[0].status == Status.FAIL
     assert result.observations[0].latency_ms == 45.0
+    assert result.probe_latency_ms == 45.0
 
 
 def test_execute_check_replaces_service_children_on_success():
@@ -81,6 +84,7 @@ def test_execute_check_replaces_service_children_on_success():
     assert result.replace_source is True
     assert result.observations[0].identifier == "adb:pixel-8-pro"
     assert result.observations[0].source_identifier == "android-devices"
+    assert result.probe_latency_ms == 5.0
 
 
 def test_execute_check_reports_service_schema_errors_via_diagnostics():
@@ -100,6 +104,7 @@ def test_execute_check_reports_service_schema_errors_via_diagnostics():
     assert result.observations[0].identifier == "android-devices"
     assert result.observations[0].status == Status.FAIL
     assert result.diagnostics[0].code == "SERV"
+    assert result.probe_latency_ms == 5.0
 
 
 def test_execute_check_reports_ping_and_http_executor_failures_via_diagnostics():
@@ -122,6 +127,8 @@ def test_execute_check_reports_ping_and_http_executor_failures_via_diagnostics()
     assert ping_result.diagnostics[0].code == "PING"
     assert ping_result.observations[0].details == "executor error"
     assert http_result.diagnostics[0].code == "HTTP"
+    assert ping_result.probe_latency_ms is None
+    assert http_result.probe_latency_ms is None
 
 
 def test_execute_check_maps_ftp_and_telnet_probe_results():
@@ -174,9 +181,11 @@ def test_execute_check_maps_ftp_and_telnet_probe_results():
     assert ftp_calls == [("ftp://nas.example.local", 10, "admin", "secret")]
     assert ftp_result.observations[0].status == Status.OK
     assert ftp_result.observations[0].details == "listed 3 entries"
+    assert ftp_result.probe_latency_ms == 21.0
     assert telnet_calls == [("telnet://switch.example.local", 10, "ops", "pw")]
     assert telnet_result.observations[0].status == Status.FAIL
     assert telnet_result.observations[0].details == "login failed"
+    assert telnet_result.probe_latency_ms == 8.0
 
 
 def test_execute_check_passes_http_password_to_runner():
@@ -205,6 +214,7 @@ def test_execute_check_passes_http_password_to_runner():
 
     assert calls == [("GET", "http://192.168.1.13/v1/version", 10, None, "secret")]
     assert result.observations[0].status == Status.OK
+    assert result.probe_latency_ms == 14.0
 
 
 def test_execute_check_reports_ftp_and_telnet_executor_failures_via_diagnostics():
@@ -242,6 +252,8 @@ def test_execute_check_reports_ftp_and_telnet_executor_failures_via_diagnostics(
     assert ftp_result.observations[0].details == "executor error"
     assert telnet_result.diagnostics[0].code == "TELN"
     assert telnet_result.observations[0].details == "executor error"
+    assert ftp_result.probe_latency_ms is None
+    assert telnet_result.probe_latency_ms is None
 
 
 def test_execute_check_handles_service_request_failures_and_non_2xx_responses():
@@ -264,3 +276,5 @@ def test_execute_check_handles_service_request_failures_and_non_2xx_responses():
     assert failed_request.diagnostics[0].code == "SERV"
     assert failed_response.replace_source is True
     assert failed_response.observations[0].details == "HTTP 503"
+    assert failed_request.probe_latency_ms is None
+    assert failed_response.probe_latency_ms is None

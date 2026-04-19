@@ -357,6 +357,9 @@ class RuntimeApp:
             log_field("id", definition.identifier),
             log_field("evt", event),
         ]
+        probe_type = fields.get("probe_type")
+        if probe_type is not None:
+            trace_fields.append(log_field("type", probe_type))
         if "stage" in fields:
             trace_fields.append(log_field("stage", fields["stage"]))
         target = fields.get("target")
@@ -364,6 +367,18 @@ class RuntimeApp:
             trace_fields.append(log_field("target", target))
         elif "remain_ms" in fields:
             trace_fields.append(log_field("remain_ms", fields["remain_ms"]))
+        if event == "probe-end":
+            if "status" in fields:
+                trace_fields.append(log_field("status", fields["status"]))
+            if fields.get("latency_ms") is not None:
+                trace_fields.append(log_field("lat_ms", f"{float(fields['latency_ms']):.1f}"))
+            for field_name, label in (("issued", "issued"), ("succeeded", "ok"), ("failed", "fail")):
+                if fields.get(field_name) is not None:
+                    trace_fields.append(log_field(label, int(fields[field_name])))
+        elif event == "probe-error":
+            for field_name, label in (("issued", "issued"), ("succeeded", "ok"), ("failed", "fail")):
+                if fields.get(field_name) is not None:
+                    trace_fields.append(log_field(label, int(fields[field_name])))
         self.logger.emit(level, "PROBE", event, tuple(trace_fields))
 
     def _pop_pending_probe_traces(self) -> tuple[tuple[CheckDefinition, str, dict[str, object]], ...]:

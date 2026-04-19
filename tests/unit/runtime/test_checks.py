@@ -119,7 +119,58 @@ def test_build_runtime_definitions_rejects_invalid_shapes_and_normalizes_blank_p
     )
 
     assert definitions[0].service_prefix is None
-    assert definitions[0].method == "GET"
+
+
+def test_probe_end_helper_normalization_covers_enum_name_and_service_fallback_paths():
+    definition = build_runtime_definitions(
+        {
+            "checks": [
+                {
+                    "id": "service",
+                    "name": "Service",
+                    "type": "SERVICE",
+                    "target": "http://service.local/checks",
+                    "service_prefix": "adb",
+                }
+            ]
+        }
+    )[0]
+
+    class FakeEnumLike:
+        value = "<property>"
+        name = "http"
+
+        def __str__(self):
+            return "ignored"
+
+    assert runtime_checks._check_type_name(SimpleNamespace(check_type=FakeEnumLike())) == "HTTP"
+    assert runtime_checks._status_text(FakeEnumLike()) == "http"
+    assert runtime_checks._probe_end_status(definition, SimpleNamespace(observations=(), replace_source=True)) == "OK"
+    assert runtime_checks._probe_end_detail(definition, SimpleNamespace(observations=(), replace_source=True)) == ""
+    assert runtime_checks._probe_end_latency_ms(definition, SimpleNamespace(observations=(), probe_latency_ms=None)) is None
+
+    fallback_definition = build_runtime_definitions(
+        {
+            "checks": [
+                {
+                    "id": "router",
+                    "name": "Router",
+                    "type": "PING",
+                    "target": "192.168.1.1",
+                }
+            ]
+        }
+    )[0]
+    fallback_result = SimpleNamespace(
+        observations=(SimpleNamespace(identifier="other", status=Status.FAIL, details="timeout", latency_ms=9.0),),
+        probe_latency_ms=None,
+    )
+
+    assert runtime_checks._probe_end_status(fallback_definition, fallback_result) == "FAIL"
+    assert runtime_checks._probe_end_detail(fallback_definition, fallback_result) == "timeout"
+    assert runtime_checks._probe_end_latency_ms(fallback_definition, fallback_result) == 9.0
+    assert runtime_checks._probe_end_status(fallback_definition, SimpleNamespace(observations=(), probe_latency_ms=None)) == "?"
+    assert fallback_definition.method == "GET"
 
 
 def test_build_runtime_definitions_accepts_legacy_rest_alias_and_normalizes_to_http():
@@ -225,6 +276,151 @@ def test_build_executor_trace_sink_emits_probe_lifecycle_events():
     assert captured[-1][0] == "router"
     assert captured[-1][1] == "probe-end"
     assert captured[-1][2]["status"] == "OK"
+    assert captured[-1][2]["latency_ms"] == 12.0
+    assert captured[-1][2]["probe_type"] == "PING"
+    assert captured[-1][2]["issued"] == 1
+    assert captured[-1][2]["succeeded"] == 1
+    assert captured[-1][2]["failed"] == 0
+
+
+def test_build_executor_tracks_probe_type_counters_across_issued_succeeded_and_failed_attempts(monkeypatch):
+    definitions = build_runtime_definitions(
+        {
+            "checks": [
+                {
+                    "id": "router-a",
+                    "name": "Router A",
+                    "type": "PING",
+                    "target": "192.168.1.1",
+                    "interval_s": 15,
+                    "timeout_s": 10,
+                },
+                {
+                    "id": "router-b",
+                    "name": "Router B",
+                    "type": "PING",
+                    "target": "192.168.1.2",
+                    "interval_s": 15,
+                    "timeout_s": 10,
+                },
+            ]
+        }
+    )
+    captured = []
+    results = iter(
+        (
+            PingProbeResult(ok=True, latency_ms=5.0, details="reachable"),
+            PingProbeResult(ok=False, latency_ms=9.0, details="timeout"),
+        )
+    )
+
+    def ping_runner(target, timeout_s):
+        outcome = next(results)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    executor = build_executor(
+        ping_runner=ping_runner,
+        trace_sink=lambda definition, event, fields: captured.append((definition.identifier, event, dict(fields))),
+    )
+
+    executor(definitions[0], 10.0)
+    executor(definitions[1], 11.0)
+
+    monkeypatch.setattr(runtime_checks, "execute_check", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
+    with pytest.raises(RuntimeError, match="boom"):
+        executor(definitions[0], 12.0)
+
+    assert captured[1] == (
+        "router-a",
+        "probe-end",
+        {
+            "status": "OK",
+            "detail": "reachable",
+            "latency_ms": 5.0,
+            "observations": 1,
+            "replace_source": False,
+            "probe_type": "PING",
+            "issued": 1,
+            "succeeded": 1,
+            "failed": 0,
+        },
+    )
+    assert captured[3] == (
+        "router-b",
+        "probe-end",
+        {
+            "status": "FAIL",
+            "detail": "timeout",
+            "latency_ms": 9.0,
+            "observations": 1,
+            "replace_source": False,
+            "probe_type": "PING",
+            "issued": 2,
+            "succeeded": 1,
+            "failed": 1,
+        },
+    )
+    assert captured[5] == (
+        "router-a",
+        "probe-error",
+        {
+            "detail": "boom",
+            "probe_type": "PING",
+            "issued": 3,
+            "succeeded": 1,
+            "failed": 2,
+        },
+    )
+
+
+def test_build_executor_probe_end_uses_probe_level_latency_for_service_checks():
+    definition = build_runtime_definitions(
+        {
+            "checks": [
+                {
+                    "id": "service",
+                    "name": "Service",
+                    "type": "SERVICE",
+                    "target": "http://service.local/checks",
+                    "interval_s": 15,
+                    "timeout_s": 10,
+                    "service_prefix": "adb",
+                }
+            ]
+        }
+    )[0]
+    captured = []
+
+    executor = build_executor(
+        http_runner=lambda method, target, timeout_s, username=None, password=None: runtime_checks.HttpResponseResult(
+            status_code=200,
+            body={
+                "checks": [
+                    {
+                        "name": "Pixel 8 Pro",
+                        "status": "OK",
+                        "details": "Connected",
+                        "latency_ms": 0,
+                    }
+                ]
+            },
+            latency_ms=7.5,
+            details="HTTP 200",
+        ),
+        trace_sink=lambda definition, event, fields: captured.append((definition.identifier, event, dict(fields))),
+    )
+
+    executor(definition, 10.0)
+
+    assert captured[-1][1] == "probe-end"
+    assert captured[-1][2]["status"] == "OK"
+    assert captured[-1][2]["latency_ms"] == 7.5
+    assert captured[-1][2]["probe_type"] == "SERVICE"
+    assert captured[-1][2]["issued"] == 1
+    assert captured[-1][2]["succeeded"] == 1
+    assert captured[-1][2]["failed"] == 0
 
 
 def test_build_executor_uses_supplied_ftp_and_telnet_runners():
@@ -1138,7 +1334,7 @@ def test_manual_http_socket_and_executor_defaults_cover_remaining_paths(monkeypa
 
     assert trace_events == [
         ("ping", "probe-start", {"timeout_s": 10}),
-        ("ping", "probe-error", {"detail": "boom"}),
+        ("ping", "probe-error", {"detail": "boom", "probe_type": "PING", "issued": 1, "succeeded": 0, "failed": 1}),
     ]
 
     no_trace_executor = build_executor()
