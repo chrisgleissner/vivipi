@@ -116,6 +116,7 @@ def definitions_to_runtime_config(
             "allow_concurrent_hosts": policy.allow_concurrent_hosts,
             "allow_concurrent_same_host": policy.allow_concurrent_same_host,
             "same_host_backoff_ms": policy.same_host_backoff_ms,
+            "interval_grace_ms": policy.interval_grace_ms,
         },
     }
 

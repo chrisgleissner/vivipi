@@ -1,5 +1,231 @@
 # Plans
 
+## Liveness Visibility Follow-Up Plan
+
+Superseded by the bottom-heartbeat-only redesign and the follow-on runtime observability work below. Historical notes are preserved for auditability.
+
+## Runtime Syslog And Input Verification Plan
+
+Authoritative execution plan for mirroring all retained runtime logs to UDP syslog, making probe/button/navigation logs explicit enough for remote diagnosis, and proving the behavior on the attached Pico.
+
+### Problem Statement
+
+- The Pico runtime retained bounded logs in-memory and printed to serial, but had no remote syslog transport.
+- The current logs were too terse for probe-by-probe remote diagnosis and did not clearly separate button presses from navigation state changes.
+- The user reported that the bottom heartbeat appeared stuck and that button/menu behavior looked broken on the device, so the runtime needed remote proof rather than screen-only inference.
+
+### Constraints
+
+- `docs/spec.md` remains the source of truth.
+- Syslog delivery must not delay normal device behavior.
+- Syslog failures must emit only one warning while still retrying later.
+- The attached Pico and the local `scripts/u64_syslog_server.py` listener are the required proof path.
+
+### Phases
+
+Phase 1: Root-cause confirmation  
+Status: COMPLETED
+
+- Confirmed the heartbeat state advanced internally but was only visibly rendered after a due-check batch.
+- Confirmed the physical button GPIO path and debouncing were healthy on GP15 and GP17.
+- Confirmed no UDP syslog transport existed in firmware.
+
+Phase 2: Runtime logging and syslog transport  
+Status: COMPLETED
+
+- Added `[vivipi]`-prefixed structured logs with wider bounded fields.
+- Added non-blocking UDP syslog mirroring with one-time unavailability warnings and continued retries.
+- Added explicit per-probe summaries plus separate button-press and navigation logs.
+
+Phase 3: Validation and hardware proof  
+Status: IN PROGRESS
+
+- Run focused tests and full `./build`.
+- Redeploy to the attached Pico.
+- Prove live syslog receipt for boot, probes, heartbeat progress, and button/navigation events.
+
+Authoritative execution plan for fixing the current OLED liveness visibility regression, making healthy-state probe/device liveness materially easier to see on the SH1107 OLED, and documenting the exact probe-freshness verification path in the README.
+
+### Problem Statement
+
+- The current per-row micro variation is only a single cleared pixel inside a full-width freshness bar, which is too small to function as a useful healthy-state probe liveness indicator.
+- The current bottom heartbeat defaults to a single pixel on the far-right bottom scanline, which is easy to miss on the physical panel.
+- The current contrast breathing amplitude is conservative enough that it may be effectively invisible in normal viewing.
+- `README.md` does not yet explain in concise operational terms how probe freshness should be verified on the device.
+
+### Constraints
+
+- `docs/spec.md` remains the source of truth; behavior changes must be reflected in `docs/spec-traceability.md`.
+- Preserve the strict `16 x 8` text grid and do not add new layout rows or columns.
+- Keep rendering deterministic and low-frequency.
+- Keep the firmware/runtime split architecture intact and prefer pure, testable helper logic where practical.
+- Finish with tests, `./build`, deploy, and real Pico verification.
+
+### Design Decisions
+
+- Keep the right-edge freshness cell as the probe freshness primitive, but replace the current one-pixel micro hole with a small deterministic notch that is visibly meaningful on the physical OLED.
+- Make the bottom heartbeat clearly visible by increasing its footprint and defaulting it to a more visible lane rather than the far-right edge.
+- Keep a calm global contrast pulse, but tune the checked-in defaults to be observable rather than barely measurable.
+- Document verification in README as an operator-facing procedure, not an implementation note.
+
+### Phases
+
+Phase 1: Root-cause confirmation  
+Status: COMPLETED
+
+- Confirm the current micro variation is literally one cleared pixel.
+- Confirm the current heartbeat is a one-pixel far-right cluster.
+- Confirm the current config defaults keep contrast breathing very subtle.
+
+Phase 2: Visibility redesign  
+Status: COMPLETED
+
+- Redesign the healthy-state probe marker to be visible without altering bar width semantics.
+- Redesign the bottom heartbeat to be clearly visible on the physical display.
+- Retune conservative but visible default liveness settings.
+
+Phase 3: Docs and spec alignment  
+Status: COMPLETED
+
+- Update `README.md` with concise probe-freshness verification guidance.
+- Update `docs/spec.md` and `docs/spec-traceability.md` if requirement language changes.
+
+Phase 4: Validation and deploy  
+Status: COMPLETED
+
+- Update focused tests.
+- Run `./build`.
+- Deploy to the attached Pico and verify the improved markers on hardware.
+
+### Acceptance Criteria
+
+- Healthy-state probe liveness is visibly discernible on each full-width freshness bar without changing the fixed 16x8 layout.
+- Device liveness on the bottom scanline is clearly visible on the physical OLED.
+- Contrast breathing remains calm but is actually noticeable in normal viewing.
+- `README.md` concisely explains how to verify probe freshness.
+- Tests, `./build`, deploy, and Pico verification all complete successfully.
+
+### Completion Notes
+
+- Replaced the previous one-pixel per-row micro hole with a larger two-pixel vertical notch so healthy full-width freshness bars now show a visible probe-liveness cue without changing bar width semantics.
+- Changed the bottom heartbeat from a single far-right pixel to a centered three-pixel cluster that moves slowly along the bottom scanline, making device liveness visible on the physical OLED.
+- Retuned the checked-in OLED defaults to a more visible but still calm healthy-state cadence: contrast breathing `period_s: 30`, `amplitude: 16`; bottom heartbeat `period_s: 10`, `pixel_count: 3`, `position: center`.
+- Updated `README.md` with a concise operator-facing section explaining how to verify probe freshness on the device and what healthy/degraded behavior should look like.
+- Updated `docs/spec.md` to reflect the visible notch wording and moving bottom-heartbeat cluster semantics.
+- Final validation completed:
+	- focused liveness pytest slice passed
+	- full `./build` passed at `636 passed` with `97.48%` total coverage
+	- deploy completed successfully to the attached Pico
+	- live Pico verification confirmed deployed liveness config `contrast_breathing(amplitude=16, period_s=30)`, `bottom_heartbeat(pixel_count=3, position=center, period_s=10)`, and `per_row_micro(enabled=true, stagger=true)`
+	- live Pico frame samples confirmed bottom heartbeat positions `63,64,65 -> 64,65,66 -> 65,66,67`, contrast `128 -> 142 -> 114`, and active per-row micro rows `0/7 -> 2/7 -> 7/7`
+	- pixel-level framebuffer inspection on the deployed Pico confirmed the full-width freshness bars now contain a larger two-pixel notch rather than a single almost-imperceptible dot
+
+## OLED Liveness Indicators Plan
+
+Authoritative execution plan for implementing three ultra-low-distraction liveness indicators on the 128x64 SH1107 OLED while preserving the existing 16x8 overview layout, deterministic rendering, and calm healthy-state behavior.
+
+### Problem Statement
+
+- The existing freshness bitmap currently fills the entire 8-pixel cell height, so adjacent rows visually run together instead of preserving the intended baseline gap.
+- Healthy steady-state renders can become completely static, which removes all subtle confirmation that the Pico runtime and OLED are still alive.
+- The OLED path already uses brightness-capable hardware and a deterministic bitmap renderer, but it lacks a structured low-frequency liveness layer that can operate without changing text, layout, or introducing visible animation.
+
+### Constraints
+
+- `docs/spec.md` remains the product source of truth; requirement updates must be reflected in `docs/spec-traceability.md`.
+- Preserve the strict `16 x 8` character grid on the default `waveshare-pico-oled-1.3` profile.
+- Keep rendering deterministic and avoid per-frame animation loops.
+- Keep business logic in `src/vivipi/core` or other CPython-testable paths when practical; keep firmware glue thin.
+- Keep SH1107 transport calibration and `column_offset = 32` unchanged.
+- Preserve calm visuals: low-frequency, subtle, independently toggleable, and conservative by default.
+- Finish with tests, `./build`, deploy, and hardware verification on the attached Pico.
+
+### Design Decisions
+
+- Extend the existing bitmap freshness primitive instead of introducing new layout elements or text glyph mutations.
+- Normalize liveness configuration under `device.display.liveness` so the same schema flows from YAML to runtime config to firmware.
+- Represent liveness output as deterministic frame decorations: per-frame contrast target, per-row micro-pixel metadata, and bottom-row heartbeat pixels.
+- Quantize time-based liveness updates so they only advance on explicit low-frequency boundaries.
+- Keep all three indicators independently optional; missing config means disabled.
+
+### Phases
+
+Phase 1: Analysis  
+Status: COMPLETED
+
+- Confirm the current freshness bitmap rendering path, display config normalization path, runtime frame decoration hook, and SH1107 contrast support.
+- Identify the smallest set of files for plan/log tracking, config parsing, runtime scheduling, renderer updates, docs, tests, and deployment.
+
+Phase 2: Rendering Fixes  
+Status: COMPLETED
+
+- Fix the freshness bitmap so only the top 7 logical rows render and the bottom separator row remains off.
+- Preserve the current width semantics and sentinel behavior at width `0`.
+
+Phase 3: Feature 1, Contrast  
+Status: COMPLETED
+
+- Add deterministic low-frequency contrast breathing around the configured base brightness.
+- Apply it only on displays that support contrast control and keep the amplitude/period conservative.
+
+Phase 4: Feature 2, Per-Row Micro  
+Status: COMPLETED
+
+- Add one deterministic per-row micro-pixel variation only when freshness is full width (`8`).
+- Support optional row staggering without changing perceived indicator width.
+
+Phase 5: Feature 3, Heartbeat  
+Status: COMPLETED
+
+- Add a minimal bottom-row heartbeat using 1 to 3 pixels on the unused bottom scanline.
+- Keep placement configurable and visually quiet.
+
+Phase 6: Config Integration  
+Status: COMPLETED
+
+- Extend display config normalization and runtime config rendering with `device.display.liveness`.
+- Update checked-in deploy config defaults for safe, enabled-on-purpose behavior on the OLED path.
+
+Phase 7: Validation  
+Status: COMPLETED
+
+- Add focused tests for config validation, frame decoration timing, firmware rendering, and spec traceability.
+- Run focused tests, then `./build`.
+
+Phase 8: Deployment  
+Status: COMPLETED
+
+- Build the firmware bundle.
+- Deploy to the attached Pico.
+- Verify the freshness separator, subtle healthy-state liveness, unchanged degraded rendering, and absence of distracting motion on hardware.
+
+### Acceptance Criteria
+
+- The freshness indicator uses only the top 7 logical pixels and preserves an always-off separator row.
+- Contrast breathing is subtle, quantized to low-frequency updates, and disabled automatically when contrast control is unavailable.
+- Per-row micro variation appears only at full freshness width and does not change perceived bar width.
+- The bottom heartbeat uses at most 3 pixels on the bottom row and remains minimally visible.
+- All liveness features are independently configurable via `device.display.liveness` and disabled when that section is absent.
+- Rendering remains deterministic, event-driven or low-frequency scheduled, and visually calm when healthy.
+- Tests, `./build`, deployment, and hardware verification complete successfully.
+
+### Completion Notes
+
+- Fixed the freshness bitmap renderer so every indicator cell now uses only the top 7 logical pixels, leaving the bottom separator row dark across all rows.
+- Added conservative `device.display.liveness` normalization for `contrast_breathing`, `per_row_micro`, and `bottom_heartbeat`, and threaded that config through build-deploy, runtime config JSON, and firmware app construction.
+- Added pure liveness timing helpers in `src/vivipi/core/liveness.py` and used them from `RuntimeApp._decorate_frame(...)` so all three indicators advance on deterministic low-frequency boundaries rather than a per-frame animation loop.
+- Extended the frame model with contrast and bottom-row pixel metadata and updated the SH1107 and SSD1305 backends to honor per-frame contrast targets.
+- Final validation completed:
+	- focused pytest slice passed at `195 passed`
+	- full `./build` passed at `635 passed` with `97.49%` total coverage
+	- firmware bundle rebuilt and deploy completed to the attached Pico
+- Device verification completed on the deployed Pico:
+	- deployed `config.json` read back from the board includes the expected enabled liveness settings
+	- direct on-device probe execution stayed healthy with all configured checks at `freshness_width_px: 8`
+	- on-device OLED captures written under `artifacts/display-capture/current/liveness/` confirmed the healthy overview layout and liveness states
+	- pixel-level verification on the deployed OLED buffer confirmed separator rows `y = 7, 15, 23, 31, 39, 47, 55` were all dark, the bottom heartbeat toggled exactly at `x = 120`, and the per-row micro variation toggled one non-left-edge pixel within full-width freshness bars
+	- captured contrast values on the deployed SH1107 changed conservatively across healthy-state samples: `128` at `t=0`, `135` at `t=14`, and `130` at `t=21`
+
 ## ViviPi Probe Productionization Plan
 
 Authoritative execution plan for fixing ViviPi direct-probe correctness on the Pico, improving display responsiveness, preserving the internal `OK -> DEG -> FAIL` model while making the visible degraded phase configurable, and validating the result on the attached Pico against the live U64, C64U, and Pixel 4 environment.

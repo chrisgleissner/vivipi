@@ -6,11 +6,12 @@ from vivipi.core.ring_buffer import RingBuffer
 
 
 DEFAULT_LOG_BUFFER_CAPACITY = 32
-DEFAULT_LOG_LINE_LIMIT = 96
-DEFAULT_LOG_FIELD_LIMIT = 4
+DEFAULT_LOG_LINE_LIMIT = 160
+DEFAULT_LOG_FIELD_LIMIT = 8
 DEFAULT_COMPONENT_LIMIT = 8
-DEFAULT_MESSAGE_LIMIT = 20
-DEFAULT_FIELD_LIMIT = 24
+DEFAULT_MESSAGE_LIMIT = 28
+DEFAULT_FIELD_LIMIT = 48
+LOG_PREFIX = "[vivipi]"
 
 
 class LogLevel(IntEnum):
@@ -18,6 +19,30 @@ class LogLevel(IntEnum):
     INFO = 20
     WARN = 30
     ERROR = 40
+
+
+_LOG_LEVEL_NAMES = {
+    10: "DEBUG",
+    20: "INFO",
+    30: "WARN",
+    40: "ERROR",
+}
+
+
+def _enum_name(value: object) -> str:
+    try:
+        numeric_value = int(value)
+    except (TypeError, ValueError):
+        numeric_value = None
+    if numeric_value in _LOG_LEVEL_NAMES:
+        return _LOG_LEVEL_NAMES[numeric_value]
+    candidate = getattr(value, "name", None)
+    if isinstance(candidate, str) and candidate and candidate != "<property>":
+        return candidate
+    candidate = getattr(value, "_name_", None)
+    if isinstance(candidate, str) and candidate and candidate != "<property>":
+        return candidate
+    return str(value)
 
 
 def parse_log_level(value: LogLevel | str | int) -> LogLevel:
@@ -62,8 +87,8 @@ def format_log_line(
     normalized_component = _hard_limit(component.upper(), DEFAULT_COMPONENT_LIMIT) or "CORE"
     normalized_message = bound_text(message, DEFAULT_MESSAGE_LIMIT) or "event"
 
-    level_name = getattr(normalized_level, "_name_", str(normalized_level))
-    parts = [f"[{level_name}][{normalized_component}] {normalized_message}"]
+    level_name = _enum_name(normalized_level)
+    parts = [LOG_PREFIX, f"[{level_name}][{normalized_component}] {normalized_message}"]
     for field in fields[:field_limit]:
         if field:
             parts.append(bound_text(field, DEFAULT_FIELD_LIMIT))

@@ -2,9 +2,9 @@ SHIFT_SEQUENCE = ((0, 0), (1, 0), (1, 1), (0, 1))
 
 
 class PixelShiftController:
-    def __init__(self, interval_s: int = 30):
-        if interval_s < 30 or interval_s > 60:
-            raise ValueError("interval_s must be between 30 and 60 seconds")
+    def __init__(self, interval_s: int = 180):
+        if interval_s < 120 or interval_s > 300:
+            raise ValueError("interval_s must be between 120 and 300 seconds")
         self.interval_s = interval_s
 
     def offset_for_tick(self, tick: int) -> tuple[int, int]:

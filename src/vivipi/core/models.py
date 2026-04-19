@@ -51,10 +51,13 @@ class ProbeSchedulingPolicy:
     allow_concurrent_hosts: bool = False
     allow_concurrent_same_host: bool = False
     same_host_backoff_ms: int = 250
+    interval_grace_ms: int = 1000
 
     def __post_init__(self):
         if self.same_host_backoff_ms < 0:
             raise ValueError("same_host_backoff_ms must not be negative")
+        if self.interval_grace_ms < 0 or self.interval_grace_ms > 1000:
+            raise ValueError("interval_grace_ms must be between 0 and 1000")
 
 
 @dataclass(frozen=True)

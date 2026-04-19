@@ -14,6 +14,9 @@ except ImportError:  # pragma: no cover - CPython fallback
     _thread = None
 
 from vivipi.core.input import Button, InputController
+from vivipi.core.liveness import (
+    bottom_heartbeat_pixels,
+)
 from vivipi.core.models import CheckRuntime
 from vivipi.core.render import render_frame
 from vivipi.core.scheduler import due_checks, probe_backoff_remaining_s, probe_host_key, render_reason
@@ -38,11 +41,21 @@ from vivipi.runtime.state import make_error_record
 
 
 def _enum_text(value) -> str:
-    return str(getattr(value, "value", value))
+    candidate = getattr(value, "value", None)
+    if isinstance(candidate, str) and candidate and candidate != "<property>":
+        return candidate
+    name = getattr(value, "name", None)
+    if isinstance(name, str) and name:
+        return name
+    return str(value)
 
 
 def _button_text(value) -> str:
     return str(getattr(value, "value", value))
+
+
+def _target_summary(definition: CheckDefinition) -> str:
+    return bound_text(definition.target, 40)
 
 
 def _sleep_ms(value_ms: int):
@@ -119,11 +132,80 @@ class PendingCheckRun:
 @dataclass(frozen=True)
 class CompletedCheckRun:
     definition: CheckDefinition
-    observed_at_s: float
+    started_at_s: float
+    completed_at_s: float
     duration_ms: float
     manual: bool = False
     result: object | None = None
     error: BaseException | None = None
+
+
+def _coerce_bool(value: object, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "1", "on"}:
+            return True
+        if normalized in {"false", "no", "0", "off"}:
+            return False
+    raise ValueError("display liveness settings must use boolean values")
+
+
+def _normalize_display_liveness(display_liveness: object) -> dict[str, dict[str, object]]:
+    defaults = {
+        "contrast_breathing": {"enabled": False, "period_s": 45, "amplitude": 8},
+        "per_row_micro": {"enabled": False, "period_s": 15, "stagger": True},
+        "bottom_heartbeat": {"enabled": False, "period_s": 1, "pixel_count": 1, "position": "left"},
+    }
+    if display_liveness is None:
+        return defaults
+    if not isinstance(display_liveness, dict):
+        raise ValueError("display_liveness must be a mapping when provided")
+
+    normalized = {
+        "contrast_breathing": dict(defaults["contrast_breathing"]),
+        "per_row_micro": dict(defaults["per_row_micro"]),
+        "bottom_heartbeat": dict(defaults["bottom_heartbeat"]),
+    }
+    for section_name in normalized:
+        raw_section = display_liveness.get(section_name)
+        if raw_section is None:
+            continue
+        if not isinstance(raw_section, dict):
+            raise ValueError(f"display_liveness.{section_name} must be a mapping")
+        normalized[section_name].update(raw_section)
+
+    normalized["contrast_breathing"]["enabled"] = _coerce_bool(
+        normalized["contrast_breathing"].get("enabled"),
+        False,
+    )
+    normalized["contrast_breathing"]["period_s"] = int(normalized["contrast_breathing"].get("period_s", 45))
+    normalized["contrast_breathing"]["amplitude"] = int(normalized["contrast_breathing"].get("amplitude", 8))
+
+    normalized["per_row_micro"]["enabled"] = _coerce_bool(
+        normalized["per_row_micro"].get("enabled"),
+        False,
+    )
+    normalized["per_row_micro"]["period_s"] = int(normalized["per_row_micro"].get("period_s", 15))
+    normalized["per_row_micro"]["stagger"] = _coerce_bool(
+        normalized["per_row_micro"].get("stagger"),
+        True,
+    )
+
+    normalized["bottom_heartbeat"]["enabled"] = _coerce_bool(
+        normalized["bottom_heartbeat"].get("enabled"),
+        False,
+    )
+    normalized["bottom_heartbeat"]["period_s"] = int(normalized["bottom_heartbeat"].get("period_s", 1))
+    normalized["bottom_heartbeat"]["pixel_count"] = max(
+        1,
+        min(3, int(normalized["bottom_heartbeat"].get("pixel_count", 1))),
+    )
+    normalized["bottom_heartbeat"]["position"] = str(normalized["bottom_heartbeat"].get("position", "left"))
+    return normalized
 
 
 class RuntimeApp:
@@ -145,6 +227,7 @@ class RuntimeApp:
         probe_scheduling: ProbeSchedulingPolicy | None = None,
         visible_degraded: bool = True,
         highlight_selection: bool = True,
+        display_liveness: dict[str, object] | None = None,
         sleep_ms=_sleep_ms,
         probe_time_provider=_monotonic_now_s,
         version: str = "",
@@ -163,9 +246,12 @@ class RuntimeApp:
         self.probe_scheduling = probe_scheduling or ProbeSchedulingPolicy()
         self.visible_degraded = bool(visible_degraded)
         self.highlight_selection = bool(highlight_selection)
+        self.display_liveness = _normalize_display_liveness(display_liveness)
         self.sleep_ms = sleep_ms
         self.probe_time_provider = probe_time_provider
+        self.base_display_contrast = int(getattr(display, "contrast", 128)) if hasattr(display, "contrast") else None
         self.last_started_at: dict[str, float] = {}
+        self.last_completed_at: dict[str, float] = {}
         self.last_completed_at_by_host: dict[str, float] = {}
         self.background_lock = _allocate_lock()
         self.background_workers_enabled = self.background_lock is not None and (
@@ -245,6 +331,9 @@ class RuntimeApp:
         self.last_cycle_ms: float | None = None
         self.last_render_at_s: float | None = None
         self.last_render_reason = "bootstrap"
+        self.last_rendered_liveness_signature: tuple[int | None, tuple[int, ...]] | None = None
+        self.last_logged_liveness_signature = None
+        self.bottom_heartbeat_step = 0
         self.last_rendered_feedback = ""
         self.last_rendered_debug_mode = False
         self.last_success_at = {definition.identifier: None for definition in self.definitions}
@@ -272,6 +361,9 @@ class RuntimeApp:
             log_field("id", definition.identifier),
             log_field("evt", event),
         ]
+        probe_type = fields.get("probe_type")
+        if probe_type is not None:
+            trace_fields.append(log_field("type", probe_type))
         if "stage" in fields:
             trace_fields.append(log_field("stage", fields["stage"]))
         target = fields.get("target")
@@ -279,6 +371,18 @@ class RuntimeApp:
             trace_fields.append(log_field("target", target))
         elif "remain_ms" in fields:
             trace_fields.append(log_field("remain_ms", fields["remain_ms"]))
+        if event == "probe-end":
+            if "status" in fields:
+                trace_fields.append(log_field("status", fields["status"]))
+            if fields.get("latency_ms") is not None:
+                trace_fields.append(log_field("lat_ms", f"{float(fields['latency_ms']):.1f}"))
+            for field_name, label in (("issued", "issued"), ("succeeded", "ok"), ("failed", "fail")):
+                if fields.get(field_name) is not None:
+                    trace_fields.append(log_field(label, int(fields[field_name])))
+        elif event == "probe-error":
+            for field_name, label in (("issued", "issued"), ("succeeded", "ok"), ("failed", "fail")):
+                if fields.get(field_name) is not None:
+                    trace_fields.append(log_field(label, int(fields[field_name])))
         self.logger.emit(level, "PROBE", event, tuple(trace_fields))
 
     def _pop_pending_probe_traces(self) -> tuple[tuple[CheckDefinition, str, dict[str, object]], ...]:
@@ -306,12 +410,14 @@ class RuntimeApp:
         display_state = self._display_state()
         reason = render_reason(self.last_rendered_state, display_state)
         feedback_text = self._overlay_feedback_text(now_s) or ""
+        liveness_signature = self._current_liveness_signature(now_s)
         if (
             reason == "none"
             and self.last_rendered_debug_mode == self.debug_mode
             and self.last_rendered_feedback == feedback_text
+            and self.last_rendered_liveness_signature == liveness_signature
         ):
-            return reason
+            return "none"
         if reason == "none":
             reason = "overlay"
         if self.display_retry_at_s is not None and now_s < self.display_retry_at_s:
@@ -323,6 +429,7 @@ class RuntimeApp:
         if frame == self.last_rendered_frame:
             self.last_rendered_state = display_state
             self.last_render_reason = "none"
+            self.last_rendered_liveness_signature = liveness_signature
             self.last_rendered_debug_mode = self.debug_mode
             self.last_rendered_feedback = feedback_text
             return "none"
@@ -336,16 +443,19 @@ class RuntimeApp:
             self.last_rendered_frame = frame
             self.last_render_at_s = now_s
             self.last_render_reason = reason
+            self.last_rendered_liveness_signature = liveness_signature
             self.last_rendered_debug_mode = self.debug_mode
             self.last_rendered_feedback = feedback_text
+            self._log_liveness_state(frame)
             self._log_display_propagation(now_s, reason)
         return reason
 
     def _display_state(self) -> AppState:
-        if self.visible_degraded:
-            return self.state
         display_checks = tuple(
-            replace(check, status=Status.FAIL) if check.status == Status.DEG else check
+            replace(
+                check,
+                status=Status.FAIL if (not self.visible_degraded and check.status == Status.DEG) else check.status,
+            )
             for check in self.state.checks
         )
         if display_checks == self.state.checks:
@@ -419,6 +529,8 @@ class RuntimeApp:
                     "target": definition.target,
                     "interval_s": definition.interval_s,
                     "timeout_s": definition.timeout_s,
+                    "last_started_s": self.last_started_at.get(definition.identifier),
+                    "last_completed_s": self.last_completed_at.get(definition.identifier),
                 }
             )
             items.append(current)
@@ -434,6 +546,8 @@ class RuntimeApp:
                 "latency_ms": check.latency_ms,
                 "last_update_s": check.last_update_s,
                 "last_success_s": self.last_success_at.get(check.identifier),
+                "last_started_s": self.last_started_at.get(check.identifier),
+                "last_completed_s": self.last_completed_at.get(check.identifier),
                 "last_error": self.last_error_by_check.get(check.identifier),
                 "source_identifier": check.source_identifier,
             }
@@ -571,11 +685,15 @@ class RuntimeApp:
         )
         summary_fields = [
             log_field("id", definition.identifier),
+            log_field("type", _enum_text(definition.check_type)),
+            log_field("target", _target_summary(definition)),
             log_field("status", status),
             log_field("dur_ms", f"{duration_ms:.1f}"),
         ]
         if latency_ms is not None:
             summary_fields.append(log_field("lat_ms", f"{float(latency_ms):.1f}"))
+        summary_fields.append(log_field("manual", manual))
+        summary_fields.append(log_field("detail", details))
         if emit_summary:
             self.logger.info("CHECK", "run", tuple(summary_fields))
 
@@ -590,6 +708,8 @@ class RuntimeApp:
                 "failure",
                 (
                     log_field("id", definition.identifier),
+                    log_field("type", _enum_text(definition.check_type)),
+                    log_field("target", _target_summary(definition)),
                     log_field("status", status),
                     log_field("detail", details),
                     log_field("manual", manual),
@@ -784,19 +904,39 @@ class RuntimeApp:
                     button = Button(button)
                 except ValueError:
                     button = event.button
+            self.logger.info(
+                "BTN",
+                "press",
+                (
+                    log_field("button", _button_text(button)),
+                    log_field("held_ms", event.held_ms),
+                    log_field("mode", _enum_text(self.state.mode)),
+                    log_field("selected", self.state.selected_id or "-"),
+                ),
+            )
             previous_mode = self.state.mode
             previous_selection = self.state.selected_id
             self.state = self.input_controller.apply(self.state, button, held_ms=event.held_ms)
             if button in (Button.A, Button.B):
                 self._set_press_feedback(button, now_s)
             if self.state.mode == previous_mode and self.state.selected_id == previous_selection:
+                self.logger.debug(
+                    "BTN",
+                    "noop",
+                    (
+                        log_field("button", _button_text(button)),
+                        log_field("mode", _enum_text(self.state.mode)),
+                        log_field("selected", self.state.selected_id or "-"),
+                    ),
+                )
                 continue
             self.logger.info(
-                "BTN",
+                "NAV",
                 "action",
                 (
                     log_field("button", _button_text(button)),
                     log_field("held_ms", event.held_ms),
+                    log_field("from", _enum_text(previous_mode)),
                     log_field("mode", _enum_text(self.state.mode)),
                     log_field("selected", self.state.selected_id or "-"),
                 ),
@@ -839,6 +979,12 @@ class RuntimeApp:
 
     def _probe_now_s(self) -> float:
         return float(self.probe_time_provider())
+
+    def _event_now_s(self, fallback_now_s: float) -> float:
+        current_now_s = self.current_time_s()
+        if current_now_s is None:
+            return float(fallback_now_s)
+        return float(current_now_s)
 
     def _wait_for_probe_slot(self, definition: CheckDefinition):
         if self._background_enabled():
@@ -884,7 +1030,7 @@ class RuntimeApp:
     def _execute_check_once(self, definition: CheckDefinition, now_s: float, manual: bool = False) -> CompletedCheckRun:
         waited_ms = self._wait_for_probe_slot(definition)
         host_key = probe_host_key(definition) or "-"
-        started_now_s = now_s if manual else (self.current_time_s() or now_s)
+        started_now_s = float(now_s) if manual else self._event_now_s(now_s)
         started_at, timer_kind = start_timer()
         self.logger.debug(
             "CHECK",
@@ -909,6 +1055,7 @@ class RuntimeApp:
             result = self.executor(definition, started_now_s)
         except Exception as error:
             duration_ms = elapsed_ms(started_at, timer_kind)
+            completed_at_s = started_now_s if manual else max(started_now_s, self._event_now_s(started_now_s))
             self._mark_probe_complete(definition)
             self.logger.debug(
                 "CHECK",
@@ -922,13 +1069,15 @@ class RuntimeApp:
             )
             return CompletedCheckRun(
                 definition=definition,
-                observed_at_s=started_now_s,
+                started_at_s=started_now_s,
+                completed_at_s=completed_at_s,
                 duration_ms=duration_ms,
                 manual=manual,
                 error=error,
             )
 
         duration_ms = elapsed_ms(started_at, timer_kind)
+        completed_at_s = started_now_s if manual else max(started_now_s, self._event_now_s(started_now_s))
         self._mark_probe_complete(definition)
         status = "?"
         if result.observations:
@@ -945,7 +1094,8 @@ class RuntimeApp:
         )
         return CompletedCheckRun(
             definition=definition,
-            observed_at_s=started_now_s,
+            started_at_s=started_now_s,
+            completed_at_s=completed_at_s,
             duration_ms=duration_ms,
             manual=manual,
             result=result,
@@ -954,6 +1104,9 @@ class RuntimeApp:
     def _apply_completed_check(self, completed: CompletedCheckRun):
         definition = completed.definition
         previous_status = self.registered_results.get(definition.identifier, {}).get("status")
+        self.last_completed_at[definition.identifier] = completed.completed_at_s
+        if self.display_liveness["bottom_heartbeat"].get("enabled"):
+            self.bottom_heartbeat_step += 1
         if completed.error is not None:
             self.metrics.record_check(definition.identifier, completed.duration_ms, None)
             self.registered_results[definition.identifier] = {
@@ -962,7 +1115,7 @@ class RuntimeApp:
                 "status": "FAIL",
                 "details": "executor exception",
                 "latency_ms": None,
-                "last_update_s": completed.observed_at_s,
+                "last_update_s": completed.completed_at_s,
                 "last_success_s": self.last_success_at.get(definition.identifier),
                 "last_error": str(completed.error) or type(completed.error).__name__,
             }
@@ -974,15 +1127,15 @@ class RuntimeApp:
                         name=definition.name,
                         status=Status.FAIL,
                         details="executor exception",
-                        observed_at_s=completed.observed_at_s,
+                        observed_at_s=completed.completed_at_s,
                         source_identifier=definition.identifier,
                     ),
                 ),
                 thresholds=self.transition_thresholds,
                 replace_source_identifier=definition.identifier if _enum_text(definition.check_type) == "SERVICE" else None,
             )
-            self._record_exception("check", completed.error, observed_at_s=completed.observed_at_s, identifier=definition.identifier)
-            self._track_status_transition(definition.identifier, previous_status, "FAIL", completed.observed_at_s)
+            self._record_exception("check", completed.error, observed_at_s=completed.completed_at_s, identifier=definition.identifier)
+            self._track_status_transition(definition.identifier, previous_status, "FAIL", completed.completed_at_s)
             return None
 
         result = completed.result
@@ -999,12 +1152,15 @@ class RuntimeApp:
             definition.identifier,
             previous_status,
             self.registered_results.get(definition.identifier, {}).get("status"),
-            completed.observed_at_s,
+            completed.completed_at_s,
         )
         return result
 
     def _run_check(self, definition: CheckDefinition, now_s: float, manual: bool = False):
-        return self._apply_completed_check(self._execute_check_once(definition, now_s, manual=manual))
+        completed = self._execute_check_once(definition, now_s, manual=manual)
+        result = self._apply_completed_check(completed)
+        self._render_probe_progress(completed.completed_at_s)
+        return result
 
     def _background_worker(self, worker_key: str):
         while True:
@@ -1085,6 +1241,12 @@ class RuntimeApp:
     def _drain_completed_checks(self):
         for completed in self._pop_completed_checks():
             self._apply_completed_check(completed)
+            self._render_probe_progress(completed.completed_at_s)
+
+    def _render_probe_progress(self, now_s: float):
+        if not self.display_liveness["bottom_heartbeat"].get("enabled"):
+            return
+        self.render_once(float(now_s))
 
     def _run_due_checks(self, now_s: float):
         # Hot path: keep metrics on every execution but only log state transitions.
@@ -1123,7 +1285,9 @@ class RuntimeApp:
 
     def reset_runtime_state(self):
         self.last_started_at.clear()
+        self.last_completed_at.clear()
         self.last_completed_at_by_host.clear()
+        self.bottom_heartbeat_step = 0
         if self._background_enabled():
             lock_acquired = _lock_context(self.background_lock)
             try:
@@ -1161,6 +1325,8 @@ class RuntimeApp:
         self.display_retry_at_s = None
         self.feedback_message = ""
         self.feedback_until_s = None
+        self.last_rendered_liveness_signature = None
+        self.last_logged_liveness_signature = None
         self.last_rendered_feedback = ""
         self.last_rendered_debug_mode = False
         self.pending_status_updates.clear()
@@ -1266,6 +1432,28 @@ class RuntimeApp:
             self._pad_row(f"NET:{network_text} RF:{len(self.pending_status_updates)}"),
         )
 
+    def _frame_contrast(self, now_s: float) -> int | None:
+        return None
+
+    def _frame_bottom_pixels(self, now_s: float) -> tuple[int, ...]:
+        config = self.display_liveness["bottom_heartbeat"]
+        if not config.get("enabled"):
+            return ()
+        display_width_px = int(getattr(self.display, "width", self.state.row_width * 8))
+        return bottom_heartbeat_pixels(
+            display_width_px,
+            int(config.get("pixel_count", 1)),
+            str(config.get("position", "left")),
+            step_index=self.bottom_heartbeat_step,
+            step_px=1,
+        )
+
+    def _current_liveness_signature(self, now_s: float) -> tuple[int | None, tuple[int, ...]]:
+        return (
+            self._frame_contrast(now_s),
+            tuple(int(pixel_x) for pixel_x in self._frame_bottom_pixels(now_s)),
+        )
+
     def _decorate_frame(self, frame, now_s: float):
         rows = list(frame.rows)
         if self.debug_mode and rows:
@@ -1277,7 +1465,37 @@ class RuntimeApp:
         feedback = self._overlay_feedback_text(now_s)
         if feedback and rows:
             rows[-1] = self._pad_row(feedback)
-        return replace(frame, rows=tuple(rows))
+        return replace(
+            frame,
+            rows=tuple(rows),
+            bottom_pixels=self._frame_bottom_pixels(now_s),
+            contrast=self._frame_contrast(now_s),
+        )
+
+    def _liveness_signature(self, frame) -> tuple[int | None, tuple[int, ...]]:
+        return (
+            getattr(frame, "contrast", None),
+            tuple(int(pixel_x) for pixel_x in getattr(frame, "bottom_pixels", ())),
+        )
+
+    def _log_liveness_state(self, frame):
+        signature = self._liveness_signature(frame)
+        if signature == self.last_logged_liveness_signature:
+            return
+        self.last_logged_liveness_signature = signature
+
+        contrast, heartbeat_pixels = signature
+        if contrast is None and not heartbeat_pixels:
+            return
+
+        self.logger.info(
+            "DISP",
+            "liveness",
+            (
+                log_field("contrast", "-" if contrast is None else int(contrast)),
+                log_field("heartbeat", "off" if not heartbeat_pixels else ",".join(str(pixel_x) for pixel_x in heartbeat_pixels)),
+            ),
+        )
 
     def _track_status_transition(self, identifier: str, previous_status: object, current_status: object, observed_at_s: float | None):
         previous = "?" if previous_status is None else str(previous_status)
@@ -1356,13 +1574,14 @@ class RuntimeApp:
         self._drain_probe_traces()
         self._drain_completed_checks()
         self._drain_probe_traces()
-        self._apply_page_rotation(now_s)
-        self._apply_shift(now_s)
+        frame_now_s = self.current_time_s() or now_s
+        self._apply_page_rotation(frame_now_s)
+        self._apply_shift(frame_now_s)
 
-        reason = self.render_once(now_s)
+        reason = self.render_once(frame_now_s)
 
         self.last_cycle_ms = elapsed_ms(cycle_started, cycle_timer_kind)
         self.metrics.record_cycle(self.last_cycle_ms)
-        self._maybe_capture_memory_snapshot(now_s)
+        self._maybe_capture_memory_snapshot(frame_now_s)
         self._assert_debug_invariants()
         return reason

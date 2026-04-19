@@ -33,10 +33,12 @@ TELNET_DONT = 254
 TELNET_DO = 253
 TELNET_WONT = 252
 TELNET_WILL = 251
-TELNET_IDLE_TIMEOUT_S = 0.20
+TELNET_IDLE_TIMEOUT_S = 0.12
+TELNET_POST_DATA_IDLE_TIMEOUT_S = 0.02
 TELNET_MAX_EMPTY_READS = 1
 TELNET_SB = 250
 TELNET_SE = 240
+TELNET_FAILURE_SCAN_TAIL_BYTES = max(len(marker) for marker in TELNET_FAILURE_MARKERS)
 POLLIN = getattr(select, "POLLIN", 0x0001)
 POLLOUT = getattr(select, "POLLOUT", 0x0004)
 POLLERR = getattr(select, "POLLERR", 0x0008)
@@ -107,6 +109,65 @@ def _emit_probe_trace(trace, event: str, **fields):
     if trace is None:
         return
     trace(event, **fields)
+
+
+def _check_type_name(definition: CheckDefinition) -> str:
+    candidate = getattr(definition.check_type, "value", None)
+    if isinstance(candidate, str) and candidate and candidate != "<property>":
+        return candidate.strip().upper()
+    name = getattr(definition.check_type, "name", None)
+    if isinstance(name, str) and name:
+        return name.strip().upper()
+    return str(definition.check_type).strip().upper() or "UNKNOWN"
+
+
+def _status_text(value: object) -> str:
+    candidate = getattr(value, "value", None)
+    if isinstance(candidate, str) and candidate and candidate != "<property>":
+        return candidate
+    name = getattr(value, "name", None)
+    if isinstance(name, str) and name:
+        return name
+    return str(value)
+
+
+def _probe_end_status(definition: CheckDefinition, result) -> str:
+    for observation in getattr(result, "observations", ()):
+        if getattr(observation, "identifier", None) == definition.identifier:
+            return _status_text(getattr(observation, "status", "?"))
+    if definition.check_type == CheckType.SERVICE:
+        return "OK"
+    observations = getattr(result, "observations", ())
+    if observations:
+        return _status_text(getattr(observations[0], "status", "?"))
+    return "?"
+
+
+def _probe_end_detail(definition: CheckDefinition, result) -> str:
+    for observation in getattr(result, "observations", ()):
+        if getattr(observation, "identifier", None) == definition.identifier:
+            return str(getattr(observation, "details", "") or "")
+    if definition.check_type == CheckType.SERVICE:
+        return ""
+    observations = getattr(result, "observations", ())
+    if observations:
+        return str(getattr(observations[0], "details", "") or "")
+    return ""
+
+
+def _probe_end_latency_ms(definition: CheckDefinition, result):
+    probe_latency_ms = getattr(result, "probe_latency_ms", None)
+    if probe_latency_ms is not None:
+        return probe_latency_ms
+    for observation in getattr(result, "observations", ()):
+        if getattr(observation, "identifier", None) == definition.identifier:
+            return getattr(observation, "latency_ms", None)
+    if definition.check_type == CheckType.SERVICE:
+        return None
+    observations = getattr(result, "observations", ())
+    if observations:
+        return getattr(observations[0], "latency_ms", None)
+    return None
 
 
 def _format_socket_address(address) -> str:
@@ -823,10 +884,24 @@ def _telnet_collect_visible(handle, chunk: bytes, trace=None) -> bytes:
     return bytes(visible)
 
 
-def _read_telnet_until_idle(handle, *, max_empty_reads: int = TELNET_MAX_EMPTY_READS, trace=None) -> bytes:
-    visible = bytearray()
+def _read_telnet_until_idle(
+    handle,
+    *,
+    max_empty_reads: int = TELNET_MAX_EMPTY_READS,
+    initial_timeout_s: float = TELNET_IDLE_TIMEOUT_S,
+    quiet_timeout_s: float = TELNET_POST_DATA_IDLE_TIMEOUT_S,
+    trace=None,
+) -> tuple[int, bool]:
+    visible_bytes = 0
+    has_visible_text = False
+    pending_trailing_whitespace = 0
+    failure_window = bytearray()
     empty_reads = 0
-    while empty_reads < max_empty_reads:
+    saw_data = False
+    while True:
+        if empty_reads >= max_empty_reads:
+            break
+        _set_socket_timeout(handle, quiet_timeout_s if saw_data else initial_timeout_s)
         try:
             chunk = handle.recv(4096)
         except TimeoutError:
@@ -841,13 +916,29 @@ def _read_telnet_until_idle(handle, *, max_empty_reads: int = TELNET_MAX_EMPTY_R
             _emit_probe_trace(trace, "socket-recv", stage="telnet-recv", bytes_received=len(chunk))
         if not chunk:
             break
+        saw_data = True
         empty_reads = 0
-        visible.extend(_telnet_collect_visible(handle, chunk, trace=trace))
-    payload = bytes(visible)
-    text = payload.decode("utf-8", "ignore").strip()
-    if text and any(marker.decode("utf-8") in text.lower() for marker in TELNET_FAILURE_MARKERS):
-        raise RuntimeError("telnet failure marker present")
-    return payload
+        visible = _telnet_collect_visible(handle, chunk, trace=trace)
+        if not visible:
+            continue
+        failure_window.extend(visible.lower())
+        if any(marker in failure_window for marker in TELNET_FAILURE_MARKERS):
+            raise RuntimeError("telnet failure marker present")
+        if len(failure_window) > TELNET_FAILURE_SCAN_TAIL_BYTES:
+            failure_window = bytearray(failure_window[-TELNET_FAILURE_SCAN_TAIL_BYTES:])
+        if not has_visible_text:
+            visible = visible.lstrip()
+            if not visible:
+                continue
+            has_visible_text = True
+        trailing_whitespace = len(visible) - len(visible.rstrip())
+        body_length = len(visible) - trailing_whitespace
+        if body_length:
+            visible_bytes += pending_trailing_whitespace + body_length
+            pending_trailing_whitespace = trailing_whitespace
+        else:
+            pending_trailing_whitespace += len(visible)
+    return (visible_bytes, has_visible_text)
 
 
 def portable_telnet_runner(target: str, timeout_s: int, username: str | None = None, password: str | None = None, trace=None) -> PingProbeResult:
@@ -858,12 +949,11 @@ def portable_telnet_runner(target: str, timeout_s: int, username: str | None = N
         handle = None
         try:
             handle = socket.create_connection((host, port), timeout=timeout_s)
-            handle.settimeout(TELNET_IDLE_TIMEOUT_S)
-            text = _read_telnet_until_idle(handle).decode("utf-8", "ignore").strip()
+            visible_bytes, has_visible_text = _read_telnet_until_idle(handle)
             return PingProbeResult(
                 ok=True,
                 latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
-                details=(f"visible_bytes={len(text.encode())}" if text else "connected"),
+                details=(f"visible_bytes={visible_bytes}" if has_visible_text else "connected"),
             )
         except Exception as error:
             if handle is not None and _is_telnet_post_connect_success(error):
@@ -885,13 +975,11 @@ def portable_telnet_runner(target: str, timeout_s: int, username: str | None = N
     try:
         deadline = _deadline_after_s(timeout_s)
         handle = _open_socket_compat(host, port, timeout_s, deadline, trace=trace)
-        if hasattr(handle, "settimeout"):
-            handle.settimeout(TELNET_IDLE_TIMEOUT_S)
-        text = _read_telnet_until_idle(handle, trace=trace).decode("utf-8", "ignore").strip()
+        visible_bytes, has_visible_text = _read_telnet_until_idle(handle, trace=trace)
         return PingProbeResult(
             ok=True,
             latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
-            details=(f"visible_bytes={len(text.encode())}" if text else "connected"),
+            details=(f"visible_bytes={visible_bytes}" if has_visible_text else "connected"),
         )
     except Exception as error:
         if handle is not None and _is_telnet_post_connect_success(error):
@@ -985,6 +1073,16 @@ def _portable_http_runner_socket(method: str, target: str, timeout_s: int, trace
 
 
 def build_executor(ping_runner=None, http_runner=None, ftp_runner=None, telnet_runner=None, trace_sink=None):
+    probe_counts_by_type: dict[str, dict[str, int]] = {}
+
+    def _type_counts_for(definition: CheckDefinition) -> dict[str, int]:
+        type_name = _check_type_name(definition)
+        counts = probe_counts_by_type.get(type_name)
+        if counts is None:
+            counts = {"issued": 0, "succeeded": 0, "failed": 0}
+            probe_counts_by_type[type_name] = counts
+        return counts
+
     if ping_runner is None:
         def ping(target: str, timeout_s: int, trace=None):
             return portable_ping_runner(target, timeout_s)
@@ -1016,6 +1114,8 @@ def build_executor(ping_runner=None, http_runner=None, ftp_runner=None, telnet_r
             return telnet_runner(target, timeout_s, username=username, password=password)
 
     def executor(definition: CheckDefinition, now_s: float):
+        counts = _type_counts_for(definition)
+        counts["issued"] += 1
         trace = None
         if trace_sink is not None:
             def trace(event, **fields):
@@ -1051,18 +1151,34 @@ def build_executor(ping_runner=None, http_runner=None, ftp_runner=None, telnet_r
                 ),
             )
         except Exception as error:
+            counts["failed"] += 1
             if trace is not None:
-                trace("probe-error", detail=_normalize_error_text(error))
+                trace(
+                    "probe-error",
+                    detail=_normalize_error_text(error),
+                    probe_type=_check_type_name(definition),
+                    issued=counts["issued"],
+                    succeeded=counts["succeeded"],
+                    failed=counts["failed"],
+                )
             raise
+        status = _probe_end_status(definition, result)
+        if status == "OK":
+            counts["succeeded"] += 1
+        else:
+            counts["failed"] += 1
         if trace is not None:
-            observation = result.observations[0] if result.observations else None
             trace(
                 "probe-end",
-                status=getattr(getattr(observation, "status", None), "value", getattr(observation, "status", "?")),
-                detail=getattr(observation, "details", "") if observation is not None else "",
-                latency_ms=getattr(observation, "latency_ms", None) if observation is not None else None,
+                status=status,
+                detail=_probe_end_detail(definition, result),
+                latency_ms=_probe_end_latency_ms(definition, result),
                 observations=len(result.observations),
                 replace_source=result.replace_source,
+                probe_type=_check_type_name(definition),
+                issued=counts["issued"],
+                succeeded=counts["succeeded"],
+                failed=counts["failed"],
             )
         return result
 

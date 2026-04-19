@@ -68,6 +68,9 @@ Display brightness MUST be configurable at build time for display types that sup
 - LCD backlight PWM range: 0 to 255
 - Default brightness: medium
 - E-paper display types do not expose brightness control
+- `device.display.liveness` MAY configure an optional bottom-row device-health indicator
+- When enabled on the default OLED overview, the bottom heartbeat SHOULD use a single pixel that advances by one pixel for each completed probe
+- If `device.display.liveness` is omitted, all liveness indicators MUST default to disabled
 
 [VIVIPI-DISPLAY-002]
 
@@ -105,7 +108,7 @@ Each row represents exactly one check.
 
 Format per row:
 
-    <NAME........><STATUS>
+  <NAME.......> <STATUS>
 
 Rules:
 
@@ -117,10 +120,10 @@ Rules:
 
 Example:
 
-    ROUTER        OK
-    NAS           OK
-    BACKUP        DEG
-    API           FAIL
+  ROUTER        OK
+  NAS           OK
+  BACKUP       DEG
+  API         FAIL
 
 [VIVIPI-UX-GRID-001]
 
@@ -319,8 +322,8 @@ Thresholds MUST be configurable.
 
 ## 7. Polling & Timing
 
-- Default interval: 7 seconds (configurable)
-- Timeout: 5 seconds (configurable)
+- Default interval: 10 seconds (configurable)
+- Timeout: 8 seconds (configurable)
 
 Constraint:
 
@@ -333,7 +336,7 @@ Timeout is treated as FAIL.
 Probe pacing against the same device MUST be configurable and deterministic.
 
 - Same-device identity is derived from the normalized target host name or IP address.
-- Checks against different devices MAY run concurrently.
+- On-device direct probes MUST execute without overlap.
 - Concurrent probes against the same device MUST default to disabled.
 - The minimum time between the end of one probe and the start of the next probe against the same device MUST default to 250ms.
 - Same-device concurrency and backoff MUST both be configurable from settings.
@@ -470,12 +473,17 @@ Redraw only when:
 
 - state changes
 - pixel shift occurs
+- bottom-row heartbeat progress occurs
 
 Rendering must be:
 
 - deterministic
 - flicker-free
 - stable
+- visually static while probes are healthy
+- Bottom-row heartbeat MAY move a 1 to 3 pixel cluster along the unused bottom scanline without altering layout or text.
+- When enabled, the bottom-row heartbeat MUST advance left-to-right and wrap back to the left after reaching the final slot.
+- Bottom-row heartbeat progress MUST be driven by completed probes so continued movement proves the runtime is still issuing probes.
 
 [VIVIPI-RENDER-001]
 
@@ -483,7 +491,7 @@ Rendering must be:
 
 ## 14. Burn-In Prevention
 
-Global framebuffer shift every 30–60 seconds:
+Global framebuffer shift every 120–300 seconds:
 
   (0,0)
   (1,0)
@@ -516,7 +524,7 @@ System MUST include:
 
 ## 16. Boot Logo
 
-On device startup, the display MUST show a boot logo for at least 6 seconds by default.
+On device startup, the display MUST show a boot logo for 4 seconds before the first overview frame replaces it.
 
 Layout:
 
@@ -538,10 +546,8 @@ Font sizing:
 
 The boot logo is shown before the first overview frame replaces it.
 
-- WiFi connection and initial probe scheduling MAY begin while the boot logo remains visible.
-- The first post-logo overview frame SHOULD include any completed initial probe results instead of an all-unknown placeholder view.
-
-Boot duration MUST be configurable from settings.
+- WiFi connection MAY begin while the boot logo remains visible.
+- After the 4-second boot-logo interval, the firmware proceeds with startup checks and the first overview frame.
 
 [VIVIPI-BOOT-001]
 
@@ -617,10 +623,16 @@ The build time is recorded at firmware build time in UTC.
 Runtime observability MUST provide structured, bounded, machine-parseable logs.
 
 - Supported levels: `DEBUG`, `INFO`, `WARN`, `ERROR`
+- Every line MUST be prefixed with `[vivipi]`
 - Every line MUST include a component tag
 - Log records MUST be retained in a fixed-size in-memory ring buffer
+- Runtime logs MUST continue to emit to the local serial/REPL sink and MAY additionally mirror to a configured UDP syslog sink without changing primary runtime behavior
+- When syslog mirroring is enabled but unavailable, the device MUST emit at most one bounded warning about syslog unavailability while continuing to retry later deliveries
 - Hot paths MUST avoid per-iteration debug spam and MUST keep repeated healthy-check summaries sampled and bounded
 - Unhealthy checks MUST log a summary plus additional bounded failure detail
+- Every completed probe attempt MUST emit a concise summary including the check identity, type, target, status, and timing details
+- Probe-end logs MUST include the probe latency in milliseconds plus per-check-type issued, succeeded, and failed counters that reset on device restart
+- Button presses and resulting navigation transitions MUST be logged as distinct bounded events
 
 [VIVIPI-OBS-001]
 
@@ -632,6 +644,7 @@ Critical runtime state MUST be inspectable through REPL-safe APIs.
 - Network state
 - Retained logs
 - Retained errors
+- Effective syslog configuration and delivery behavior MUST remain diagnosable from retained logs even when the remote sink is unavailable
 
 [VIVIPI-OBS-002]
 

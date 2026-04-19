@@ -16,7 +16,21 @@ device:
     columns: 1
     column_separator: " "
     page_interval: 15s
-    boot_logo_duration: 2s
+    boot_logo_duration: 4s
+    liveness:
+      contrast_breathing:
+        enabled: false
+        period_s: 30
+        amplitude: 16
+      per_row_micro:
+        enabled: false
+        period_s: 15
+        stagger: true
+      bottom_heartbeat:
+        enabled: true
+        period_s: 1
+        pixel_count: 1
+        position: left
 
 wifi:
   ssid: ${VIVIPI_WIFI_SSID}
@@ -25,6 +39,8 @@ wifi:
 service:
   base_url: ${VIVIPI_SERVICE_BASE_URL}
   default_prefix: adb
+  syslog:
+    port: 514
 
 check_state:
   failures_to_degraded: 1
@@ -33,7 +49,9 @@ check_state:
   visible_degraded: false
 
 probe_schedule:
+  allow_concurrent_hosts: false
   allow_concurrent_same_host: false
   same_host_backoff_ms: 500
+  interval_grace_ms: 1000
 
 checks_config: checks.yaml

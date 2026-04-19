@@ -10,12 +10,9 @@ See your device health at a glance.
 
 ViviPi (pronounced "VEE-vee-pie", from the Latin *viv-* in *vivere*, "to live") is a minimal, glanceable monitoring system for Raspberry Pi Pico display modules. The default target is a Pico 2W with a 128x64 SH1107 OLED, but the runtime and build pipeline also support Waveshare Pico OLED, LCD, and e-paper modules.
 
-> [!NOTE]
-> This project is under active development. Some documented features may not yet be fully functional.
-
 ## Features
 
-- Supports Pico OLED, LCD, and e-paper modules.
+- Display support includes Pico OLED, LCD, and e-paper modules; verified on the Waveshare Pico OLED 1.3.
 - Supports `PING`, `HTTP`, `FTP`, `TELNET`, and `SERVICE` health checks.
 - Configurable back-off and scheduling policies to avoid overwhelming targets.
 - Easy build and deployment via a one-stop shop `build` command.
@@ -62,6 +59,16 @@ flowchart TB
 ```
 
 Direct probes run from the Pico itself. `SERVICE` is the extension point for any kind of check driven not by the Pico, but by another device.
+
+### Probe Freshness Verification
+
+Each standard overview row ends with a dedicated freshness cell to the right of the status text.
+
+- A full white bar means the latest scheduled probe completed on time.
+- Shorter bars mean one or more probe intervals were missed.
+- A single sentinel pixel means the probe is fully overdue.
+
+The bottom scanline shows a 3-pixel health indicator that moves from left to right and then wraps back to the left. It advances when a probe completes, so continued movement means the device is healthy and still issuing probes.
 
 ### Probe Reference
 

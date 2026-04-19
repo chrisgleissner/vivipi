@@ -14,9 +14,14 @@ from vivipi.runtime import ButtonEvent, RuntimeApp
 class FakeDisplay:
     def __init__(self):
         self.frames = []
+        self.width = 128
+        self.contrast = 128
 
     def draw_frame(self, frame):
         self.frames.append(frame)
+
+    def set_contrast(self, value):
+        self.contrast = int(value)
 
 
 def make_definition(identifier: str, check_type: CheckType = CheckType.PING) -> CheckDefinition:
@@ -44,9 +49,41 @@ def test_runtime_app_renders_on_bootstrap_and_skips_identical_ticks():
 
 def test_runtime_app_render_once_returns_boot_logo_before_first_frame():
     app = RuntimeApp(definitions=(), executor=lambda definition, now_s: None, display=FakeDisplay())
-    app.boot_logo_until_s = 5.0
+    app.boot_logo_until_s = 4.0
 
     assert app.render_once(1.0) == "boot-logo"
+
+
+def test_runtime_app_first_tick_uses_fresh_time_after_slow_startup_work_to_expire_boot_logo():
+    display = FakeDisplay()
+    definition = make_definition("router")
+
+    def executor(check_definition, now_s):
+        return CheckExecutionResult(
+            source_identifier=check_definition.identifier,
+            observations=(
+                CheckObservation(
+                    identifier=check_definition.identifier,
+                    name=check_definition.name,
+                    status=Status.OK,
+                    details="reachable",
+                    observed_at_s=now_s,
+                ),
+            ),
+        )
+
+    app = RuntimeApp(
+        definitions=(definition,),
+        executor=executor,
+        display=display,
+    )
+    app.boot_logo_until_s = 4.0
+    app.now_provider = lambda: 6.0
+
+    reason = app.tick(0.0)
+
+    assert reason == "bootstrap"
+    assert len(display.frames) == 1
 
 
 def test_runtime_app_executes_due_checks_and_updates_state():
@@ -134,6 +171,36 @@ def test_runtime_app_executor_exception_replaces_previous_ok_state_on_display():
     assert app.state.checks[0].status == Status.DEG
     assert app.state.checks[0].details == "executor exception"
     assert app.get_registered_checks()[0]["status"] == "FAIL"
+
+
+def test_runtime_app_helper_parsers_cover_fallbacks_and_display_liveness_validation():
+    assert runtime_app_module._enum_text(SimpleNamespace(value="<property>", name="PING")) == "PING"
+    assert runtime_app_module._button_text(SimpleNamespace(value="B")) == "B"
+    assert runtime_app_module._coerce_bool("on", False) is True
+    assert runtime_app_module._coerce_bool("off", True) is False
+
+    normalized = runtime_app_module._normalize_display_liveness(
+        {
+            "contrast_breathing": {"enabled": "yes", "period_s": 30, "amplitude": 16},
+            "per_row_micro": {"enabled": "no", "period_s": 15, "stagger": "off"},
+            "bottom_heartbeat": {"enabled": "1", "period_s": 2, "pixel_count": 3, "position": "center"},
+        }
+    )
+
+    assert normalized == {
+        "contrast_breathing": {"enabled": True, "period_s": 30, "amplitude": 16},
+        "per_row_micro": {"enabled": False, "period_s": 15, "stagger": False},
+        "bottom_heartbeat": {"enabled": True, "period_s": 2, "pixel_count": 3, "position": "center"},
+    }
+
+    with pytest.raises(ValueError, match="display liveness settings must use boolean values"):
+        runtime_app_module._coerce_bool("maybe", True)
+
+    with pytest.raises(ValueError, match="display_liveness must be a mapping when provided"):
+        runtime_app_module._normalize_display_liveness([])
+
+    with pytest.raises(ValueError, match="display_liveness.contrast_breathing must be a mapping"):
+        runtime_app_module._normalize_display_liveness({"contrast_breathing": []})
 
 
 def test_runtime_app_applies_immediate_failure_thresholds_when_configured():
@@ -266,7 +333,7 @@ def test_runtime_app_starts_with_unknown_rows_before_the_first_check_runs():
 
     assert reason == "bootstrap"
     assert display.frames[-1].rows[0].startswith("Router")
-    assert display.frames[-1].rows[0].endswith("?")
+    assert display.frames[-1].rows[0].endswith(" ?")
 
 
 def test_runtime_app_renders_when_shift_changes_without_other_state_changes():
@@ -274,7 +341,7 @@ def test_runtime_app_renders_when_shift_changes_without_other_state_changes():
     app = RuntimeApp(definitions=(), executor=lambda definition, now_s: None, display=display)
 
     app.tick(0.0)
-    reason = app.tick(30.0)
+    reason = app.tick(180.0)
 
     assert reason == "shift"
     assert len(display.frames) == 2
@@ -632,7 +699,7 @@ def test_runtime_app_record_result_falls_back_to_first_observation_and_warns_for
     assert registered["status"] == "DEG"
     assert registered["details"] == "slow"
     assert registered["latency_ms"] == 12.0
-    assert any(line.startswith("[WARN][CHECK] failure") and "detail=slow" in line for line in app.get_logs())
+    assert any(line.startswith("[vivipi] [WARN][CHECK] failure") and "detail=slow" in line for line in app.get_logs())
 
 
 def test_runtime_app_network_operation_helpers_cover_sync_async_and_guard_paths(monkeypatch):
@@ -759,7 +826,8 @@ def test_runtime_app_background_worker_queue_controls_and_reset_paths(monkeypatc
         "_execute_check_once",
         lambda definition, now_s, manual=False: runtime_app_module.CompletedCheckRun(
             definition=definition,
-            observed_at_s=now_s,
+            started_at_s=now_s,
+            completed_at_s=now_s + 1.0,
             duration_ms=1.0,
             manual=manual,
             result=executor(definition, now_s),
@@ -782,7 +850,13 @@ def test_runtime_app_background_worker_queue_controls_and_reset_paths(monkeypatc
     app.inflight_check_ids.add(definition.identifier)
     app.pending_status_updates[definition.identifier] = {"status": "OK", "observed_at_s": 4.0}
     app.completed_checks.append(
-        runtime_app_module.CompletedCheckRun(definition=definition, observed_at_s=4.0, duration_ms=1.0, result=executor(definition, 4.0))
+        runtime_app_module.CompletedCheckRun(
+            definition=definition,
+            started_at_s=4.0,
+            completed_at_s=5.0,
+            duration_ms=1.0,
+            result=executor(definition, 4.0),
+        )
     )
 
     snapshot = app.reset_runtime_state()
@@ -815,6 +889,179 @@ def test_runtime_app_can_opt_into_cross_host_parallel_workers():
     assert app._worker_key(first) != app._worker_key(second)
 
 
+def test_runtime_app_ignores_contrast_breathing_configuration():
+    display = FakeDisplay()
+    app = RuntimeApp(
+        definitions=(),
+        executor=lambda definition, now_s: None,
+        display=display,
+        page_interval_s=0,
+        display_liveness={
+            "contrast_breathing": {"enabled": True, "period_s": 45, "amplitude": 8},
+        },
+    )
+
+    assert app.tick(0.0) == "bootstrap"
+    assert display.frames[-1].contrast is None
+    assert app.tick(0.4) == "none"
+    assert app.tick(1.0) == "none"
+    assert display.frames[-1].contrast is None
+
+
+def test_runtime_app_steady_state_fast_path_skips_rebuilding_identical_frames(monkeypatch):
+    display = FakeDisplay()
+    app = RuntimeApp(definitions=(), executor=lambda definition, now_s: None, display=display, page_interval_s=0)
+    render_calls = []
+    original_render_frame = runtime_app_module.render_frame
+
+    def tracked_render_frame(*args, **kwargs):
+        render_calls.append((args, kwargs))
+        return original_render_frame(*args, **kwargs)
+
+    monkeypatch.setattr(runtime_app_module, "render_frame", tracked_render_frame)
+
+    assert app.tick(0.0) == "bootstrap"
+    assert app.tick(1.0) == "none"
+
+    assert len(render_calls) == 1
+
+
+def test_runtime_app_advances_bottom_heartbeat_when_probes_complete():
+    app = RuntimeApp(
+        definitions=(),
+        executor=lambda definition, now_s: None,
+        display=FakeDisplay(),
+        page_interval_s=0,
+        display_liveness={
+            "bottom_heartbeat": {"enabled": True, "period_s": 1, "pixel_count": 3, "position": "left"},
+        },
+    )
+
+    app.bottom_heartbeat_step = 2
+
+    decorated = app._decorate_frame(
+        Frame(
+            rows=(" " * app.state.row_width,),
+        ),
+        now_s=14.0,
+    )
+
+    assert decorated.bottom_pixels == (2, 3, 4)
+
+
+def test_runtime_app_records_heartbeat_progress_from_completed_probes():
+    definition = make_definition("router")
+    result = CheckExecutionResult(
+        source_identifier=definition.identifier,
+        observations=(
+            CheckObservation(
+                identifier=definition.identifier,
+                name=definition.name,
+                status=Status.OK,
+                details="reachable",
+                observed_at_s=1.0,
+            ),
+        ),
+    )
+    app = RuntimeApp(
+        definitions=(definition,),
+        executor=lambda definition, now_s: None,
+        display=FakeDisplay(),
+        page_interval_s=0,
+        display_liveness={
+            "bottom_heartbeat": {"enabled": True, "period_s": 1, "pixel_count": 3, "position": "left"},
+        },
+    )
+
+    app._apply_completed_check(
+        runtime_app_module.CompletedCheckRun(
+            definition=definition,
+            started_at_s=0.0,
+            completed_at_s=1.0,
+            duration_ms=100.0,
+            result=result,
+        )
+    )
+
+    assert app.bottom_heartbeat_step == 1
+    assert app._frame_bottom_pixels(1.0) == (1, 2, 3)
+
+
+def test_execute_check_once_captures_fresh_start_and_completion_times_after_backoff(monkeypatch):
+    definition = make_definition("router", check_type=CheckType.HTTP)
+    clock = {"now": 10.0}
+    display = FakeDisplay()
+    observed = {}
+
+    def sleep_ms(value):
+        clock["now"] += value / 1000.0
+
+    def executor(check_definition, now_s):
+        observed["started"] = now_s
+        clock["now"] += 0.2
+        return CheckExecutionResult(
+            source_identifier=check_definition.identifier,
+            observations=(
+                CheckObservation(
+                    identifier=check_definition.identifier,
+                    name=check_definition.name,
+                    status=Status.OK,
+                    details="reachable",
+                    observed_at_s=now_s,
+                ),
+            ),
+        )
+
+    app = RuntimeApp(
+        definitions=(definition,),
+        executor=executor,
+        display=display,
+        page_interval_s=0,
+        sleep_ms=sleep_ms,
+        probe_time_provider=lambda: clock["now"],
+    )
+    app.now_provider = lambda: clock["now"]
+    app.last_completed_at_by_host["192.168.1.1"] = 9.9
+
+    completed = app._execute_check_once(definition, now_s=10.0)
+
+    assert observed["started"] == pytest.approx(10.15)
+    assert completed.started_at_s == pytest.approx(10.15)
+    assert completed.completed_at_s == pytest.approx(10.35)
+
+
+def test_runtime_app_logs_liveness_state_changes():
+    app = RuntimeApp(definitions=(), executor=lambda definition, now_s: None, display=FakeDisplay(), page_interval_s=0)
+
+    app._log_liveness_state(
+        Frame(
+            rows=(" " * app.state.row_width,),
+            bottom_pixels=(0,),
+            contrast=None,
+        )
+    )
+    app._log_liveness_state(
+        Frame(
+            rows=(" " * app.state.row_width,),
+            bottom_pixels=(1,),
+            contrast=None,
+        )
+    )
+    app._log_liveness_state(
+        Frame(
+            rows=(" " * app.state.row_width,),
+            bottom_pixels=(),
+            contrast=None,
+        )
+    )
+
+    liveness_logs = [line for line in app.get_logs() if line.startswith("[vivipi] [INFO][DISP] liveness")]
+
+    assert any("contrast=-" in line and "heartbeat=0" in line for line in liveness_logs)
+    assert any("contrast=-" in line and "heartbeat=1" in line for line in liveness_logs)
+    assert len(liveness_logs) == 2
+
+
 def test_runtime_app_queues_probe_traces_from_background_workers_and_drains_them():
     definition = make_definition("router", check_type=CheckType.HTTP)
     app = RuntimeApp(definitions=(definition,), executor=lambda definition, now_s: None, display=FakeDisplay(), page_interval_s=0)
@@ -840,7 +1087,30 @@ def test_runtime_app_queues_probe_traces_from_background_workers_and_drains_them
     app._drain_probe_traces()
 
     assert app.pending_probe_traces == []
-    assert any(line.startswith("[INFO][PROBE] socket-open") and "id=router" in line for line in app.get_logs())
+    assert any(line.startswith("[vivipi] [INFO][PROBE] socket-open") and "id=router" in line for line in app.get_logs())
+
+
+def test_runtime_app_probe_end_logs_latency_and_type_counters():
+    app = RuntimeApp(
+        definitions=(make_definition("router", check_type=CheckType.PING),),
+        executor=lambda definition, now_s: None,
+        display=FakeDisplay(),
+    )
+
+    app._log_probe_trace(
+        app.definitions[0],
+        "probe-end",
+        {
+            "status": "OK",
+            "latency_ms": 12.0,
+            "probe_type": "PING",
+            "issued": 3,
+            "succeeded": 2,
+            "failed": 1,
+        },
+    )
+
+    assert app.get_logs(limit=1)[0] == "[vivipi] [INFO][PROBE] probe-end id=router evt=probe-end type=PING status=OK lat_ms=12.0 issued=3 ok=2 fail=1"
 
 
 def test_runtime_app_probe_trace_overlay_and_button_edge_paths_cover_remaining_branches():
@@ -929,7 +1199,7 @@ def test_runtime_app_manual_control_overlay_feedback_and_propagation_paths():
     assert app._feedback_text(7.1) is None
     assert app.pending_status_updates == {}
     assert app.state.page_index == 0
-    assert any(line.startswith("[INFO][DISP] propagation") for line in app.get_logs())
+    assert any(line.startswith("[vivipi] [INFO][DISP] propagation") for line in app.get_logs())
 
 
 def test_runtime_app_button_a_probe_slot_and_network_control_edge_paths(monkeypatch):
@@ -967,7 +1237,7 @@ def test_runtime_app_button_a_probe_slot_and_network_control_edge_paths(monkeypa
     assert reason == "bootstrap"
     assert app.state.selected_id == "switch"
     assert display.frames[-1].inverted_row == 1
-    assert any(line.startswith("[INFO][BTN] action") and "selected=switch" in line for line in app.get_logs())
+    assert any(line.startswith("[vivipi] [INFO][NAV] action") and "selected=switch" in line for line in app.get_logs())
 
     app.inject_diagnostics((), activate=False)
 

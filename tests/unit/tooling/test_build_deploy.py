@@ -83,6 +83,20 @@ checks:
                 "    columns: 1",
                 "    column_separator: ' '",
                 "    boot_logo_duration: 2s",
+                "    liveness:",
+                "      contrast_breathing:",
+                "        enabled: false",
+                "        period_s: 30",
+                "        amplitude: 16",
+                "      per_row_micro:",
+                "        enabled: false",
+                "        period_s: 15",
+                "        stagger: true",
+                "      bottom_heartbeat:",
+                "        enabled: true",
+                "        period_s: 1",
+                "        pixel_count: 1",
+                "        position: left",
                 "wifi:",
                 "  ssid: ${VIVIPI_WIFI_SSID}",
                 "  password: ${VIVIPI_WIFI_PASSWORD}",
@@ -94,8 +108,10 @@ checks:
                 "  successes_to_recover: 1",
                 "  visible_degraded: false",
                 "probe_schedule:",
+                "  allow_concurrent_hosts: false",
                 "  allow_concurrent_same_host: false",
                 "  same_host_backoff_ms: 250",
+                "  interval_grace_ms: 1000",
                 "checks_config: checks.yaml",
             ]
         ),
@@ -122,8 +138,16 @@ def test_load_build_deploy_settings_substitutes_environment_placeholders(tmp_pat
     assert settings["device"]["display"]["height_px"] == 64
     assert settings["device"]["display"]["font"] == {"width_px": 8, "height_px": 8}
     assert settings["device"]["display"]["page_interval_s"] == 15
-    assert settings["device"]["display"]["boot_logo_duration_s"] == 2
+    assert settings["device"]["display"]["boot_logo_duration_s"] == 4
     assert settings["device"]["display"]["brightness"] == 128
+    assert settings["device"]["display"]["liveness"]["contrast_breathing"] == {"enabled": False, "period_s": 30, "amplitude": 16}
+    assert settings["device"]["display"]["liveness"]["per_row_micro"] == {"enabled": False, "period_s": 15, "stagger": True}
+    assert settings["device"]["display"]["liveness"]["bottom_heartbeat"] == {
+        "enabled": True,
+        "period_s": 1,
+        "pixel_count": 1,
+        "position": "left",
+    }
     assert settings["device"]["display"]["mode"] == "standard"
     assert settings["device"]["display"]["columns"] == 1
     assert settings["device"]["display"]["column_separator"] == " "
@@ -133,6 +157,7 @@ def test_load_build_deploy_settings_substitutes_environment_placeholders(tmp_pat
         "allow_concurrent_hosts": False,
         "allow_concurrent_same_host": False,
         "same_host_backoff_ms": 250,
+        "interval_grace_ms": 1000,
     }
 
 
@@ -172,6 +197,8 @@ def test_write_runtime_config_embeds_wifi_and_checks(tmp_path: Path):
     assert rendered["check_state"]["failures_to_failed"] == 2
     assert rendered["check_state"]["visible_degraded"] is False
     assert rendered["probe_schedule"]["same_host_backoff_ms"] == 250
+    assert rendered["probe_schedule"]["interval_grace_ms"] == 1000
+    assert rendered["device"]["display"]["liveness"]["bottom_heartbeat"]["position"] == "left"
 
 
 def test_build_firmware_bundle_creates_a_releaseable_zip_archive(tmp_path: Path):
@@ -849,6 +876,7 @@ def test_render_device_runtime_config_serializes_probe_schedule():
         "probe_schedule": {
             "allow_concurrent_same_host": False,
             "same_host_backoff_ms": 250,
+            "interval_grace_ms": 1000,
         },
     }
     checks = (
@@ -865,6 +893,7 @@ def test_render_device_runtime_config_serializes_probe_schedule():
     assert rendered["probe_schedule"] == {
         "allow_concurrent_same_host": False,
         "same_host_backoff_ms": 250,
+        "interval_grace_ms": 1000,
     }
 
 
@@ -1358,7 +1387,10 @@ def test_wrap_with_dialout_returns_original_command_for_non_posix_and_non_member
 
 def test_load_build_deploy_settings_handles_missing_device_and_validates_probe_schedule(tmp_path: Path):
     config_path = tmp_path / "build-deploy.yaml"
-    config_path.write_text("probe_schedule:\n  allow_concurrent_same_host: on\n  same_host_backoff_ms: 0\n", encoding="utf-8")
+    config_path.write_text(
+        "probe_schedule:\n  allow_concurrent_same_host: on\n  same_host_backoff_ms: 0\n  interval_grace_ms: 1000\n",
+        encoding="utf-8",
+    )
 
     settings = load_build_deploy_settings(config_path, env={})
 
@@ -1366,6 +1398,7 @@ def test_load_build_deploy_settings_handles_missing_device_and_validates_probe_s
         "allow_concurrent_hosts": False,
         "allow_concurrent_same_host": True,
         "same_host_backoff_ms": 0,
+        "interval_grace_ms": 1000,
     }
 
     config_path.write_text("device: []\nprobe_schedule: []\n", encoding="utf-8")
@@ -1374,18 +1407,18 @@ def test_load_build_deploy_settings_handles_missing_device_and_validates_probe_s
         load_build_deploy_settings(config_path, env={})
 
     config_path.write_text(
-        "probe_schedule:\n  allow_concurrent_same_host: maybe\n  same_host_backoff_ms: -1\n",
+        "probe_schedule:\n  allow_concurrent_same_host: maybe\n  same_host_backoff_ms: -1\n  interval_grace_ms: 1200\n",
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="probe_schedule.same_host_backoff_ms|must be a boolean"):
+    with pytest.raises(ValueError, match="probe_schedule.same_host_backoff_ms|probe_schedule.interval_grace_ms|must be a boolean"):
         load_build_deploy_settings(config_path, env={})
 
 
 def test_load_build_deploy_settings_parses_false_probe_schedule_values(tmp_path: Path):
     config_path = tmp_path / "build-deploy.yaml"
     config_path.write_text(
-        "probe_schedule:\n  allow_concurrent_same_host: off\n  same_host_backoff_ms: 25\n",
+        "probe_schedule:\n  allow_concurrent_same_host: off\n  same_host_backoff_ms: 25\n  interval_grace_ms: 250\n",
         encoding="utf-8",
     )
 
@@ -1395,6 +1428,23 @@ def test_load_build_deploy_settings_parses_false_probe_schedule_values(tmp_path:
         "allow_concurrent_hosts": False,
         "allow_concurrent_same_host": False,
         "same_host_backoff_ms": 25,
+        "interval_grace_ms": 250,
+    }
+
+
+def test_load_build_deploy_settings_preserves_explicit_syslog_disable_without_host(tmp_path: Path):
+    config_path = tmp_path / "build-deploy.yaml"
+    config_path.write_text(
+        "service:\n  syslog:\n    enabled: false\n    port: 1514\n",
+        encoding="utf-8",
+    )
+
+    settings = load_build_deploy_settings(config_path, env={})
+
+    assert settings["service"]["syslog"] == {
+        "enabled": False,
+        "port": 1514,
+        "retry_interval_s": 5.0,
     }
 
 

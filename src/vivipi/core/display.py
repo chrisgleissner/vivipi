@@ -15,8 +15,9 @@ MIN_FONT_SIZE_PX = 6
 MAX_FONT_SIZE_PX = 32
 DEFAULT_FAILURE_COLOR = "red"
 DEFAULT_FONT_SIZE = "medium"
-DEFAULT_BOOT_LOGO_DURATION_S = 6
+DEFAULT_BOOT_LOGO_DURATION_S = 4
 DISPLAY_MODES = frozenset({"standard", "compact"})
+LIVENESS_POSITIONS = frozenset({"left", "center", "right"})
 BRIGHTNESS_PRESETS = {
     "low": 64,
     "medium": 128,
@@ -570,6 +571,144 @@ def _parse_failure_color(value: object) -> str:
     return normalized
 
 
+def _parse_bool(value: object, context: str, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = _fold(value)
+        if normalized in {"true", "yes", "1", "on"}:
+            return True
+        if normalized in {"false", "no", "0", "off"}:
+            return False
+    raise ValueError(f"{context} must be a boolean")
+
+
+def _parse_liveness_period_s(value: object, context: str, default: int) -> int:
+    seconds = _parse_duration_s(default if value is None else value, context)
+    if seconds < 1:
+        raise ValueError(f"{context} must be at least 1 second")
+    return seconds
+
+
+def _parse_liveness_amplitude(value: object, context: str, default: int) -> int:
+    amplitude = _parse_non_negative_int(value, context, default)
+    if amplitude > 255:
+        raise ValueError(f"{context} must be between 0 and 255")
+    return amplitude
+
+
+def _parse_bottom_pixel_count(value: object, context: str, default: int) -> int:
+    count = _parse_positive_int(default if value is None else value, context)
+    if count < 1 or count > 3:
+        raise ValueError(f"{context} must be between 1 and 3")
+    return count
+
+
+def _parse_liveness_position(value: object, context: str, default: str) -> str:
+    if value is None:
+        return default
+    if not isinstance(value, str):
+        raise ValueError(f"{context} must be one of: left, center, right")
+    normalized = _fold(value)
+    if normalized not in LIVENESS_POSITIONS:
+        raise ValueError(f"{context} must be one of: left, center, right")
+    return normalized
+
+
+def _parse_display_liveness(value: object) -> dict[str, object]:
+    if value is None:
+        raw = {}
+    elif isinstance(value, Mapping):
+        raw = dict(value)
+    else:
+        raise ValueError("device.display.liveness must be a mapping")
+
+    contrast_raw = raw.get("contrast_breathing")
+    if contrast_raw is None:
+        contrast = {}
+    elif isinstance(contrast_raw, Mapping):
+        contrast = dict(contrast_raw)
+    else:
+        raise ValueError("device.display.liveness.contrast_breathing must be a mapping")
+
+    per_row_raw = raw.get("per_row_micro")
+    if per_row_raw is None:
+        per_row = {}
+    elif isinstance(per_row_raw, Mapping):
+        per_row = dict(per_row_raw)
+    else:
+        raise ValueError("device.display.liveness.per_row_micro must be a mapping")
+
+    heartbeat_raw = raw.get("bottom_heartbeat")
+    if heartbeat_raw is None:
+        heartbeat = {}
+    elif isinstance(heartbeat_raw, Mapping):
+        heartbeat = dict(heartbeat_raw)
+    else:
+        raise ValueError("device.display.liveness.bottom_heartbeat must be a mapping")
+
+    return {
+        "contrast_breathing": {
+            "enabled": _parse_bool(
+                contrast.get("enabled"),
+                "device.display.liveness.contrast_breathing.enabled",
+                False,
+            ),
+            "period_s": _parse_liveness_period_s(
+                contrast.get("period_s"),
+                "device.display.liveness.contrast_breathing.period_s",
+                45,
+            ),
+            "amplitude": _parse_liveness_amplitude(
+                contrast.get("amplitude"),
+                "device.display.liveness.contrast_breathing.amplitude",
+                8,
+            ),
+        },
+        "per_row_micro": {
+            "enabled": _parse_bool(
+                per_row.get("enabled"),
+                "device.display.liveness.per_row_micro.enabled",
+                False,
+            ),
+            "period_s": _parse_liveness_period_s(
+                per_row.get("period_s"),
+                "device.display.liveness.per_row_micro.period_s",
+                15,
+            ),
+            "stagger": _parse_bool(
+                per_row.get("stagger"),
+                "device.display.liveness.per_row_micro.stagger",
+                True,
+            ),
+        },
+        "bottom_heartbeat": {
+            "enabled": _parse_bool(
+                heartbeat.get("enabled"),
+                "device.display.liveness.bottom_heartbeat.enabled",
+                False,
+            ),
+            "period_s": _parse_liveness_period_s(
+                heartbeat.get("period_s"),
+                "device.display.liveness.bottom_heartbeat.period_s",
+                20,
+            ),
+            "pixel_count": _parse_bottom_pixel_count(
+                heartbeat.get("pixel_count"),
+                "device.display.liveness.bottom_heartbeat.pixel_count",
+                1,
+            ),
+            "position": _parse_liveness_position(
+                heartbeat.get("position"),
+                "device.display.liveness.bottom_heartbeat.position",
+                "right",
+            ),
+        },
+    }
+
+
 def _canonical_display_type(value: str) -> str:
     normalized = _fold(value)
     return DISPLAY_TYPE_ALIASES.get(normalized, normalized)
@@ -760,10 +899,7 @@ def normalize_display_config(raw_display: object) -> dict[str, object]:
         "column_separator": _parse_column_separator(display.get("column_separator")),
         "failure_color": _parse_failure_color(display.get("failure_color")),
         "page_interval_s": _parse_duration_s(page_interval_value, "device.display.page_interval"),
-        "boot_logo_duration_s": _parse_duration_s(
-            display.get("boot_logo_duration", display.get("boot_logo_duration_s", DEFAULT_BOOT_LOGO_DURATION_S)),
-            "device.display.boot_logo_duration",
-        ),
+        "boot_logo_duration_s": DEFAULT_BOOT_LOGO_DURATION_S,
         "column_offset": _parse_non_negative_int(
             display.get("column_offset"),
             "device.display.column_offset",
@@ -774,6 +910,7 @@ def normalize_display_config(raw_display: object) -> dict[str, object]:
             "width_px": _parse_font_size_px(font.get("width_px"), "device.display.font.width_px", default_font["width_px"]),
             "height_px": _parse_font_size_px(font.get("height_px"), "device.display.font.height_px", default_font["height_px"]),
         },
+        "liveness": _parse_display_liveness(display.get("liveness")),
         "pins": resolved_pins,
     }
 

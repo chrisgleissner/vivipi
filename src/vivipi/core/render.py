@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from vivipi.core.models import AppMode, AppState, CheckRuntime, DisplayMode, Status
 from vivipi.core.state import selected_check, visible_checks
-from vivipi.core.text import center_text, column_widths, compact_overview_cell, overview_row, truncate_text
+from vivipi.core.text import center_text, column_widths, compact_overview_cell, overview_row_layout, truncate_text
 
 
 def _enum_text(value) -> str:
@@ -28,6 +28,8 @@ class Frame:
     shift_offset: tuple[int, int] = (0, 0)
     inverted_spans: tuple[InvertedSpan, ...] = ()
     failure_spans: tuple[TextSpan, ...] = ()
+    bottom_pixels: tuple[int, ...] = ()
+    contrast: int | None = None
 
 
 def _blank_rows(row_width: int, page_size: int) -> list[str]:
@@ -67,9 +69,7 @@ def _detail_rows(check: CheckRuntime | None, now_s: float | None, row_width: int
     return tuple(rows[:page_size])
 
 
-def _status_span(row_index: int, row_width: int, status_value: str) -> TextSpan:
-    end_column = row_width
-    start_column = max(0, end_column - len(status_value))
+def _status_span(row_index: int, start_column: int, end_column: int) -> TextSpan:
     return TextSpan(row_index=row_index, start_column=start_column, end_column=end_column)
 
 
@@ -98,11 +98,12 @@ def _legacy_overview_frame(state: AppState, checks: tuple[CheckRuntime, ...], hi
     inverted_row = None
     for row_index, check in enumerate(checks):
         status_text = _enum_text(check.status)
-        rows[row_index] = overview_row(check.name, status_text, state.row_width)
+        layout = overview_row_layout(check.name, status_text, state.row_width)
+        rows[row_index] = layout.text
         if highlight_selection and check.identifier == state.selected_id:
             inverted_row = row_index
         if check.status == Status.FAIL:
-            failure_spans.append(_status_span(row_index, state.row_width, status_text))
+            failure_spans.append(_status_span(row_index, layout.status_start_column, layout.status_end_column))
     return Frame(
         rows=tuple(rows),
         inverted_row=inverted_row,

@@ -117,6 +117,10 @@ class SSD1305Display:
             failure_color=self.failure_color,
         )
         self.buffer[:] = surface.buffer
+        contrast = getattr(frame, "contrast", None)
+        if contrast is not None and int(contrast) != int(self.contrast):
+            self.set_contrast(int(contrast))
+            self.contrast = int(contrast)
         self._show()
 
     def show_boot_logo(self, version, glyph_builder=None):

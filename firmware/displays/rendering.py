@@ -349,6 +349,9 @@ def render_to_surface(frame, surface, font_width, font_height, glyph_lookup, fai
 
         _draw_text(surface, row, x_offset, y, font_width, text_color, glyph_lookup)
 
+    for pixel_x in getattr(frame, "bottom_pixels", ()):  # bottom-row liveness uses the reserved baseline scanline.
+        surface.set_pixel(int(pixel_x), surface.height - 1, surface.foreground_color)
+
     return surface
 
 

@@ -36,3 +36,5 @@ def test_dataclass_recovers_field_order_from_source_when_annotations_are_missing
     assert repr(value) == "SourceFallbackExample(identifier='check-1', name='Example', tags=(), mode='overview')"
     assert replaced.mode == "detail"
     assert replaced.tags == ()
+    assert value == Example("check-1", "Example")
+    assert value != replaced

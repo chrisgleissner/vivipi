@@ -51,7 +51,7 @@ def test_render_frame_respects_dynamic_grid_dimensions():
 
     assert len(frame.rows) == 3
     assert all(len(row) == 12 for row in frame.rows)
-    assert frame.rows[2].startswith("Charlie")
+    assert frame.rows[2] == "Charlie   OK"
     assert frame.inverted_row == 2
 
 
@@ -79,7 +79,7 @@ def test_overview_displays_unknown_status_as_question_mark():
 
     frame = render_frame(state)
 
-    assert frame.rows[0].endswith("   ?")
+    assert frame.rows[0].endswith(" ?")
 
 
 def test_standard_single_column_overview_keeps_legacy_output_exactly():

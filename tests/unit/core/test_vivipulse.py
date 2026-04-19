@@ -151,6 +151,7 @@ def test_vivipulse_helpers_cover_classification_and_runtime_config():
     assert runtime_config["checks"][0]["id"] == "alpha"
     assert runtime_config["probe_schedule"]["allow_concurrent_hosts"] is False
     assert runtime_config["probe_schedule"]["same_host_backoff_ms"] == 250
+    assert runtime_config["probe_schedule"]["interval_grace_ms"] == 1000
 
 
 def test_vivipulse_helper_fallback_paths_and_runtime_item_mapping():

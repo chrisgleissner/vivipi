@@ -103,12 +103,43 @@ def load_build_deploy_settings(path: str | Path, env: dict[str, str] | None = No
         base_url = service.get("base_url")
         if isinstance(base_url, str) and not base_url.strip():
             service.pop("base_url", None)
+        _normalize_service_settings(resolved)
 
     _normalize_device_display_settings(resolved)
     _normalize_check_state_settings(resolved)
     _normalize_probe_schedule_settings(resolved)
 
     return resolved
+
+
+def _normalize_service_settings(settings: dict[str, object]):
+    service = settings.get("service")
+    if not isinstance(service, dict):
+        return
+    syslog = service.get("syslog")
+    if syslog is not None and not isinstance(syslog, dict):
+        raise ValueError("service.syslog must be a mapping")
+    normalized_syslog = dict(syslog) if isinstance(syslog, dict) else {}
+    base_url = service.get("base_url")
+    derived_host = None
+    if isinstance(base_url, str) and base_url.strip():
+        parsed = urlparse(base_url)
+        derived_host = parsed.hostname
+    host = normalized_syslog.get("host") or derived_host
+    if isinstance(host, str) and host.strip():
+        normalized_syslog["host"] = host.strip()
+    if normalized_syslog or (isinstance(host, str) and host.strip()):
+        normalized_syslog["enabled"] = _parse_bool(
+            normalized_syslog.get("enabled"),
+            "service.syslog.enabled",
+            bool(isinstance(host, str) and host.strip()),
+        )
+        normalized_syslog["port"] = _parse_int(normalized_syslog.get("port"), "service.syslog.port", 514)
+        retry_interval = float(normalized_syslog.get("retry_interval_s", 5))
+        if retry_interval < 0:
+            raise ValueError("service.syslog.retry_interval_s must not be negative")
+        normalized_syslog["retry_interval_s"] = retry_interval
+        service["syslog"] = normalized_syslog
 
 
 def _normalize_device_display_settings(settings: dict[str, object]):
@@ -188,6 +219,13 @@ def _normalize_probe_schedule_settings(settings: dict[str, object]):
     same_host_backoff_ms = int(raw.get("same_host_backoff_ms", 250))
     if same_host_backoff_ms < 0:
         raise ValueError("probe_schedule.same_host_backoff_ms must not be negative")
+    interval_grace_ms = _parse_int(
+        raw.get("interval_grace_ms"),
+        "probe_schedule.interval_grace_ms",
+        1000,
+    )
+    if interval_grace_ms < 0 or interval_grace_ms > 1000:
+        raise ValueError("probe_schedule.interval_grace_ms must be between 0 and 1000")
 
     settings["probe_schedule"] = {
         "allow_concurrent_hosts": _parse_bool(
@@ -201,6 +239,7 @@ def _normalize_probe_schedule_settings(settings: dict[str, object]):
             False,
         ),
         "same_host_backoff_ms": same_host_backoff_ms,
+        "interval_grace_ms": interval_grace_ms,
     }
 
 
