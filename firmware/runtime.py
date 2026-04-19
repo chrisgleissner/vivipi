@@ -497,7 +497,6 @@ def build_runtime_app(
     wifi_connector=connect_wifi,
     now_provider=_now_s,
     sleep_ms=_sleep_ms,
-    boot_logo_min_s=2,
     boot_diagnostics=(),
     boot_errors=(),
 ):
@@ -548,12 +547,6 @@ def build_runtime_app(
     project = config.get("project", {}) if isinstance(config.get("project"), dict) else {}
     version = str(project.get("version", ""))
     build_time_value = str(project.get("build_time", ""))
-    explicit_boot_logo_duration = None
-    if isinstance(display_input, dict):
-        explicit_boot_logo_duration = display_input.get("boot_logo_duration")
-        if explicit_boot_logo_duration is None:
-            explicit_boot_logo_duration = display_input.get("boot_logo_duration_s")
-
     boot_start_s = now_provider()
     logo_diagnostics, logo_errors = _safe_show_boot_logo(display, version)
     _serial_log("BOOT", "boot logo shown", version=version or "-")
@@ -601,9 +594,7 @@ def build_runtime_app(
         trace_sink = getattr(app, "emit_probe_trace", None)
     app.executor = _build_executor_with_optional_trace(executor_factory, trace_sink)
     app.probe_trace_sink = _build_probe_trace_sink(config)
-    boot_logo_duration_s = float(boot_logo_min_s)
-    if explicit_boot_logo_duration is not None:
-        boot_logo_duration_s = max(float(boot_logo_min_s), float(display_config.get("boot_logo_duration_s", boot_logo_min_s)))
+    boot_logo_duration_s = float(display_config.get("boot_logo_duration_s", 4.0))
     app.boot_logo_until_s = boot_start_s + boot_logo_duration_s
     if hasattr(app, "logger"):
         syslog_sink = boot_syslog_sink
@@ -649,7 +640,33 @@ def build_runtime_app_from_path(config_path="config.json", **kwargs):
 
 
 def _run_startup_network(app, now_s):
-    _serial_log("BOOT", "network deferred", now_s=f"{now_s:.3f}")
+    network_snapshot = {}
+    if hasattr(app, "get_network_state_snapshot"):
+        try:
+            network_snapshot = dict(app.get_network_state_snapshot())
+        except Exception:
+            network_snapshot = {}
+
+    if network_snapshot.get("connected"):
+        _serial_log("BOOT", "network ready", now_s=f"{now_s:.3f}", ip=network_snapshot.get("ip_address", "-"))
+        return now_s
+
+    connector = getattr(app, "connect_network", None)
+    if connector is None:
+        connector = getattr(app, "reconnect_network", None)
+    if connector is None:
+        _serial_log("BOOT", "network deferred", now_s=f"{now_s:.3f}")
+        return now_s
+
+    try:
+        network_snapshot = dict(connector(activate_diagnostics=False) or {})
+    except Exception as error:
+        _serial_log("BOOT", "network unavailable", now_s=f"{now_s:.3f}", error=type(error).__name__)
+        return _now_s()
+
+    ready_now_s = _now_s()
+    _serial_log("BOOT", "network ready", now_s=f"{ready_now_s:.3f}", ip=network_snapshot.get("ip_address", "-"))
+    return ready_now_s
 
 
 def _render_initial_frame(app, now_s):
@@ -733,9 +750,9 @@ def run_loop(app, poll_interval_ms=50, iterations=None, now_provider=_now_s, sle
 def run_forever(config_path="config.json", poll_interval_ms=50):
     app = build_runtime_app_from_path(config_path)
     _maybe_run_button_self_test_from_app(app, _now_s, _sleep_ms)
-    startup_now_s = _now_s()
+    _run_startup_network(app, _now_s())
+    startup_now_s = _wait_for_boot_logo(app, now_provider=_now_s, sleep_ms=_sleep_ms)
     _serial_log("BOOT", "startup tick", now_s=f"{startup_now_s:.3f}")
-    _run_startup_network(app, startup_now_s)
     _run_startup_tick(app, startup_now_s)
     if hasattr(app, "tick"):
         try:

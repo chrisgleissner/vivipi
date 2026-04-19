@@ -15,7 +15,7 @@ MIN_FONT_SIZE_PX = 6
 MAX_FONT_SIZE_PX = 32
 DEFAULT_FAILURE_COLOR = "red"
 DEFAULT_FONT_SIZE = "medium"
-DEFAULT_BOOT_LOGO_DURATION_S = 6
+DEFAULT_BOOT_LOGO_DURATION_S = 4
 DISPLAY_MODES = frozenset({"standard", "compact"})
 LIVENESS_POSITIONS = frozenset({"left", "center", "right"})
 BRIGHTNESS_PRESETS = {
@@ -899,10 +899,7 @@ def normalize_display_config(raw_display: object) -> dict[str, object]:
         "column_separator": _parse_column_separator(display.get("column_separator")),
         "failure_color": _parse_failure_color(display.get("failure_color")),
         "page_interval_s": _parse_duration_s(page_interval_value, "device.display.page_interval"),
-        "boot_logo_duration_s": _parse_duration_s(
-            display.get("boot_logo_duration", display.get("boot_logo_duration_s", DEFAULT_BOOT_LOGO_DURATION_S)),
-            "device.display.boot_logo_duration",
-        ),
+        "boot_logo_duration_s": DEFAULT_BOOT_LOGO_DURATION_S,
         "column_offset": _parse_non_negative_int(
             display.get("column_offset"),
             "device.display.column_offset",

@@ -138,7 +138,7 @@ def test_load_build_deploy_settings_substitutes_environment_placeholders(tmp_pat
     assert settings["device"]["display"]["height_px"] == 64
     assert settings["device"]["display"]["font"] == {"width_px": 8, "height_px": 8}
     assert settings["device"]["display"]["page_interval_s"] == 15
-    assert settings["device"]["display"]["boot_logo_duration_s"] == 2
+    assert settings["device"]["display"]["boot_logo_duration_s"] == 4
     assert settings["device"]["display"]["brightness"] == 128
     assert settings["device"]["display"]["liveness"]["contrast_breathing"] == {"enabled": False, "period_s": 30, "amplitude": 16}
     assert settings["device"]["display"]["liveness"]["per_row_micro"] == {"enabled": False, "period_s": 15, "stagger": True}

@@ -1547,13 +1547,14 @@ class RuntimeApp:
         self._drain_probe_traces()
         self._drain_completed_checks()
         self._drain_probe_traces()
-        self._apply_page_rotation(now_s)
-        self._apply_shift(now_s)
+        frame_now_s = self.current_time_s() or now_s
+        self._apply_page_rotation(frame_now_s)
+        self._apply_shift(frame_now_s)
 
-        reason = self.render_once(now_s)
+        reason = self.render_once(frame_now_s)
 
         self.last_cycle_ms = elapsed_ms(cycle_started, cycle_timer_kind)
         self.metrics.record_cycle(self.last_cycle_ms)
-        self._maybe_capture_memory_snapshot(now_s)
+        self._maybe_capture_memory_snapshot(frame_now_s)
         self._assert_debug_invariants()
         return reason

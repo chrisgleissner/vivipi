@@ -41,7 +41,7 @@ def test_normalize_display_config_defaults_to_inferred_oled_geometry_and_font():
     assert config["column_offset"] == 32
     assert config["font"] == {"width_px": 8, "height_px": 8}
     assert config["page_interval_s"] == 15
-    assert config["boot_logo_duration_s"] == 6
+    assert config["boot_logo_duration_s"] == 4
     assert config["liveness"]["contrast_breathing"]["enabled"] is False
     assert config["liveness"]["per_row_micro"]["enabled"] is False
     assert config["liveness"]["bottom_heartbeat"]["enabled"] is False
@@ -57,7 +57,7 @@ def test_normalize_display_config_accepts_column_offset_override_for_subwindowed
 def test_normalize_display_config_accepts_boot_logo_duration_override():
     config = normalize_display_config({"type": "waveshare-pico-oled-1.3", "boot_logo_duration": "7s"})
 
-    assert config["boot_logo_duration_s"] == 7
+    assert config["boot_logo_duration_s"] == 4
 
 
 def test_normalize_display_config_accepts_liveness_configuration():

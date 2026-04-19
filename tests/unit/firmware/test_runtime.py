@@ -266,7 +266,7 @@ def test_build_runtime_app_uses_injected_factories_and_defers_wifi_startup():
     assert wifi_calls == []
     assert sleep_calls == []
     assert trace_sinks == [None]
-    assert app.boot_logo_until_s == 2.0
+    assert app.boot_logo_until_s == 4.0
 
 
 def test_build_executor_with_optional_trace_uses_trace_sink_when_runtime_app_exposes_it():
@@ -371,7 +371,7 @@ def test_build_runtime_app_does_not_prime_initial_checks_during_boot():
     assert called["prime_now_s"] is None
 
 
-def test_build_runtime_app_honors_explicit_boot_logo_duration_from_config():
+def test_build_runtime_app_uses_fixed_boot_logo_duration():
     class FakeApp:
         def __init__(self, **kwargs):
             pass
@@ -400,7 +400,7 @@ def test_build_runtime_app_honors_explicit_boot_logo_duration_from_config():
         sleep_ms=lambda ms: None,
     )
 
-    assert app.boot_logo_until_s == 17.0
+    assert app.boot_logo_until_s == 14.0
 
 
 def test_build_runtime_app_falls_back_to_default_display_when_primary_display_init_fails():
@@ -596,7 +596,6 @@ def test_build_runtime_app_does_not_wait_for_boot_logo_or_wifi_during_boot():
         wifi_connector=lambda config: wifi_calls.append(config) or (),
         now_provider=lambda: next(now_times),
         sleep_ms=lambda ms: sleep_calls.append(ms),
-        boot_logo_min_s=5,
     )
 
     assert sleep_calls == []
@@ -728,14 +727,19 @@ def test_run_forever_runs_second_chance_button_self_test_before_startup_tick(mon
     fake_app = FakeApp()
     called = {}
     self_test_calls = []
-    now_values = iter([12.5])
 
     monkeypatch.setattr(firmware_runtime, "build_runtime_app_from_path", lambda path: fake_app)
-    monkeypatch.setattr(firmware_runtime, "_now_s", lambda: next(now_values))
+    monkeypatch.setattr(firmware_runtime, "_now_s", lambda: 12.5)
     monkeypatch.setattr(
         firmware_runtime,
         "_maybe_run_button_self_test_from_app",
         lambda app, now_provider, sleep_ms: self_test_calls.append(app),
+    )
+    monkeypatch.setattr(firmware_runtime, "_run_startup_network", lambda app, now_s: now_s)
+    monkeypatch.setattr(
+        firmware_runtime,
+        "_wait_for_boot_logo",
+        lambda app, now_provider=None, sleep_ms=None: 18.5,
     )
     monkeypatch.setattr(
         firmware_runtime,
@@ -747,8 +751,8 @@ def test_run_forever_runs_second_chance_button_self_test_before_startup_tick(mon
 
     assert self_test_calls == [fake_app]
     assert called == {"app": fake_app, "poll_interval_ms": 75}
-    assert fake_app.prime_calls == [12.5]
-    assert fake_app.tick_calls == [(12.5, ())]
+    assert fake_app.prime_calls == [18.5]
+    assert fake_app.tick_calls == [(18.5, ())]
 
 
 def test_run_loop_ticks_and_sleeps_with_injected_clock():
@@ -769,7 +773,7 @@ def test_run_loop_ticks_and_sleeps_with_injected_clock():
     assert sleeps == [50, 50, 50]
 
 
-def test_run_forever_primes_startup_work_without_waiting_for_boot_logo_and_enters_run_loop(monkeypatch):
+def test_run_forever_waits_for_boot_logo_before_startup_work_and_enters_run_loop(monkeypatch):
     class FakeApp:
         def __init__(self):
             self.boot_logo_until_s = 18.5
@@ -784,10 +788,16 @@ def test_run_forever_primes_startup_work_without_waiting_for_boot_logo_and_enter
 
     fake_app = FakeApp()
     called = {}
-    now_values = iter([12.5])
+    wait_calls = []
 
     monkeypatch.setattr(firmware_runtime, "build_runtime_app_from_path", lambda path: fake_app)
-    monkeypatch.setattr(firmware_runtime, "_now_s", lambda: next(now_values))
+    monkeypatch.setattr(firmware_runtime, "_now_s", lambda: 12.5)
+    monkeypatch.setattr(firmware_runtime, "_run_startup_network", lambda app, now_s: now_s)
+    monkeypatch.setattr(
+        firmware_runtime,
+        "_wait_for_boot_logo",
+        lambda app, now_provider=None, sleep_ms=None: wait_calls.append(app.boot_logo_until_s) or 18.5,
+    )
     monkeypatch.setattr(
         firmware_runtime,
         "run_loop",
@@ -797,8 +807,87 @@ def test_run_forever_primes_startup_work_without_waiting_for_boot_logo_and_enter
     firmware_runtime.run_forever(poll_interval_ms=75)
 
     assert called == {"app": fake_app, "poll_interval_ms": 75}
-    assert fake_app.prime_calls == [12.5]
-    assert fake_app.tick_calls == [(12.5, ())]
+    assert wait_calls == [18.5]
+    assert fake_app.prime_calls == [18.5]
+    assert fake_app.tick_calls == [(18.5, ())]
+
+
+def test_run_startup_network_connects_without_activating_diagnostics(monkeypatch):
+    calls = []
+
+    class FakeApp:
+        def __init__(self):
+            self.connected = False
+
+        def get_network_state_snapshot(self):
+            return {"connected": self.connected, "ip_address": "192.0.2.50"}
+
+        def connect_network(self, activate_diagnostics=False):
+            calls.append(activate_diagnostics)
+            self.connected = True
+            return self.get_network_state_snapshot()
+
+    monkeypatch.setattr(firmware_runtime, "_now_s", lambda: 15.5)
+
+    ready_now_s = firmware_runtime._run_startup_network(FakeApp(), 12.5)
+
+    assert calls == [False]
+    assert ready_now_s == 15.5
+
+
+def test_run_forever_connects_network_before_waiting_for_boot_logo(monkeypatch):
+    class FakeApp:
+        def __init__(self):
+            self.boot_logo_until_s = 16.5
+            self.tick_calls = []
+            self.prime_calls = []
+            self.connect_calls = []
+            self.connected = False
+
+        def get_network_state_snapshot(self):
+            return {"connected": self.connected, "ip_address": "192.0.2.50"}
+
+        def connect_network(self, activate_diagnostics=False):
+            self.connect_calls.append(activate_diagnostics)
+            self.connected = True
+            return self.get_network_state_snapshot()
+
+        def prime_due_checks(self, now_s):
+            self.prime_calls.append((now_s, self.connected))
+
+        def tick(self, now_s, button_events=None):
+            self.tick_calls.append((now_s, button_events, self.connected))
+
+    fake_app = FakeApp()
+    called = {}
+    events = []
+
+    monkeypatch.setattr(firmware_runtime, "build_runtime_app_from_path", lambda path: fake_app)
+    monkeypatch.setattr(firmware_runtime, "_now_s", lambda: 12.5)
+    original_run_startup_network = firmware_runtime._run_startup_network
+    monkeypatch.setattr(
+        firmware_runtime,
+        "_run_startup_network",
+        lambda app, now_s: events.append(("network", now_s)) or original_run_startup_network(app, now_s),
+    )
+    monkeypatch.setattr(
+        firmware_runtime,
+        "_wait_for_boot_logo",
+        lambda app, now_provider=None, sleep_ms=None: events.append(("wait", app.boot_logo_until_s)) or 16.5,
+    )
+    monkeypatch.setattr(
+        firmware_runtime,
+        "run_loop",
+        lambda app, poll_interval_ms=50: called.update({"app": app, "poll_interval_ms": poll_interval_ms}),
+    )
+
+    firmware_runtime.run_forever(poll_interval_ms=75)
+
+    assert called == {"app": fake_app, "poll_interval_ms": 75}
+    assert fake_app.connect_calls == [False]
+    assert events == [("network", 12.5), ("wait", 16.5)]
+    assert fake_app.prime_calls == [(16.5, True)]
+    assert fake_app.tick_calls == [(16.5, (), True)]
 
 
 def test_run_startup_tick_uses_prime_due_checks_when_available():

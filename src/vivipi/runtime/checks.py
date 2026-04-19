@@ -33,7 +33,8 @@ TELNET_DONT = 254
 TELNET_DO = 253
 TELNET_WONT = 252
 TELNET_WILL = 251
-TELNET_IDLE_TIMEOUT_S = 0.20
+TELNET_IDLE_TIMEOUT_S = 0.12
+TELNET_POST_DATA_IDLE_TIMEOUT_S = 0.02
 TELNET_MAX_EMPTY_READS = 1
 TELNET_SB = 250
 TELNET_SE = 240
@@ -882,10 +883,21 @@ def _telnet_collect_visible(handle, chunk: bytes, trace=None) -> bytes:
     return bytes(visible)
 
 
-def _read_telnet_until_idle(handle, *, max_empty_reads: int = TELNET_MAX_EMPTY_READS, trace=None) -> bytes:
+def _read_telnet_until_idle(
+    handle,
+    *,
+    max_empty_reads: int = TELNET_MAX_EMPTY_READS,
+    initial_timeout_s: float = TELNET_IDLE_TIMEOUT_S,
+    quiet_timeout_s: float = TELNET_POST_DATA_IDLE_TIMEOUT_S,
+    trace=None,
+) -> bytes:
     visible = bytearray()
     empty_reads = 0
-    while empty_reads < max_empty_reads:
+    saw_data = False
+    while True:
+        if empty_reads >= max_empty_reads:
+            break
+        _set_socket_timeout(handle, quiet_timeout_s if saw_data else initial_timeout_s)
         try:
             chunk = handle.recv(4096)
         except TimeoutError:
@@ -900,6 +912,7 @@ def _read_telnet_until_idle(handle, *, max_empty_reads: int = TELNET_MAX_EMPTY_R
             _emit_probe_trace(trace, "socket-recv", stage="telnet-recv", bytes_received=len(chunk))
         if not chunk:
             break
+        saw_data = True
         empty_reads = 0
         visible.extend(_telnet_collect_visible(handle, chunk, trace=trace))
     payload = bytes(visible)
@@ -917,7 +930,6 @@ def portable_telnet_runner(target: str, timeout_s: int, username: str | None = N
         handle = None
         try:
             handle = socket.create_connection((host, port), timeout=timeout_s)
-            handle.settimeout(TELNET_IDLE_TIMEOUT_S)
             text = _read_telnet_until_idle(handle).decode("utf-8", "ignore").strip()
             return PingProbeResult(
                 ok=True,
@@ -944,8 +956,6 @@ def portable_telnet_runner(target: str, timeout_s: int, username: str | None = N
     try:
         deadline = _deadline_after_s(timeout_s)
         handle = _open_socket_compat(host, port, timeout_s, deadline, trace=trace)
-        if hasattr(handle, "settimeout"):
-            handle.settimeout(TELNET_IDLE_TIMEOUT_S)
         text = _read_telnet_until_idle(handle, trace=trace).decode("utf-8", "ignore").strip()
         return PingProbeResult(
             ok=True,

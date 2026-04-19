@@ -16,7 +16,7 @@ device:
     columns: 1
     column_separator: " "
     page_interval: 15s
-    boot_logo_duration: 2s
+    boot_logo_duration: 4s
     liveness:
       contrast_breathing:
         enabled: false

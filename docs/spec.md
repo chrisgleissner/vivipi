@@ -524,7 +524,7 @@ System MUST include:
 
 ## 16. Boot Logo
 
-On device startup, the display MUST show a boot logo for at least 6 seconds by default.
+On device startup, the display MUST show a boot logo for 4 seconds before the first overview frame replaces it.
 
 Layout:
 
@@ -546,10 +546,8 @@ Font sizing:
 
 The boot logo is shown before the first overview frame replaces it.
 
-- WiFi connection and initial probe scheduling MAY begin while the boot logo remains visible.
-- The first post-logo overview frame SHOULD include any completed initial probe results instead of an all-unknown placeholder view.
-
-Boot duration MUST be configurable from settings.
+- WiFi connection MAY begin while the boot logo remains visible.
+- After the 4-second boot-logo interval, the firmware proceeds with startup checks and the first overview frame.
 
 [VIVIPI-BOOT-001]
 

@@ -1173,7 +1173,7 @@ def test_portable_telnet_runner_stdlib_and_raw_error_paths(monkeypatch):
         def close(self):
             self.closed = True
 
-    success_handle = StdlibSocket([b"Welcome\r\nrouter> ", b""])
+    success_handle = StdlibSocket([b"Welcome\r\n", b"router> ", runtime_checks.socket.timeout()])
     monkeypatch.setattr(runtime_checks.socket, "create_connection", lambda address, timeout: success_handle)
     monkeypatch.setattr(runtime_checks, "_is_micropython_runtime", lambda: False)
 
@@ -1988,6 +1988,37 @@ def test_portable_telnet_runner_tolerates_negotiation_reply_timeout(monkeypatch)
     assert result.details == "visible_bytes=17"
     assert handle.sent == []
     assert handle.reply_attempts == 1
+
+
+def test_portable_telnet_runner_drains_until_quiet_timeout_before_close(monkeypatch):
+    class DrainingBannerSocket(FakeSocket):
+        def __init__(self):
+            super().__init__([b"Welcome\r\n", b"router> "])
+            self.recv_calls = 0
+            self.timeout_values = []
+
+        def settimeout(self, value):
+            self.timeout_values.append(value)
+
+        def recv(self, _size):
+            self.recv_calls += 1
+            if self.recv_calls == 3:
+                raise OSError("timed out")
+            return super().recv(_size)
+
+    handle = DrainingBannerSocket()
+    monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: handle)
+
+    result = portable_telnet_runner("switch.example.local:23", 10, trace=lambda event, **fields: None)
+
+    assert result.ok is True
+    assert result.details == "visible_bytes=16"
+    assert handle.recv_calls == 3
+    assert handle.timeout_values == [
+        runtime_checks.TELNET_IDLE_TIMEOUT_S,
+        runtime_checks.TELNET_POST_DATA_IDLE_TIMEOUT_S,
+        runtime_checks.TELNET_POST_DATA_IDLE_TIMEOUT_S,
+    ]
 
 
 def test_portable_telnet_runner_handles_explicit_failure_text_and_socket_error(monkeypatch):
