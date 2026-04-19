@@ -10,12 +10,9 @@ See your device health at a glance.
 
 ViviPi (pronounced "VEE-vee-pie", from the Latin *viv-* in *vivere*, "to live") is a minimal, glanceable monitoring system for Raspberry Pi Pico display modules. The default target is a Pico 2W with a 128x64 SH1107 OLED, but the runtime and build pipeline also support Waveshare Pico OLED, LCD, and e-paper modules.
 
-> [!NOTE]
-> This project is under active development. Some documented features may not yet be fully functional.
-
 ## Features
 
-- Supports Pico OLED, LCD, and e-paper modules.
+- Display support includes Pico OLED, LCD, and e-paper modules; verified on the Waveshare Pico OLED 1.3.
 - Supports `PING`, `HTTP`, `FTP`, `TELNET`, and `SERVICE` health checks.
 - Configurable back-off and scheduling policies to avoid overwhelming targets.
 - Easy build and deployment via a one-stop shop `build` command.
