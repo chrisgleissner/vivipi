@@ -128,7 +128,12 @@ def _normalize_service_settings(settings: dict[str, object]):
     host = normalized_syslog.get("host") or derived_host
     if isinstance(host, str) and host.strip():
         normalized_syslog["host"] = host.strip()
-        normalized_syslog["enabled"] = _parse_bool(normalized_syslog.get("enabled"), "service.syslog.enabled", True)
+    if normalized_syslog or (isinstance(host, str) and host.strip()):
+        normalized_syslog["enabled"] = _parse_bool(
+            normalized_syslog.get("enabled"),
+            "service.syslog.enabled",
+            bool(isinstance(host, str) and host.strip()),
+        )
         normalized_syslog["port"] = _parse_int(normalized_syslog.get("port"), "service.syslog.port", 514)
         retry_interval = float(normalized_syslog.get("retry_interval_s", 5))
         if retry_interval < 0:

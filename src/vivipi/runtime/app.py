@@ -200,7 +200,10 @@ def _normalize_display_liveness(display_liveness: object) -> dict[str, dict[str,
         False,
     )
     normalized["bottom_heartbeat"]["period_s"] = int(normalized["bottom_heartbeat"].get("period_s", 1))
-    normalized["bottom_heartbeat"]["pixel_count"] = 1
+    normalized["bottom_heartbeat"]["pixel_count"] = max(
+        1,
+        min(3, int(normalized["bottom_heartbeat"].get("pixel_count", 1))),
+    )
     normalized["bottom_heartbeat"]["position"] = str(normalized["bottom_heartbeat"].get("position", "left"))
     return normalized
 
@@ -328,6 +331,7 @@ class RuntimeApp:
         self.last_cycle_ms: float | None = None
         self.last_render_at_s: float | None = None
         self.last_render_reason = "bootstrap"
+        self.last_rendered_liveness_signature: tuple[int | None, tuple[int, ...]] | None = None
         self.last_logged_liveness_signature = None
         self.bottom_heartbeat_step = 0
         self.last_rendered_feedback = ""
@@ -406,6 +410,14 @@ class RuntimeApp:
         display_state = self._display_state()
         reason = render_reason(self.last_rendered_state, display_state)
         feedback_text = self._overlay_feedback_text(now_s) or ""
+        liveness_signature = self._current_liveness_signature(now_s)
+        if (
+            reason == "none"
+            and self.last_rendered_debug_mode == self.debug_mode
+            and self.last_rendered_feedback == feedback_text
+            and self.last_rendered_liveness_signature == liveness_signature
+        ):
+            return "none"
         if reason == "none":
             reason = "overlay"
         if self.display_retry_at_s is not None and now_s < self.display_retry_at_s:
@@ -417,6 +429,7 @@ class RuntimeApp:
         if frame == self.last_rendered_frame:
             self.last_rendered_state = display_state
             self.last_render_reason = "none"
+            self.last_rendered_liveness_signature = liveness_signature
             self.last_rendered_debug_mode = self.debug_mode
             self.last_rendered_feedback = feedback_text
             return "none"
@@ -430,6 +443,7 @@ class RuntimeApp:
             self.last_rendered_frame = frame
             self.last_render_at_s = now_s
             self.last_render_reason = reason
+            self.last_rendered_liveness_signature = liveness_signature
             self.last_rendered_debug_mode = self.debug_mode
             self.last_rendered_feedback = feedback_text
             self._log_liveness_state(frame)
@@ -966,6 +980,12 @@ class RuntimeApp:
     def _probe_now_s(self) -> float:
         return float(self.probe_time_provider())
 
+    def _event_now_s(self, fallback_now_s: float) -> float:
+        current_now_s = self.current_time_s()
+        if current_now_s is None:
+            return float(fallback_now_s)
+        return float(current_now_s)
+
     def _wait_for_probe_slot(self, definition: CheckDefinition):
         if self._background_enabled():
             lock_acquired = _lock_context(self.background_lock)
@@ -1010,7 +1030,7 @@ class RuntimeApp:
     def _execute_check_once(self, definition: CheckDefinition, now_s: float, manual: bool = False) -> CompletedCheckRun:
         waited_ms = self._wait_for_probe_slot(definition)
         host_key = probe_host_key(definition) or "-"
-        started_now_s = now_s if manual else (self.current_time_s() or now_s)
+        started_now_s = float(now_s) if manual else self._event_now_s(now_s)
         started_at, timer_kind = start_timer()
         self.logger.debug(
             "CHECK",
@@ -1035,7 +1055,7 @@ class RuntimeApp:
             result = self.executor(definition, started_now_s)
         except Exception as error:
             duration_ms = elapsed_ms(started_at, timer_kind)
-            completed_at_s = started_now_s + (duration_ms / 1000.0)
+            completed_at_s = started_now_s if manual else max(started_now_s, self._event_now_s(started_now_s))
             self._mark_probe_complete(definition)
             self.logger.debug(
                 "CHECK",
@@ -1057,7 +1077,7 @@ class RuntimeApp:
             )
 
         duration_ms = elapsed_ms(started_at, timer_kind)
-        completed_at_s = started_now_s + (duration_ms / 1000.0)
+        completed_at_s = started_now_s if manual else max(started_now_s, self._event_now_s(started_now_s))
         self._mark_probe_complete(definition)
         status = "?"
         if result.observations:
@@ -1305,6 +1325,7 @@ class RuntimeApp:
         self.display_retry_at_s = None
         self.feedback_message = ""
         self.feedback_until_s = None
+        self.last_rendered_liveness_signature = None
         self.last_logged_liveness_signature = None
         self.last_rendered_feedback = ""
         self.last_rendered_debug_mode = False
@@ -1425,6 +1446,12 @@ class RuntimeApp:
             str(config.get("position", "left")),
             step_index=self.bottom_heartbeat_step,
             step_px=1,
+        )
+
+    def _current_liveness_signature(self, now_s: float) -> tuple[int | None, tuple[int, ...]]:
+        return (
+            self._frame_contrast(now_s),
+            tuple(int(pixel_x) for pixel_x in self._frame_bottom_pixels(now_s)),
         )
 
     def _decorate_frame(self, frame, now_s: float):

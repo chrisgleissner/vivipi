@@ -603,7 +603,7 @@ def _parse_bottom_pixel_count(value: object, context: str, default: int) -> int:
     count = _parse_positive_int(default if value is None else value, context)
     if count < 1 or count > 3:
         raise ValueError(f"{context} must be between 1 and 3")
-    return 1
+    return count
 
 
 def _parse_liveness_position(value: object, context: str, default: str) -> str:

@@ -1432,6 +1432,22 @@ def test_load_build_deploy_settings_parses_false_probe_schedule_values(tmp_path:
     }
 
 
+def test_load_build_deploy_settings_preserves_explicit_syslog_disable_without_host(tmp_path: Path):
+    config_path = tmp_path / "build-deploy.yaml"
+    config_path.write_text(
+        "service:\n  syslog:\n    enabled: false\n    port: 1514\n",
+        encoding="utf-8",
+    )
+
+    settings = load_build_deploy_settings(config_path, env={})
+
+    assert settings["service"]["syslog"] == {
+        "enabled": False,
+        "port": 1514,
+        "retry_interval_s": 5.0,
+    }
+
+
 def test_build_deploy_main_rejects_monkeypatched_unknown_command(monkeypatch):
     monkeypatch.setattr(
         build_deploy.argparse.ArgumentParser,

@@ -77,7 +77,7 @@ def test_normalize_display_config_accepts_liveness_configuration():
     assert config["liveness"]["bottom_heartbeat"] == {
         "enabled": True,
         "period_s": 20,
-        "pixel_count": 1,
+        "pixel_count": 3,
         "position": "center",
     }
 
@@ -99,7 +99,7 @@ def test_normalize_display_config_parses_liveness_string_values_and_rejects_inva
     assert config["liveness"]["bottom_heartbeat"] == {
         "enabled": True,
         "period_s": 3,
-        "pixel_count": 1,
+        "pixel_count": 2,
         "position": "left",
     }
 
