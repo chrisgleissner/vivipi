@@ -173,6 +173,36 @@ def test_runtime_app_executor_exception_replaces_previous_ok_state_on_display():
     assert app.get_registered_checks()[0]["status"] == "FAIL"
 
 
+def test_runtime_app_helper_parsers_cover_fallbacks_and_display_liveness_validation():
+    assert runtime_app_module._enum_text(SimpleNamespace(value="<property>", name="PING")) == "PING"
+    assert runtime_app_module._button_text(SimpleNamespace(value="B")) == "B"
+    assert runtime_app_module._coerce_bool("on", False) is True
+    assert runtime_app_module._coerce_bool("off", True) is False
+
+    normalized = runtime_app_module._normalize_display_liveness(
+        {
+            "contrast_breathing": {"enabled": "yes", "period_s": 30, "amplitude": 16},
+            "per_row_micro": {"enabled": "no", "period_s": 15, "stagger": "off"},
+            "bottom_heartbeat": {"enabled": "1", "period_s": 2, "pixel_count": 3, "position": "center"},
+        }
+    )
+
+    assert normalized == {
+        "contrast_breathing": {"enabled": True, "period_s": 30, "amplitude": 16},
+        "per_row_micro": {"enabled": False, "period_s": 15, "stagger": False},
+        "bottom_heartbeat": {"enabled": True, "period_s": 2, "pixel_count": 1, "position": "center"},
+    }
+
+    with pytest.raises(ValueError, match="display liveness settings must use boolean values"):
+        runtime_app_module._coerce_bool("maybe", True)
+
+    with pytest.raises(ValueError, match="display_liveness must be a mapping when provided"):
+        runtime_app_module._normalize_display_liveness([])
+
+    with pytest.raises(ValueError, match="display_liveness.contrast_breathing must be a mapping"):
+        runtime_app_module._normalize_display_liveness({"contrast_breathing": []})
+
+
 def test_runtime_app_applies_immediate_failure_thresholds_when_configured():
     display = FakeDisplay()
     definition = make_definition("router", check_type=CheckType.HTTP)

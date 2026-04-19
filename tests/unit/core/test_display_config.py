@@ -82,6 +82,58 @@ def test_normalize_display_config_accepts_liveness_configuration():
     }
 
 
+def test_normalize_display_config_parses_liveness_string_values_and_rejects_invalid_shapes():
+    config = normalize_display_config(
+        {
+            "type": "waveshare-pico-oled-1.3",
+            "liveness": {
+                "contrast_breathing": {"enabled": "yes", "period_s": "1s", "amplitude": "16"},
+                "per_row_micro": {"enabled": "off", "period_s": "2s", "stagger": "no"},
+                "bottom_heartbeat": {"enabled": "1", "period_s": "3s", "pixel_count": "2", "position": "LEFT"},
+            },
+        }
+    )
+
+    assert config["liveness"]["contrast_breathing"] == {"enabled": True, "period_s": 1, "amplitude": 16}
+    assert config["liveness"]["per_row_micro"] == {"enabled": False, "period_s": 2, "stagger": False}
+    assert config["liveness"]["bottom_heartbeat"] == {
+        "enabled": True,
+        "period_s": 3,
+        "pixel_count": 1,
+        "position": "left",
+    }
+
+    with pytest.raises(ValueError, match="device.display.liveness must be a mapping"):
+        normalize_display_config({"type": "waveshare-pico-oled-1.3", "liveness": []})
+
+    with pytest.raises(ValueError, match="device.display.liveness.contrast_breathing must be a mapping"):
+        normalize_display_config({"type": "waveshare-pico-oled-1.3", "liveness": {"contrast_breathing": []}})
+
+    with pytest.raises(ValueError, match="device.display.liveness.per_row_micro.enabled must be a boolean"):
+        normalize_display_config(
+            {
+                "type": "waveshare-pico-oled-1.3",
+                "liveness": {"per_row_micro": {"enabled": "maybe"}},
+            }
+        )
+
+    with pytest.raises(ValueError, match="device.display.liveness.bottom_heartbeat.period_s must be at least 1 second"):
+        normalize_display_config(
+            {
+                "type": "waveshare-pico-oled-1.3",
+                "liveness": {"bottom_heartbeat": {"period_s": 0}},
+            }
+        )
+
+    with pytest.raises(ValueError, match="device.display.liveness.contrast_breathing.amplitude must be between 0 and 255"):
+        normalize_display_config(
+            {
+                "type": "waveshare-pico-oled-1.3",
+                "liveness": {"contrast_breathing": {"amplitude": 256}},
+            }
+        )
+
+
 def test_display_parser_helpers_cover_numeric_and_error_branches():
     assert core_display._parse_positive_int(7.0, "device.display.width_px") == 7
     assert core_display._parse_positive_int("8", "device.display.width_px") == 8

@@ -38,6 +38,7 @@ TELNET_POST_DATA_IDLE_TIMEOUT_S = 0.02
 TELNET_MAX_EMPTY_READS = 1
 TELNET_SB = 250
 TELNET_SE = 240
+TELNET_FAILURE_SCAN_TAIL_BYTES = max(len(marker) for marker in TELNET_FAILURE_MARKERS)
 POLLIN = getattr(select, "POLLIN", 0x0001)
 POLLOUT = getattr(select, "POLLOUT", 0x0004)
 POLLERR = getattr(select, "POLLERR", 0x0008)
@@ -890,8 +891,11 @@ def _read_telnet_until_idle(
     initial_timeout_s: float = TELNET_IDLE_TIMEOUT_S,
     quiet_timeout_s: float = TELNET_POST_DATA_IDLE_TIMEOUT_S,
     trace=None,
-) -> bytes:
-    visible = bytearray()
+) -> tuple[int, bool]:
+    visible_bytes = 0
+    has_visible_text = False
+    pending_trailing_whitespace = 0
+    failure_window = bytearray()
     empty_reads = 0
     saw_data = False
     while True:
@@ -914,12 +918,27 @@ def _read_telnet_until_idle(
             break
         saw_data = True
         empty_reads = 0
-        visible.extend(_telnet_collect_visible(handle, chunk, trace=trace))
-    payload = bytes(visible)
-    text = payload.decode("utf-8", "ignore").strip()
-    if text and any(marker.decode("utf-8") in text.lower() for marker in TELNET_FAILURE_MARKERS):
-        raise RuntimeError("telnet failure marker present")
-    return payload
+        visible = _telnet_collect_visible(handle, chunk, trace=trace)
+        if not visible:
+            continue
+        failure_window.extend(visible.lower())
+        if any(marker in failure_window for marker in TELNET_FAILURE_MARKERS):
+            raise RuntimeError("telnet failure marker present")
+        if len(failure_window) > TELNET_FAILURE_SCAN_TAIL_BYTES:
+            failure_window = bytearray(failure_window[-TELNET_FAILURE_SCAN_TAIL_BYTES:])
+        if not has_visible_text:
+            visible = visible.lstrip()
+            if not visible:
+                continue
+            has_visible_text = True
+        trailing_whitespace = len(visible) - len(visible.rstrip())
+        body_length = len(visible) - trailing_whitespace
+        if body_length:
+            visible_bytes += pending_trailing_whitespace + body_length
+            pending_trailing_whitespace = trailing_whitespace
+        else:
+            pending_trailing_whitespace += len(visible)
+    return (visible_bytes, has_visible_text)
 
 
 def portable_telnet_runner(target: str, timeout_s: int, username: str | None = None, password: str | None = None, trace=None) -> PingProbeResult:
@@ -930,11 +949,11 @@ def portable_telnet_runner(target: str, timeout_s: int, username: str | None = N
         handle = None
         try:
             handle = socket.create_connection((host, port), timeout=timeout_s)
-            text = _read_telnet_until_idle(handle).decode("utf-8", "ignore").strip()
+            visible_bytes, has_visible_text = _read_telnet_until_idle(handle)
             return PingProbeResult(
                 ok=True,
                 latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
-                details=(f"visible_bytes={len(text.encode())}" if text else "connected"),
+                details=(f"visible_bytes={visible_bytes}" if has_visible_text else "connected"),
             )
         except Exception as error:
             if handle is not None and _is_telnet_post_connect_success(error):
@@ -956,11 +975,11 @@ def portable_telnet_runner(target: str, timeout_s: int, username: str | None = N
     try:
         deadline = _deadline_after_s(timeout_s)
         handle = _open_socket_compat(host, port, timeout_s, deadline, trace=trace)
-        text = _read_telnet_until_idle(handle, trace=trace).decode("utf-8", "ignore").strip()
+        visible_bytes, has_visible_text = _read_telnet_until_idle(handle, trace=trace)
         return PingProbeResult(
             ok=True,
             latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
-            details=(f"visible_bytes={len(text.encode())}" if text else "connected"),
+            details=(f"visible_bytes={visible_bytes}" if has_visible_text else "connected"),
         )
     except Exception as error:
         if handle is not None and _is_telnet_post_connect_success(error):

@@ -2036,3 +2036,31 @@ def test_portable_telnet_runner_handles_explicit_failure_text_and_socket_error(m
 
     assert socket_failure.ok is False
     assert socket_failure.details == "refused"
+
+
+def test_read_telnet_until_idle_counts_visible_bytes_without_buffering_full_transcript():
+    class LargeBannerSocket(FakeSocket):
+        def __init__(self):
+            super().__init__([b"A" * 2048, b"B" * 1024, b""])
+            self.timeout_values = []
+
+        def settimeout(self, value):
+            self.timeout_values.append(value)
+
+    handle = LargeBannerSocket()
+
+    visible_bytes, has_visible_text = runtime_checks._read_telnet_until_idle(handle)
+
+    assert (visible_bytes, has_visible_text) == (3072, True)
+    assert handle.timeout_values == [
+        runtime_checks.TELNET_IDLE_TIMEOUT_S,
+        runtime_checks.TELNET_POST_DATA_IDLE_TIMEOUT_S,
+        runtime_checks.TELNET_POST_DATA_IDLE_TIMEOUT_S,
+    ]
+
+
+def test_read_telnet_until_idle_detects_failure_markers_across_chunk_boundaries():
+    handle = FakeSocket([b"Access den", b"ied\r\n", b""])
+
+    with pytest.raises(RuntimeError, match="telnet failure marker present"):
+        runtime_checks._read_telnet_until_idle(handle)
