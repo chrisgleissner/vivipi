@@ -19,6 +19,20 @@ def _button_name(button) -> str:
     return str(getattr(button, "value", button))
 
 
+def _button_fields(state, button, **extra_fields):
+    fields = [
+        f"button={_button_name(button)}",
+        f"pin={state['pin_name']}",
+        f"pull={state['pull']}",
+        f"idle={state['idle_value']}",
+        f"raw={state['raw_value']}",
+        f"stable={state['stable_value']}",
+    ]
+    for key, value in extra_fields.items():
+        fields.append(f"{key}={value}")
+    return tuple(fields)
+
+
 def probe_pin_states(pin_numbers, pull="up"):
     if Pin is None:  # pragma: no cover - imported on-device
         raise RuntimeError("machine.Pin is required on device")
@@ -59,13 +73,7 @@ class ButtonReader:
             self._log(
                 "info",
                 "init",
-                (
-                    f"button={_button_name(button)}",
-                    f"pin={entry['pin']}",
-                    f"pull={bias}",
-                    f"idle={idle_value}",
-                    f"sample={raw_value}",
-                ),
+                _button_fields(self.states[button], button, sample=raw_value),
             )
 
     def bind_logger(self, logger):
@@ -74,12 +82,7 @@ class ButtonReader:
             self._log(
                 "info",
                 "bind",
-                (
-                    f"button={_button_name(button)}",
-                    f"pin={state['pin_name']}",
-                    f"pull={state['pull']}",
-                    f"idle={state['idle_value']}",
-                ),
+                _button_fields(state, button),
             )
 
     def _normalize_button_entry(self, value):
@@ -118,11 +121,7 @@ class ButtonReader:
                 self._log(
                     "info",
                     "raw",
-                    (
-                        f"button={_button_name(button)}",
-                        f"value={raw_value}",
-                        f"edge={edge}",
-                    ),
+                    _button_fields(state, button, edge=edge),
                 )
 
             if raw_value != state["stable_value"]:
@@ -142,14 +141,12 @@ class ButtonReader:
                 self._log(
                     "info",
                     "debounced",
-                    (
-                        f"button={_button_name(button)}",
-                        f"raw={raw_value}",
-                        f"stable={raw_value}",
-                        f"idle={state['idle_value']}",
-                        f"pressed={pressed}",
-                        f"edge={edge}",
-                    ),
+                    _button_fields(state, button, edge=edge, pressed=pressed),
+                )
+                self._log(
+                    "info",
+                    "press" if pressed else "release",
+                    _button_fields(state, button, edge=edge, pressed=pressed),
                 )
 
             if state["stable_value"] == state["idle_value"]:
@@ -175,13 +172,7 @@ class ButtonReader:
                 self._log(
                     "info",
                     "event",
-                    (
-                        f"button={_button_name(button)}",
-                        f"held_ms={held_ms}",
-                        f"step={state['emitted_steps']}",
-                        f"raw={raw_value}",
-                        f"stable={state['stable_value']}",
-                    ),
+                    _button_fields(state, button, held_ms=held_ms, step=state["emitted_steps"], pressed=True),
                 )
 
         return tuple(events)

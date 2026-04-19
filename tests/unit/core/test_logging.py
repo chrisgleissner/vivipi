@@ -1,6 +1,6 @@
 import pytest
 
-from vivipi.core.logging import LogLevel, StructuredLogger, bound_text, format_log_line, log_field, parse_log_level
+from vivipi.core.logging import LogLevel, StructuredLogger, _enum_name, bound_text, format_log_line, log_field, parse_log_level
 from vivipi.core.ring_buffer import RingBuffer
 
 
@@ -63,3 +63,17 @@ def test_logging_helpers_cover_parse_validation_sink_and_clear_paths():
     logger.clear()
 
     assert logger.dump() == ()
+
+
+def test_format_log_line_uses_enum_name_fallback_when_micropython_exposes_property_descriptor():
+    class FakeEnumLike:
+        name = "<property>"
+        _name_ = "INFO"
+
+        def __str__(self):
+            return "ignored"
+
+    assert _enum_name(FakeEnumLike()) == "INFO"
+    assert _enum_name(20) == "INFO"
+    assert _enum_name(LogLevel.INFO) == "INFO"
+    assert format_log_line(LogLevel.INFO, "core", "boot") == "[vivipi] [INFO][CORE] boot"

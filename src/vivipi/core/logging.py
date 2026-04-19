@@ -21,6 +21,30 @@ class LogLevel(IntEnum):
     ERROR = 40
 
 
+_LOG_LEVEL_NAMES = {
+    10: "DEBUG",
+    20: "INFO",
+    30: "WARN",
+    40: "ERROR",
+}
+
+
+def _enum_name(value: object) -> str:
+    try:
+        numeric_value = int(value)
+    except (TypeError, ValueError):
+        numeric_value = None
+    if numeric_value in _LOG_LEVEL_NAMES:
+        return _LOG_LEVEL_NAMES[numeric_value]
+    candidate = getattr(value, "name", None)
+    if isinstance(candidate, str) and candidate and candidate != "<property>":
+        return candidate
+    candidate = getattr(value, "_name_", None)
+    if isinstance(candidate, str) and candidate and candidate != "<property>":
+        return candidate
+    return str(value)
+
+
 def parse_log_level(value: LogLevel | str | int) -> LogLevel:
     if isinstance(value, LogLevel):
         return value
@@ -63,7 +87,7 @@ def format_log_line(
     normalized_component = _hard_limit(component.upper(), DEFAULT_COMPONENT_LIMIT) or "CORE"
     normalized_message = bound_text(message, DEFAULT_MESSAGE_LIMIT) or "event"
 
-    level_name = getattr(normalized_level, "name", None) or getattr(normalized_level, "_name_", None) or str(normalized_level)
+    level_name = _enum_name(normalized_level)
     parts = [LOG_PREFIX, f"[{level_name}][{normalized_component}] {normalized_message}"]
     for field in fields[:field_limit]:
         if field:

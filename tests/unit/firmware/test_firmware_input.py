@@ -44,6 +44,14 @@ def build_reader(monkeypatch, button_config=None, initial_values=None, input_con
     return reader, fake_time, pin_stub
 
 
+class FakeLogger:
+    def __init__(self):
+        self.calls = []
+
+    def info(self, component, message, fields=()):
+        self.calls.append((component, message, tuple(fields)))
+
+
 def test_button_reader_defaults_to_pull_up_and_idle_high(monkeypatch):
     reader, _, pin_stub = build_reader(monkeypatch)
 
@@ -150,3 +158,44 @@ def test_button_reader_rejects_auto_pull_mode(monkeypatch):
 
     with pytest.raises(ValueError, match="button pull must be up or down"):
         firmware_input.ButtonReader({"a": {"pin": "GP15", "pull": "auto"}, "b": "GP17"}, InputController())
+
+
+def test_button_reader_logs_press_release_and_event_details(monkeypatch):
+    reader, fake_time, _ = build_reader(monkeypatch)
+    logger = FakeLogger()
+    reader.bind_logger(logger)
+    button_a = reader.states[Button.A]["pin"]
+
+    fake_time.now_ms = 10
+    button_a.current_value = 0
+    reader.poll()
+
+    fake_time.now_ms = 40
+    events = reader.poll()
+
+    fake_time.now_ms = 60
+    button_a.current_value = 1
+    reader.poll()
+
+    fake_time.now_ms = 90
+    reader.poll()
+
+    assert len(events) == 1
+    messages = [message for _, message, _ in logger.calls]
+    assert "raw" in messages
+    assert "debounced" in messages
+    assert "press" in messages
+    assert "event" in messages
+    assert "release" in messages
+
+    press_fields = next(fields for _, message, fields in logger.calls if message == "press")
+    release_fields = next(fields for _, message, fields in logger.calls if message == "release")
+    event_fields = next(fields for _, message, fields in logger.calls if message == "event")
+
+    assert "button=A" in press_fields
+    assert "pin=GP15" in press_fields
+    assert "pull=up" in press_fields
+    assert "pressed=True" in press_fields
+    assert "pressed=False" in release_fields
+    assert "held_ms=30" in event_fields
+    assert "step=1" in event_fields
