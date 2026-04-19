@@ -19,7 +19,7 @@ except NameError:  # pragma: no cover - MicroPython fallback
 
 from vivipi.core.execution import HttpResponseResult, PingProbeResult, execute_check
 from vivipi.core.logging import bound_text
-from vivipi.core.models import CheckDefinition, CheckType
+from vivipi.core.models import CheckDefinition, CheckType, Status
 
 
 PING_LATENCY_PATTERN = re.compile(r"time[=<]([0-9.]+)")
@@ -36,6 +36,8 @@ TELNET_WILL = 251
 TELNET_IDLE_TIMEOUT_S = 0.12
 TELNET_POST_DATA_IDLE_TIMEOUT_S = 0.02
 TELNET_MAX_EMPTY_READS = 1
+TELNET_STABLE_OPEN_THRESHOLD_MS = 500
+TELNET_EARLY_CLOSE_THRESHOLD_MS = 100
 TELNET_SB = 250
 TELNET_SE = 240
 TELNET_FAILURE_SCAN_TAIL_BYTES = max(len(marker) for marker in TELNET_FAILURE_MARKERS)
@@ -867,63 +869,171 @@ def _is_telnet_post_connect_success(error: BaseException) -> bool:
     return _classify_network_error(error) in {"reset", "timeout"}
 
 
-def _telnet_collect_visible(handle, chunk: bytes, trace=None) -> bytes:
+def _telnet_collect_visible(handle, chunk: bytes, trace=None) -> tuple[bytes, bool]:
     visible = bytearray()
+    handshake_detected = False
     index = 0
     while index < len(chunk):
         byte = chunk[index]
         if byte == TELNET_IAC and index + 2 < len(chunk) and chunk[index + 1] in (TELNET_DO, TELNET_DONT, TELNET_WILL, TELNET_WONT):
             command = chunk[index + 1]
             option = chunk[index + 2]
+            handshake_detected = True
             reply = bytes((TELNET_IAC, TELNET_WONT if command in (TELNET_DO, TELNET_DONT) else TELNET_DONT, option))
             _telnet_send_best_effort(handle, reply, trace=trace)
             index += 3
             continue
         visible.append(byte)
         index += 1
-    return bytes(visible)
+    return bytes(visible), handshake_detected
+
+
+def _telnet_result_metadata(close_reason: str, session_duration_ms: float, handshake_detected: bool) -> dict[str, object]:
+    return {
+        "close_reason": close_reason,
+        "session_duration_ms": round(float(session_duration_ms), 1),
+        "handshake_detected": bool(handshake_detected),
+    }
+
+
+def _telnet_failure_detail(session: dict[str, object]) -> str:
+    close_reason = str(session["close_reason"])
+    if close_reason in {"remote-close", "reset"} and float(session["session_duration_ms"]) < TELNET_EARLY_CLOSE_THRESHOLD_MS:
+        return "closed immediately"
+    if close_reason == "failure-marker":
+        return "telnet failure marker present"
+    if close_reason in {"remote-close", "reset", "idle-timeout", "stable-open"}:
+        return "no telnet interaction"
+    return close_reason
+
+
+def _classify_telnet_session(session: dict[str, object]) -> tuple[Status, str]:
+    session_duration_ms = float(session["session_duration_ms"])
+    close_reason = str(session["close_reason"])
+    handshake_detected = bool(session["handshake_detected"])
+    has_visible_text = bool(session["has_visible_text"])
+    visible_bytes = int(session["visible_bytes"])
+    meaningful_interaction = handshake_detected or has_visible_text
+    stable_session = session_duration_ms >= TELNET_STABLE_OPEN_THRESHOLD_MS
+    early_close = close_reason in {"remote-close", "reset"} and session_duration_ms < TELNET_EARLY_CLOSE_THRESHOLD_MS
+
+    if bool(session["failure_detected"]):
+        return Status.FAIL, "telnet failure marker present"
+    if early_close:
+        return Status.FAIL, "closed immediately"
+    if meaningful_interaction:
+        if has_visible_text:
+            return Status.OK, f"visible_bytes={visible_bytes}"
+        return Status.OK, "negotiated"
+    if stable_session:
+        return Status.DEG, "connected-no-telnet-data"
+    return Status.FAIL, _telnet_failure_detail(session)
 
 
 def _read_telnet_until_idle(
     handle,
     *,
-    max_empty_reads: int = TELNET_MAX_EMPTY_READS,
     initial_timeout_s: float = TELNET_IDLE_TIMEOUT_S,
     quiet_timeout_s: float = TELNET_POST_DATA_IDLE_TIMEOUT_S,
     trace=None,
-) -> tuple[int, bool]:
+) -> dict[str, object]:
+    started_at, uses_ticks_ms = _start_timer()
+    waited_timeout_ms = 0.0
     visible_bytes = 0
     has_visible_text = False
+    handshake_detected = False
     pending_trailing_whitespace = 0
     failure_window = bytearray()
-    empty_reads = 0
     saw_data = False
     while True:
-        if empty_reads >= max_empty_reads:
-            break
-        _set_socket_timeout(handle, quiet_timeout_s if saw_data else initial_timeout_s)
+        current_timeout_s = quiet_timeout_s if saw_data else initial_timeout_s
+        session_duration_ms = max(_elapsed_ms(started_at, uses_ticks_ms), waited_timeout_ms)
+        stable_without_interaction = (not saw_data) and (not has_visible_text) and (not handshake_detected)
+        if stable_without_interaction and session_duration_ms >= TELNET_STABLE_OPEN_THRESHOLD_MS:
+            return {
+                "visible_bytes": visible_bytes,
+                "has_visible_text": has_visible_text,
+                "handshake_detected": handshake_detected,
+                "failure_detected": False,
+                "close_reason": "stable-open",
+                "session_duration_ms": session_duration_ms,
+            }
+        _set_socket_timeout(handle, current_timeout_s)
         try:
             chunk = handle.recv(4096)
         except TimeoutError:
-            empty_reads += 1
-            continue
-        except OSError as error:
-            if _classify_network_error(error) == "timeout":
-                empty_reads += 1
+            waited_timeout_ms += current_timeout_s * 1000.0
+            session_duration_ms = max(_elapsed_ms(started_at, uses_ticks_ms), waited_timeout_ms)
+            if stable_without_interaction and session_duration_ms < TELNET_STABLE_OPEN_THRESHOLD_MS:
                 continue
-            raise
+            return {
+                "visible_bytes": visible_bytes,
+                "has_visible_text": has_visible_text,
+                "handshake_detected": handshake_detected,
+                "failure_detected": False,
+                "close_reason": "idle-timeout",
+                "session_duration_ms": session_duration_ms,
+            }
+        except OSError as error:
+            category = _classify_network_error(error)
+            if category == "timeout":
+                waited_timeout_ms += current_timeout_s * 1000.0
+            session_duration_ms = max(_elapsed_ms(started_at, uses_ticks_ms), waited_timeout_ms)
+            if category == "timeout":
+                if stable_without_interaction and session_duration_ms < TELNET_STABLE_OPEN_THRESHOLD_MS:
+                    continue
+                return {
+                    "visible_bytes": visible_bytes,
+                    "has_visible_text": has_visible_text,
+                    "handshake_detected": handshake_detected,
+                    "failure_detected": False,
+                    "close_reason": "idle-timeout",
+                    "session_duration_ms": session_duration_ms,
+                }
+            return {
+                "visible_bytes": visible_bytes,
+                "has_visible_text": has_visible_text,
+                "handshake_detected": handshake_detected,
+                "failure_detected": False,
+                "close_reason": category,
+                "session_duration_ms": session_duration_ms,
+            }
         if trace is not None:
             _emit_probe_trace(trace, "socket-recv", stage="telnet-recv", bytes_received=len(chunk))
         if not chunk:
-            break
+            return {
+                "visible_bytes": visible_bytes,
+                "has_visible_text": has_visible_text,
+                "handshake_detected": handshake_detected,
+                "failure_detected": False,
+                "close_reason": "remote-close",
+                "session_duration_ms": _elapsed_ms(started_at, uses_ticks_ms),
+            }
         saw_data = True
-        empty_reads = 0
-        visible = _telnet_collect_visible(handle, chunk, trace=trace)
+        try:
+            visible, chunk_handshake = _telnet_collect_visible(handle, chunk, trace=trace)
+        except OSError as error:
+            return {
+                "visible_bytes": visible_bytes,
+                "has_visible_text": has_visible_text,
+                "handshake_detected": handshake_detected,
+                "failure_detected": False,
+                "close_reason": _classify_network_error(error),
+                "session_duration_ms": _elapsed_ms(started_at, uses_ticks_ms),
+            }
+        handshake_detected = handshake_detected or chunk_handshake
         if not visible:
             continue
         failure_window.extend(visible.lower())
         if any(marker in failure_window for marker in TELNET_FAILURE_MARKERS):
-            raise RuntimeError("telnet failure marker present")
+            return {
+                "visible_bytes": visible_bytes,
+                "has_visible_text": has_visible_text,
+                "handshake_detected": handshake_detected,
+                "failure_detected": True,
+                "close_reason": "failure-marker",
+                "session_duration_ms": _elapsed_ms(started_at, uses_ticks_ms),
+            }
         if len(failure_window) > TELNET_FAILURE_SCAN_TAIL_BYTES:
             failure_window = bytearray(failure_window[-TELNET_FAILURE_SCAN_TAIL_BYTES:])
         if not has_visible_text:
@@ -938,7 +1048,29 @@ def _read_telnet_until_idle(
             pending_trailing_whitespace = trailing_whitespace
         else:
             pending_trailing_whitespace += len(visible)
-    return (visible_bytes, has_visible_text)
+    return {
+        "visible_bytes": visible_bytes,
+        "has_visible_text": has_visible_text,
+        "handshake_detected": handshake_detected,
+        "failure_detected": False,
+        "close_reason": "idle-timeout",
+        "session_duration_ms": _elapsed_ms(started_at, uses_ticks_ms),
+    }
+
+
+def _telnet_result_from_session(session: dict[str, object], latency_ms: float) -> PingProbeResult:
+    status, details = _classify_telnet_session(session)
+    return PingProbeResult(
+        ok=status == Status.OK,
+        status=status,
+        latency_ms=latency_ms,
+        details=details,
+        metadata=_telnet_result_metadata(
+            str(session["close_reason"]),
+            float(session["session_duration_ms"]),
+            bool(session["handshake_detected"]),
+        ),
+    )
 
 
 def portable_telnet_runner(target: str, timeout_s: int, username: str | None = None, password: str | None = None, trace=None) -> PingProbeResult:
@@ -949,23 +1081,15 @@ def portable_telnet_runner(target: str, timeout_s: int, username: str | None = N
         handle = None
         try:
             handle = socket.create_connection((host, port), timeout=timeout_s)
-            visible_bytes, has_visible_text = _read_telnet_until_idle(handle)
-            return PingProbeResult(
-                ok=True,
-                latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
-                details=(f"visible_bytes={visible_bytes}" if has_visible_text else "connected"),
-            )
+            session = _read_telnet_until_idle(handle)
+            return _telnet_result_from_session(session, _elapsed_ms(started_at, uses_ticks_ms))
         except Exception as error:
-            if handle is not None and _is_telnet_post_connect_success(error):
-                return PingProbeResult(
-                    ok=True,
-                    latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
-                    details="connected",
-                )
             return PingProbeResult(
                 ok=False,
+                status=Status.FAIL,
                 latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
                 details=_probe_error_detail(error),
+                metadata=_telnet_result_metadata(_classify_network_error(error), 0.0, False),
             )
         finally:
             _close_socket(handle, trace=trace, target=f"{host}:{port}")
@@ -975,16 +1099,16 @@ def portable_telnet_runner(target: str, timeout_s: int, username: str | None = N
     try:
         deadline = _deadline_after_s(timeout_s)
         handle = _open_socket_compat(host, port, timeout_s, deadline, trace=trace)
-        visible_bytes, has_visible_text = _read_telnet_until_idle(handle, trace=trace)
-        return PingProbeResult(
-            ok=True,
-            latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
-            details=(f"visible_bytes={visible_bytes}" if has_visible_text else "connected"),
-        )
+        session = _read_telnet_until_idle(handle, trace=trace)
+        return _telnet_result_from_session(session, _elapsed_ms(started_at, uses_ticks_ms))
     except Exception as error:
-        if handle is not None and _is_telnet_post_connect_success(error):
-            return PingProbeResult(ok=True, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details="connected")
-        return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details=_probe_error_detail(error))
+        return PingProbeResult(
+            ok=False,
+            status=Status.FAIL,
+            latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
+            details=_probe_error_detail(error),
+            metadata=_telnet_result_metadata(_classify_network_error(error), 0.0, False),
+        )
     finally:
         _close_socket(handle, trace=trace, target=f"{host}:{port}")
 
@@ -1168,18 +1292,22 @@ def build_executor(ping_runner=None, http_runner=None, ftp_runner=None, telnet_r
         else:
             counts["failed"] += 1
         if trace is not None:
-            trace(
-                "probe-end",
-                status=status,
-                detail=_probe_end_detail(definition, result),
-                latency_ms=_probe_end_latency_ms(definition, result),
-                observations=len(result.observations),
-                replace_source=result.replace_source,
-                probe_type=_check_type_name(definition),
-                issued=counts["issued"],
-                succeeded=counts["succeeded"],
-                failed=counts["failed"],
-            )
+            fields = {
+                "status": status,
+                "detail": _probe_end_detail(definition, result),
+                "latency_ms": _probe_end_latency_ms(definition, result),
+                "observations": len(result.observations),
+                "replace_source": result.replace_source,
+                "probe_type": _check_type_name(definition),
+                "issued": counts["issued"],
+                "succeeded": counts["succeeded"],
+                "failed": counts["failed"],
+            }
+            for field_name in ("close_reason", "session_duration_ms", "handshake_detected"):
+                value = result.probe_metadata.get(field_name)
+                if value is not None:
+                    fields[field_name] = value
+            trace("probe-end", **fields)
         return result
 
     return executor

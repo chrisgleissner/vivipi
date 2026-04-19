@@ -1,5 +1,28 @@
 # ViviPi Work Log
 
+## 2026-04-19T21:03:39Z
+
+- Started the TELNET false-positive correction task.
+- Repository and architecture review completed before edits:
+  - confirmed `docs/spec.md`, `README.md`, and `docs/spec-traceability.md` still encode the older TELNET rule that post-connect idle timeout or reset counts as healthy reachability
+  - confirmed `src/vivipi/runtime/checks.py` currently returns `PingProbeResult(ok=True, details="connected")` for post-connect timeout/reset and for blank/quiet sessions
+  - confirmed `src/vivipi/core/execution.py` currently maps direct-probe results to only `OK` or `FAIL`, so TELNET cannot currently emit an explicit `DEG`
+  - confirmed `src/vivipi/runtime/app.py` already supports `DEG` observations and only needs probe-result/logging metadata wired through
+  - confirmed existing unit coverage in `tests/unit/runtime/test_checks.py` currently locks in the false-positive TELNET behavior and will need to be replaced with deterministic session-validation tests
+- Current implementation target:
+  - treat early close and immediate disconnect as `FAIL`
+  - treat stable open with no negotiation or visible TELNET payload as `DEG`
+  - reserve `OK` for verified TELNET interaction via negotiation, visible payload, or a clearly stable open session that exceeds the configured threshold
+- Baseline live-target capture against `c64u` and `u64` is in progress so the final worklog can include a before/after comparison.
+
+## 2026-04-19T21:10:26Z
+
+- Added a new backlog item to `PLANS.md` for probe-operation logging.
+- Scope of that follow-up item:
+  - preserve the current regular log and syslog transport paths
+  - extend socket-level probe traces with operation-specific labels so logs clearly show which FTP command, HTTP phase, or TELNET interaction is happening at each send/receive step
+  - keep that work separate from the current TELNET correctness patch so the false-positive fix can complete and validate independently
+
 ## 2026-04-18T21:30:00Z
 
 - Completed the runtime syslog and observability expansion and fixed the stuck-looking bottom heartbeat behavior.

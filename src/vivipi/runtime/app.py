@@ -376,6 +376,12 @@ class RuntimeApp:
                 trace_fields.append(log_field("status", fields["status"]))
             if fields.get("latency_ms") is not None:
                 trace_fields.append(log_field("lat_ms", f"{float(fields['latency_ms']):.1f}"))
+            if fields.get("session_duration_ms") is not None:
+                trace_fields.append(log_field("ses_ms", f"{float(fields['session_duration_ms']):.1f}"))
+            if fields.get("close_reason") is not None:
+                trace_fields.append(log_field("close", fields["close_reason"]))
+            if fields.get("handshake_detected") is not None:
+                trace_fields.append(log_field("hs", bool(fields["handshake_detected"])))
             for field_name, label in (("issued", "issued"), ("succeeded", "ok"), ("failed", "fail")):
                 if fields.get(field_name) is not None:
                     trace_fields.append(log_field(label, int(fields[field_name])))
@@ -683,6 +689,7 @@ class RuntimeApp:
             or run_count == 1
             or run_count % self.summary_log_interval == 0
         )
+        probe_metadata = getattr(result, "probe_metadata", {}) if isinstance(getattr(result, "probe_metadata", {}), dict) else {}
         summary_fields = [
             log_field("id", definition.identifier),
             log_field("type", _enum_text(definition.check_type)),
@@ -692,6 +699,12 @@ class RuntimeApp:
         ]
         if latency_ms is not None:
             summary_fields.append(log_field("lat_ms", f"{float(latency_ms):.1f}"))
+        if probe_metadata.get("session_duration_ms") is not None:
+            summary_fields.append(log_field("ses_ms", f"{float(probe_metadata['session_duration_ms']):.1f}"))
+        if probe_metadata.get("close_reason") is not None:
+            summary_fields.append(log_field("close", probe_metadata["close_reason"]))
+        if probe_metadata.get("handshake_detected") is not None:
+            summary_fields.append(log_field("hs", bool(probe_metadata["handshake_detected"])))
         summary_fields.append(log_field("manual", manual))
         summary_fields.append(log_field("detail", details))
         if emit_summary:
@@ -711,6 +724,8 @@ class RuntimeApp:
                     log_field("type", _enum_text(definition.check_type)),
                     log_field("target", _target_summary(definition)),
                     log_field("status", status),
+                    log_field("close", probe_metadata.get("close_reason", "-")),
+                    log_field("hs", probe_metadata.get("handshake_detected", False)),
                     log_field("detail", details),
                     log_field("manual", manual),
                 ),

@@ -1,5 +1,73 @@
 # Plans
 
+## TELNET False-Positive Correction Plan
+
+Authoritative execution plan for eliminating TELNET false positives where a bare TCP accept or an immediate remote close is currently reported as healthy even though the session is not usable.
+
+### Problem Statement
+
+- The current TELNET probe treats post-connect timeout/reset as healthy connectivity and can therefore report `OK` for sessions that accept the TCP connection and then terminate before meaningful TELNET interaction.
+- Real-world evidence now shows probe/device disagreement: ViviPi reports `OK`, while a manual telnet session to the same target immediately disconnects.
+- The current direct-probe result type only expresses `OK` or `FAIL`, so the runner cannot distinguish between a verified TELNET session and a weak or ambiguous connect-only result.
+
+### Constraints
+
+- `docs/spec.md` remains the product source of truth.
+- Keep the change scoped to the TELNET probe path and the smallest shared execution/logging seams needed to support explicit TELNET `DEG` results.
+- Preserve deterministic, event-driven behavior and avoid introducing a full TELNET client or heavy dependencies.
+- Keep existing logging compatible while extending it with `close_reason`, `session_duration_ms`, and `handshake_detected`.
+- Completion requires tests, `./build`, and validation against the live `c64u` (`192.168.1.167`) and `u64` (`192.168.1.13`) targets.
+
+### Deterministic Success Model To Implement
+
+- `OK`: the TCP session is established and at least one of these deterministic criteria is met before close or timeout:
+	- TELNET negotiation is observed via `IAC DO/DONT/WILL/WONT`, or
+	- non-whitespace visible TELNET payload is read, or
+	- the socket remains open for at least `500 ms` after connect without an early close.
+- `DEG`: the TCP session is established but the probe only reaches the stable-open threshold without negotiation or visible TELNET payload.
+- `FAIL`: connection refusal, timeout before session establishment, explicit failure text, or early remote close before `100 ms` and before any negotiation or visible payload.
+
+### Phases
+
+Phase 1: Root-cause confirmation  
+Status: IN PROGRESS
+
+- Capture the current TELNET runner behavior and manual CLI telnet behavior against `c64u` and `u64`.
+- Confirm the current code path that promotes post-connect reset/timeout to `OK`.
+
+Phase 2: TELNET runner correction  
+Status: NOT STARTED
+
+- Add explicit TELNET session outcome metadata and deterministic close classification.
+- Replace the old post-connect-success shortcut with session validation based on negotiation, visible payload, and stable-open thresholds.
+
+Phase 3: Shared result/logging seam  
+Status: NOT STARTED
+
+- Extend direct-probe result handling so TELNET can emit `Status.DEG` without changing other probe semantics.
+- Extend probe-end and check-summary logging with `close_reason`, `session_duration_ms`, and `handshake_detected` when present.
+
+Phase 4: Regression coverage  
+Status: NOT STARTED
+
+- Add deterministic tests for immediate close, sub-`100 ms` early close, stable idle open, and valid TELNET negotiation.
+- Update any execution/service tests affected by the explicit TELNET status model.
+
+Phase 5: Docs and traceability  
+Status: NOT STARTED
+
+- Update `docs/spec.md`, `README.md`, and `docs/spec-traceability.md` to reflect the corrected TELNET semantics.
+
+Phase 6: Validation  
+Status: NOT STARTED
+
+- Run focused TELNET-related tests, then `./build`.
+- Re-run the TELNET probe against `c64u` and `u64`, compare before/after classifications, and confirm that at least one previously incorrect `OK` now becomes non-`OK`.
+
+### Backlog
+
+- Probe-operation logging follow-up: extend regular logs and mirrored syslog so socket-level probe traces record the concrete protocol operation being attempted, not just generic `socket-send` / `socket-recv` stage names. Example targets include FTP command names such as `USER`, `PASS`, `PWD`, `QUIT`, HTTP request/response phase labels, and TELNET negotiation or read classifications.
+
 ## Liveness Visibility Follow-Up Plan
 
 Superseded by the bottom-heartbeat-only redesign and the follow-on runtime observability work below. Historical notes are preserved for auditability.
