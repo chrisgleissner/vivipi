@@ -268,8 +268,25 @@ def test_telnet_session_helpers_cover_negotiated_and_fallback_failure_paths():
 
 def test_telnet_failure_detail_covers_immediate_close_and_incomplete_response_paths():
     assert runtime_checks._telnet_failure_detail({"close_reason": "remote-close", "session_duration_ms": 10.0}) == "closed immediately"
+    assert runtime_checks._telnet_failure_detail({"close_reason": "failure-marker", "session_duration_ms": 500.0}) == "telnet failure marker present"
     assert runtime_checks._telnet_failure_detail({"close_reason": "chunk-limit", "session_duration_ms": 500.0, "has_visible_text": True}) == "response not fully consumed"
     assert runtime_checks._telnet_failure_detail({"close_reason": "chunk-limit", "session_duration_ms": 500.0, "has_visible_text": False}) == "no telnet response"
+
+
+def test_update_telnet_text_state_ignores_control_and_non_ascii_bytes():
+    visible_bytes, has_visible_text, pending_trailing_whitespace, failure_window, failure_detected = runtime_checks._update_telnet_text_state(
+        bytes((1, ord("A"), 200, ord(" "), ord("B"))),
+        visible_bytes=0,
+        has_visible_text=False,
+        pending_trailing_whitespace=0,
+        failure_window=bytearray(),
+    )
+
+    assert visible_bytes == 3
+    assert has_visible_text is True
+    assert pending_trailing_whitespace == 0
+    assert bytes(failure_window) == b"a b"
+    assert failure_detected is False
 
 
 def test_build_runtime_definitions_accepts_legacy_rest_alias_and_normalizes_to_http():
