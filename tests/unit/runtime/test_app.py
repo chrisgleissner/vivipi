@@ -1558,3 +1558,48 @@ def test_runtime_app_spaces_same_host_requests_from_previous_probe_completion():
     assert [item[0] for item in started] == ["http", "ftp"]
     assert started[1][1] - started[0][1] == pytest.approx(0.35)
     assert sleep_calls == [250]
+
+
+def test_runtime_app_enforces_minimum_same_host_backoff_floor():
+    display = FakeDisplay()
+    definitions = (
+        CheckDefinition(identifier="http", name="Http", check_type=CheckType.HTTP, target="http://router.local/health"),
+        CheckDefinition(identifier="ftp", name="Ftp", check_type=CheckType.FTP, target="router.local"),
+    )
+    sleep_calls = []
+    probe_clock = {"now": 0.0}
+
+    def sleep_ms(value):
+        sleep_calls.append(value)
+        probe_clock["now"] += value / 1000.0
+
+    def executor(definition, now_s):
+        return CheckExecutionResult(
+            source_identifier=definition.identifier,
+            observations=(
+                CheckObservation(
+                    identifier=definition.identifier,
+                    name=definition.name,
+                    status=Status.OK,
+                    observed_at_s=now_s,
+                ),
+            ),
+        )
+
+    app = RuntimeApp(
+        definitions=definitions,
+        executor=executor,
+        display=display,
+        page_interval_s=0,
+        probe_scheduling=ProbeSchedulingPolicy(same_host_backoff_ms=25),
+        sleep_ms=sleep_ms,
+        probe_time_provider=lambda: probe_clock["now"],
+    )
+
+    app.tick(0.0)
+    for _ in range(20):
+        if all(check.status == Status.OK for check in app.state.checks):
+            break
+        app.tick(0.05)
+
+    assert sleep_calls == [250]

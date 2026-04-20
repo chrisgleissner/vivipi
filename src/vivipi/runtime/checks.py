@@ -38,6 +38,7 @@ TELNET_IDLE_TIMEOUT_S = 0.12
 TELNET_POST_DATA_IDLE_TIMEOUT_S = 0.1
 TELNET_STABLE_OPEN_THRESHOLD_MS = 500
 TELNET_EARLY_CLOSE_THRESHOLD_MS = 100
+TELNET_MENU_SAMPLE_LIMIT = 1024
 DEVICE_SOCKET_RECV_CHUNK_SIZE = 512
 TELNET_RECV_CHUNK_SIZE = 512
 TELNET_SB = 250
@@ -1068,6 +1069,50 @@ def _is_ascii_whitespace(byte: int) -> bool:
     return byte in (9, 10, 11, 12, 13, 32)
 
 
+def _skip_terminal_escape_sequence(chunk: bytes, index: int) -> int:
+    next_index = index + 1
+    if next_index >= len(chunk):
+        return len(chunk)
+    introducer = chunk[next_index]
+    if introducer == 91:
+        next_index += 1
+        while next_index < len(chunk) and not 64 <= chunk[next_index] <= 126:
+            next_index += 1
+        return min(len(chunk), next_index + 1)
+    if introducer in (40, 41, 42, 43):
+        return min(len(chunk), next_index + 2)
+    return min(len(chunk), next_index + 1)
+
+
+def _append_telnet_menu_sample(sample: str, visible: bytes) -> str:
+    normalized = []
+    index = 0
+    while index < len(visible):
+        byte = visible[index]
+        if byte == 27:
+            index = _skip_terminal_escape_sequence(visible, index)
+            continue
+        if _is_ascii_whitespace(byte):
+            normalized.append(" ")
+            index += 1
+            continue
+        if 32 <= byte <= 126:
+            normalized.append(chr(_ascii_lower(byte)))
+        index += 1
+    chunk_text = " ".join("".join(normalized).split())
+    if not chunk_text:
+        return sample
+    combined = f"{sample} {chunk_text}".strip() if sample else chunk_text
+    if len(combined) <= TELNET_MENU_SAMPLE_LIMIT:
+        return combined
+    return combined[-TELNET_MENU_SAMPLE_LIMIT:]
+
+
+def _looks_like_ultimate_remote_menu(sample: str) -> bool:
+    lowered = sample.lower()
+    return "ultimate" in lowered and "remote" in lowered and "help" in lowered
+
+
 def _telnet_collect_visible(handle, chunk: bytes, trace=None, target=None, budget=None) -> tuple[bytes, bool]:
     visible = bytearray()
     handshake_detected = False
@@ -1117,11 +1162,17 @@ def _update_telnet_text_state(
     return visible_bytes, has_visible_text, pending_trailing_whitespace, failure_window, False
 
 
-def _telnet_result_metadata(close_reason: str, session_duration_ms: float, handshake_detected: bool) -> dict[str, object]:
+def _telnet_result_metadata(
+    close_reason: str,
+    session_duration_ms: float,
+    handshake_detected: bool,
+    menu_detected: bool,
+) -> dict[str, object]:
     return {
         "close_reason": close_reason,
         "session_duration_ms": round(float(session_duration_ms), 1),
         "handshake_detected": bool(handshake_detected),
+        "menu_detected": bool(menu_detected),
     }
 
 
@@ -1131,8 +1182,10 @@ def _telnet_failure_detail(session: dict[str, object]) -> str:
         return "closed immediately"
     if close_reason == "failure-marker":
         return "telnet failure marker present"
+    if close_reason == "menu-missing":
+        return "menu not detected"
     if close_reason in {"remote-close", "reset", "idle-timeout", "stable-open"}:
-        return "no telnet interaction"
+        return "menu not detected"
     return close_reason
 
 
@@ -1141,22 +1194,17 @@ def _classify_telnet_session(session: dict[str, object]) -> tuple[Status, str]:
     close_reason = str(session["close_reason"])
     handshake_detected = bool(session["handshake_detected"])
     has_visible_text = bool(session["has_visible_text"])
-    visible_bytes = int(session["visible_bytes"])
-    meaningful_interaction = handshake_detected or has_visible_text
-    verified_interaction = meaningful_interaction and session_duration_ms >= TELNET_EARLY_CLOSE_THRESHOLD_MS
-    stable_session = session_duration_ms >= TELNET_STABLE_OPEN_THRESHOLD_MS
+    menu_detected = bool(session.get("menu_detected", False))
     early_close = close_reason in {"remote-close", "reset"} and session_duration_ms < TELNET_EARLY_CLOSE_THRESHOLD_MS
 
     if bool(session["failure_detected"]):
         return Status.FAIL, "telnet failure marker present"
-    if verified_interaction:
-        if has_visible_text:
-            return Status.OK, f"visible_bytes={visible_bytes}"
-        return Status.OK, "negotiated"
+    if menu_detected:
+        return Status.OK, "menu-detected"
     if early_close:
         return Status.FAIL, "closed immediately"
-    if stable_session:
-        return Status.DEG, "connected-no-telnet-data"
+    if has_visible_text or handshake_detected or close_reason in {"idle-timeout", "stable-open", "remote-close", "reset"}:
+        return Status.FAIL, "menu not detected"
     return Status.FAIL, _telnet_failure_detail(session)
 
 
@@ -1179,43 +1227,37 @@ def _read_telnet_until_idle(
     visible_bytes = 0
     has_visible_text = False
     handshake_detected = False
+    menu_detected = False
+    menu_sample = ""
     pending_trailing_whitespace = 0
     failure_window = bytearray()
     saw_data = False
     chunks_received = 0
     read_buffer = bytearray(TELNET_RECV_CHUNK_SIZE) if _is_micropython_runtime() else None
+
+    def snapshot(close_reason: str, *, failure_detected: bool = False) -> dict[str, object]:
+        return {
+            "visible_bytes": visible_bytes,
+            "has_visible_text": has_visible_text,
+            "handshake_detected": handshake_detected,
+            "menu_detected": menu_detected,
+            "failure_detected": failure_detected,
+            "close_reason": close_reason,
+            "session_duration_ms": session_duration_ms(),
+        }
+
     while True:
         current_timeout_s = quiet_timeout_s if saw_data else initial_timeout_s
         current_duration_ms = session_duration_ms()
         meaningful_interaction = handshake_detected or has_visible_text
+        awaiting_menu = meaningful_interaction and not menu_detected
         stable_without_interaction = (not meaningful_interaction) and (not saw_data)
         if stable_without_interaction and current_duration_ms >= TELNET_STABLE_OPEN_THRESHOLD_MS:
-            return {
-                "visible_bytes": visible_bytes,
-                "has_visible_text": has_visible_text,
-                "handshake_detected": handshake_detected,
-                "failure_detected": False,
-                "close_reason": "stable-open",
-                "session_duration_ms": current_duration_ms,
-            }
+            return snapshot("stable-open")
         if chunks_received >= max_chunks:
-            return {
-                "visible_bytes": visible_bytes,
-                "has_visible_text": has_visible_text,
-                "handshake_detected": handshake_detected,
-                "failure_detected": False,
-                "close_reason": "idle-timeout",
-                "session_duration_ms": current_duration_ms,
-            }
+            return snapshot("idle-timeout")
         if deadline is not None and _deadline_remaining_ms(deadline) <= 0:
-            return {
-                "visible_bytes": visible_bytes,
-                "has_visible_text": has_visible_text,
-                "handshake_detected": handshake_detected,
-                "failure_detected": False,
-                "close_reason": "idle-timeout",
-                "session_duration_ms": current_duration_ms,
-            }
+            return snapshot("idle-timeout")
         _set_socket_timeout(handle, current_timeout_s)
         try:
             if read_buffer is not None:
@@ -1230,55 +1272,30 @@ def _read_telnet_until_idle(
             waited_timeout_ms += current_timeout_s * 1000.0
             current_duration_ms = session_duration_ms()
             meaningful_interaction = handshake_detected or has_visible_text
+            awaiting_menu = meaningful_interaction and not menu_detected
             stable_without_interaction = (not meaningful_interaction) and (not saw_data)
-            if meaningful_interaction and current_duration_ms < TELNET_EARLY_CLOSE_THRESHOLD_MS:
+            if awaiting_menu and current_duration_ms < TELNET_STABLE_OPEN_THRESHOLD_MS:
                 continue
             if stable_without_interaction and current_duration_ms < TELNET_STABLE_OPEN_THRESHOLD_MS:
                 continue
-            return {
-                "visible_bytes": visible_bytes,
-                "has_visible_text": has_visible_text,
-                "handshake_detected": handshake_detected,
-                "failure_detected": False,
-                "close_reason": "idle-timeout",
-                "session_duration_ms": current_duration_ms,
-            }
+            return snapshot("idle-timeout")
         except OSError as error:
             category = _classify_network_error(error)
             if category == "timeout":
                 waited_timeout_ms += current_timeout_s * 1000.0
             current_duration_ms = session_duration_ms()
             meaningful_interaction = handshake_detected or has_visible_text
+            awaiting_menu = meaningful_interaction and not menu_detected
+            stable_without_interaction = (not meaningful_interaction) and (not saw_data)
             if category == "timeout":
-                if meaningful_interaction and current_duration_ms < TELNET_EARLY_CLOSE_THRESHOLD_MS:
+                if awaiting_menu and current_duration_ms < TELNET_STABLE_OPEN_THRESHOLD_MS:
                     continue
                 if stable_without_interaction and current_duration_ms < TELNET_STABLE_OPEN_THRESHOLD_MS:
                     continue
-                return {
-                    "visible_bytes": visible_bytes,
-                    "has_visible_text": has_visible_text,
-                    "handshake_detected": handshake_detected,
-                    "failure_detected": False,
-                    "close_reason": "idle-timeout",
-                    "session_duration_ms": current_duration_ms,
-                }
-            return {
-                "visible_bytes": visible_bytes,
-                "has_visible_text": has_visible_text,
-                "handshake_detected": handshake_detected,
-                "failure_detected": False,
-                "close_reason": category,
-                "session_duration_ms": current_duration_ms,
-            }
+                return snapshot("idle-timeout")
+            return snapshot(category)
         if not chunk:
-            return {
-                "visible_bytes": visible_bytes,
-                "has_visible_text": has_visible_text,
-                "handshake_detected": handshake_detected,
-                "failure_detected": False,
-                "close_reason": "remote-close",
-                "session_duration_ms": session_duration_ms(),
-            }
+            return snapshot("remote-close")
         saw_data = True
         chunks_received += 1
         try:
@@ -1286,26 +1303,13 @@ def _read_telnet_until_idle(
         except TimeoutError as error:
             if _normalize_error_text(error) == "probe io budget exhausted":
                 raise
-            return {
-                "visible_bytes": visible_bytes,
-                "has_visible_text": has_visible_text,
-                "handshake_detected": handshake_detected,
-                "failure_detected": False,
-                "close_reason": _classify_network_error(error),
-                "session_duration_ms": session_duration_ms(),
-            }
+            return snapshot(_classify_network_error(error))
         except OSError as error:
-            return {
-                "visible_bytes": visible_bytes,
-                "has_visible_text": has_visible_text,
-                "handshake_detected": handshake_detected,
-                "failure_detected": False,
-                "close_reason": _classify_network_error(error),
-                "session_duration_ms": session_duration_ms(),
-            }
+            return snapshot(_classify_network_error(error))
         handshake_detected = handshake_detected or chunk_handshake
         if not visible:
             continue
+        menu_sample = _append_telnet_menu_sample(menu_sample, visible)
         visible_bytes, has_visible_text, pending_trailing_whitespace, failure_window, failure_detected = _update_telnet_text_state(
             visible,
             visible_bytes=visible_bytes,
@@ -1314,22 +1318,11 @@ def _read_telnet_until_idle(
             failure_window=failure_window,
         )
         if failure_detected:
-            return {
-                "visible_bytes": visible_bytes,
-                "has_visible_text": has_visible_text,
-                "handshake_detected": handshake_detected,
-                "failure_detected": True,
-                "close_reason": "failure-marker",
-                "session_duration_ms": session_duration_ms(),
-            }
-    return {
-        "visible_bytes": visible_bytes,
-        "has_visible_text": has_visible_text,
-        "handshake_detected": handshake_detected,
-        "failure_detected": False,
-        "close_reason": "idle-timeout",
-        "session_duration_ms": session_duration_ms(),
-    }
+            return snapshot("failure-marker", failure_detected=True)
+        menu_detected = _looks_like_ultimate_remote_menu(menu_sample)
+        if menu_detected:
+            return snapshot("menu-detected")
+    return snapshot("idle-timeout")
 
 
 def _telnet_result_from_session(session: dict[str, object], latency_ms: float) -> PingProbeResult:
@@ -1343,6 +1336,7 @@ def _telnet_result_from_session(session: dict[str, object], latency_ms: float) -
             str(session["close_reason"]),
             float(session["session_duration_ms"]),
             bool(session["handshake_detected"]),
+            bool(session.get("menu_detected", False)),
         ),
     )
 
@@ -1366,7 +1360,7 @@ def portable_telnet_runner(target: str, timeout_s: int, username: str | None = N
                 status=Status.FAIL,
                 latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
                 details=_probe_error_detail(error),
-                metadata=_telnet_result_metadata(_classify_network_error(error), 0.0, False),
+                metadata=_telnet_result_metadata(_classify_network_error(error), 0.0, False, False),
             )
         finally:
             _close_socket(handle, trace=trace, target=endpoint)
@@ -1386,7 +1380,7 @@ def portable_telnet_runner(target: str, timeout_s: int, username: str | None = N
             status=Status.FAIL,
             latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
             details=_probe_error_detail(error),
-            metadata=_telnet_result_metadata(_classify_network_error(error), 0.0, False),
+            metadata=_telnet_result_metadata(_classify_network_error(error), 0.0, False, False),
         )
     finally:
         _close_socket(handle, trace=trace, target=endpoint)

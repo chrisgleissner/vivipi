@@ -231,9 +231,9 @@ Checks are evaluated periodically.
 
 - Telnet session
 - Must accept a TCP session
-- `OK` requires meaningful TELNET interaction: either IAC negotiation bytes, visible non-whitespace session output, or another successful post-connect read path that proves the session is usable
-- `DEG` applies when the TCP session stays open for at least `500 ms` after connect but no TELNET negotiation or visible session output is observed
-- Failure = connection failure, explicit login failure text, timeout before establishment, or remote close/reset within `100 ms` before meaningful TELNET interaction
+- `OK` requires the post-connect response to show the Ultimate remote menu, proved by the banner text plus menu/help markers in the returned screen payload
+- The probe should close the session as soon as the menu is confirmed instead of waiting for additional TELNET repaint traffic
+- Failure = connection failure, explicit login failure text, timeout before menu detection, or remote close/reset within `100 ms` before the menu is confirmed
 
 ### SERVICE
 

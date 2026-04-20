@@ -67,6 +67,9 @@ def _sleep_ms(value_ms: int):
     time.sleep(value_ms / 1000.0)
 
 
+MIN_SAME_HOST_BACKOFF_MS = 250
+
+
 def _monotonic_now_s() -> float:
     if hasattr(time, "ticks_ms"):
         return float(time.ticks_ms()) / 1000.0
@@ -388,6 +391,8 @@ class RuntimeApp:
                 trace_fields.append(log_field("close", fields["close_reason"]))
             if fields.get("handshake_detected") is not None:
                 trace_fields.append(log_field("hs", bool(fields["handshake_detected"])))
+            if fields.get("menu_detected") is not None:
+                trace_fields.append(log_field("menu", bool(fields["menu_detected"])))
         elif event == "probe-error":
             for field_name, label in (("issued", "issued"), ("succeeded", "ok"), ("failed", "fail")):
                 if fields.get(field_name) is not None:
@@ -710,6 +715,8 @@ class RuntimeApp:
             summary_fields.append(log_field("close", probe_metadata["close_reason"]))
         if probe_metadata.get("handshake_detected") is not None:
             summary_fields.append(log_field("hs", bool(probe_metadata["handshake_detected"])))
+        if probe_metadata.get("menu_detected") is not None:
+            summary_fields.append(log_field("menu", bool(probe_metadata["menu_detected"])))
         if emit_summary:
             self.logger.info("CHECK", "run", tuple(summary_fields))
 
@@ -729,6 +736,7 @@ class RuntimeApp:
                     log_field("status", status),
                     log_field("close", probe_metadata.get("close_reason", "-")),
                     log_field("hs", probe_metadata.get("handshake_detected", False)),
+                    log_field("menu", probe_metadata.get("menu_detected", False)),
                     log_field("detail", details),
                     log_field("manual", manual),
                 ),
@@ -1003,6 +1011,9 @@ class RuntimeApp:
         return self._probe_now_s()
 
     def _wait_for_probe_slot(self, definition: CheckDefinition):
+        policy = self.probe_scheduling
+        if not policy.allow_concurrent_same_host and policy.same_host_backoff_ms < MIN_SAME_HOST_BACKOFF_MS:
+            policy = replace(policy, same_host_backoff_ms=MIN_SAME_HOST_BACKOFF_MS)
         if self._background_enabled():
             lock_acquired = _lock_context(self.background_lock)
             try:
@@ -1013,7 +1024,7 @@ class RuntimeApp:
         else:
             completed_at = self.last_completed_at_by_host
 
-        remaining_s = probe_backoff_remaining_s(definition, completed_at, self._probe_now_s(), self.probe_scheduling)
+        remaining_s = probe_backoff_remaining_s(definition, completed_at, self._probe_now_s(), policy)
         if remaining_s <= 0:
             return 0
         remaining_ms = max(1, int((remaining_s * 1000.0) + 0.999))
