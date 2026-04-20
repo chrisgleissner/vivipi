@@ -67,6 +67,9 @@ def _sleep_ms(value_ms: int):
     time.sleep(value_ms / 1000.0)
 
 
+MIN_SAME_HOST_BACKOFF_MS = 250
+
+
 def _monotonic_now_s() -> float:
     if hasattr(time, "ticks_ms"):
         return float(time.ticks_ms()) / 1000.0
@@ -366,10 +369,13 @@ class RuntimeApp:
             trace_fields.append(log_field("type", probe_type))
         if "stage" in fields:
             trace_fields.append(log_field("stage", fields["stage"]))
+        operation = fields.get("operation")
+        if operation is not None:
+            trace_fields.append(log_field("operation", operation))
         target = fields.get("target")
         if target is not None:
             trace_fields.append(log_field("target", target))
-        elif "remain_ms" in fields:
+        if "remain_ms" in fields:
             trace_fields.append(log_field("remain_ms", fields["remain_ms"]))
         if event == "probe-end":
             if "status" in fields:
@@ -385,6 +391,8 @@ class RuntimeApp:
                 trace_fields.append(log_field("close", fields["close_reason"]))
             if fields.get("handshake_detected") is not None:
                 trace_fields.append(log_field("hs", bool(fields["handshake_detected"])))
+            if fields.get("menu_detected") is not None:
+                trace_fields.append(log_field("menu", bool(fields["menu_detected"])))
         elif event == "probe-error":
             for field_name, label in (("issued", "issued"), ("succeeded", "ok"), ("failed", "fail")):
                 if fields.get(field_name) is not None:
@@ -707,6 +715,8 @@ class RuntimeApp:
             summary_fields.append(log_field("close", probe_metadata["close_reason"]))
         if probe_metadata.get("handshake_detected") is not None:
             summary_fields.append(log_field("hs", bool(probe_metadata["handshake_detected"])))
+        if probe_metadata.get("menu_detected") is not None:
+            summary_fields.append(log_field("menu", bool(probe_metadata["menu_detected"])))
         if emit_summary:
             self.logger.info("CHECK", "run", tuple(summary_fields))
 
@@ -726,6 +736,7 @@ class RuntimeApp:
                     log_field("status", status),
                     log_field("close", probe_metadata.get("close_reason", "-")),
                     log_field("hs", probe_metadata.get("handshake_detected", False)),
+                    log_field("menu", probe_metadata.get("menu_detected", False)),
                     log_field("detail", details),
                     log_field("manual", manual),
                 ),
@@ -910,8 +921,8 @@ class RuntimeApp:
                 )
         self.state = record_diagnostic_events(self.state, events, activate=activate)
 
-    def _apply_button_events(self, button_events: tuple[ButtonEvent, ...]):
-        now_s = self.current_time_s() or self._probe_now_s()
+    def _apply_button_events(self, button_events: tuple[ButtonEvent, ...], now_s: float | None = None):
+        event_now_s = self._probe_now_s() if now_s is None else float(now_s)
         for event in button_events:
             button = event.button
             if isinstance(button, str):
@@ -933,7 +944,7 @@ class RuntimeApp:
             previous_selection = self.state.selected_id
             self.state = self.input_controller.apply(self.state, button, held_ms=event.held_ms)
             if button in (Button.A, Button.B):
-                self._set_press_feedback(button, now_s)
+                self._set_press_feedback(button, event_now_s)
             if self.state.mode == previous_mode and self.state.selected_id == previous_selection:
                 self.logger.debug(
                     "BTN",
@@ -996,12 +1007,13 @@ class RuntimeApp:
         return float(self.probe_time_provider())
 
     def _event_now_s(self, fallback_now_s: float) -> float:
-        current_now_s = self.current_time_s()
-        if current_now_s is None:
-            return float(fallback_now_s)
-        return float(current_now_s)
+        del fallback_now_s
+        return self._probe_now_s()
 
     def _wait_for_probe_slot(self, definition: CheckDefinition):
+        policy = self.probe_scheduling
+        if not policy.allow_concurrent_same_host and policy.same_host_backoff_ms < MIN_SAME_HOST_BACKOFF_MS:
+            policy = replace(policy, same_host_backoff_ms=MIN_SAME_HOST_BACKOFF_MS)
         if self._background_enabled():
             lock_acquired = _lock_context(self.background_lock)
             try:
@@ -1012,7 +1024,7 @@ class RuntimeApp:
         else:
             completed_at = self.last_completed_at_by_host
 
-        remaining_s = probe_backoff_remaining_s(definition, completed_at, self._probe_now_s(), self.probe_scheduling)
+        remaining_s = probe_backoff_remaining_s(definition, completed_at, self._probe_now_s(), policy)
         if remaining_s <= 0:
             return 0
         remaining_ms = max(1, int((remaining_s * 1000.0) + 0.999))
@@ -1286,14 +1298,14 @@ class RuntimeApp:
         self._run_due_checks(now_s)
 
     def run_all_checks(self, now_s: float | None = None):
-        observed_at_s = now_s if now_s is not None else (self.current_time_s() or 0.0)
+        observed_at_s = self._probe_now_s() if now_s is None else float(now_s)
         for definition in self.definitions:
             self._run_check(definition, observed_at_s, manual=True)
         self._capture_memory_snapshot("manual-run", now_s=observed_at_s)
         return self.get_registered_checks()
 
     def request_refresh(self, now_s: float | None = None):
-        requested_at_s = now_s if now_s is not None else (self.current_time_s() or 0.0)
+        requested_at_s = self._probe_now_s() if now_s is None else float(now_s)
         for definition in self.definitions:
             self._queue_check(definition, requested_at_s, manual=True)
         return requested_at_s
@@ -1581,7 +1593,7 @@ class RuntimeApp:
             else:
                 events = tuple(self.button_reader.poll())
 
-        self._apply_button_events(events)
+        self._apply_button_events(events, now_s=now_s)
         self._drain_probe_traces()
         self._drain_completed_checks()
         self._maybe_reconnect_network(now_s)
@@ -1589,7 +1601,7 @@ class RuntimeApp:
         self._drain_probe_traces()
         self._drain_completed_checks()
         self._drain_probe_traces()
-        frame_now_s = self.current_time_s() or now_s
+        frame_now_s = float(now_s)
         self._apply_page_rotation(frame_now_s)
         self._apply_shift(frame_now_s)
 

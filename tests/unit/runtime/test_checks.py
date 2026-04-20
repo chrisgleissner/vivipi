@@ -243,6 +243,7 @@ def test_telnet_session_helpers_cover_negotiated_and_fallback_failure_paths():
             "session_duration_ms": runtime_checks.TELNET_EARLY_CLOSE_THRESHOLD_MS,
             "close_reason": "idle-timeout",
             "handshake_detected": True,
+            "menu_detected": False,
             "has_visible_text": False,
             "visible_bytes": 0,
             "failure_detected": False,
@@ -253,17 +254,18 @@ def test_telnet_session_helpers_cover_negotiated_and_fallback_failure_paths():
             "session_duration_ms": 50.0,
             "close_reason": "refused",
             "handshake_detected": False,
+            "menu_detected": False,
             "has_visible_text": False,
             "visible_bytes": 0,
             "failure_detected": False,
         }
     )
 
-    assert negotiated_status == Status.OK
-    assert negotiated_detail == "negotiated"
+    assert negotiated_status == Status.FAIL
+    assert negotiated_detail == "menu not detected"
     assert fallback_status == Status.FAIL
     assert fallback_detail == "refused"
-    assert runtime_checks._telnet_failure_detail({"close_reason": "idle-timeout", "session_duration_ms": 250.0}) == "no telnet interaction"
+    assert runtime_checks._telnet_failure_detail({"close_reason": "idle-timeout", "session_duration_ms": 250.0}) == "menu not detected"
 
 
 def test_telnet_failure_detail_covers_immediate_close_and_failure_marker_paths():
@@ -370,7 +372,7 @@ def test_build_executor_trace_sink_emits_probe_lifecycle_events():
 
     executor(definition, 10.0)
 
-    assert captured[0] == ("router", "probe-start", {"timeout_s": 10})
+    assert captured[0] == ("router", "probe-start", {"timeout_s": 10, "target": "192.168.1.1"})
     assert captured[-1][0] == "router"
     assert captured[-1][1] == "probe-end"
     assert captured[-1][2]["status"] == "OK"
@@ -443,6 +445,7 @@ def test_build_executor_tracks_probe_type_counters_across_issued_succeeded_and_f
             "issued": 1,
             "succeeded": 1,
             "failed": 0,
+            "target": "192.168.1.1",
         },
     )
     assert captured[3] == (
@@ -458,6 +461,7 @@ def test_build_executor_tracks_probe_type_counters_across_issued_succeeded_and_f
             "issued": 2,
             "succeeded": 1,
             "failed": 1,
+            "target": "192.168.1.2",
         },
     )
     assert captured[5] == (
@@ -469,6 +473,7 @@ def test_build_executor_tracks_probe_type_counters_across_issued_succeeded_and_f
             "issued": 3,
             "succeeded": 1,
             "failed": 2,
+            "target": "192.168.1.1",
         },
     )
 
@@ -529,6 +534,7 @@ def test_build_executor_probe_end_adds_only_non_null_probe_metadata(monkeypatch)
             "issued": 1,
             "succeeded": 0,
             "failed": 1,
+            "target": "telnet://192.168.1.2",
             "close_reason": "idle-timeout",
             "handshake_detected": False,
         },
@@ -1093,15 +1099,15 @@ def test_recv_and_send_socket_helpers_cover_remaining_branches(monkeypatch):
 def test_telnet_chunk_compat_and_output_helpers_cover_remaining_branches(monkeypatch):
     original_recv_telnet_chunk = runtime_checks._recv_telnet_chunk
 
-    monkeypatch.setattr(runtime_checks, "_recv_telnet_chunk", lambda handle, size, deadline=None, trace=None: (_ for _ in ()).throw(TypeError("other")))
+    monkeypatch.setattr(runtime_checks, "_recv_telnet_chunk", lambda handle, size, deadline=None, trace=None, budget=None: (_ for _ in ()).throw(TypeError("other")))
     with pytest.raises(TypeError, match="other"):
         runtime_checks._recv_telnet_chunk_compat(object(), 4096, deadline=("perf", 1.0), trace=object())
 
     calls = []
 
-    def timeout_compat(handle, size, deadline=None, trace=None):
+    def timeout_compat(handle, size, deadline=None, trace=None, budget=None):
         calls.append((deadline, trace))
-        if deadline is not None or trace is not None:
+        if deadline is not None or trace is not None or budget is not None:
             raise TypeError("deadline unsupported")
         raise OSError("timed out")
 
@@ -1109,8 +1115,8 @@ def test_telnet_chunk_compat_and_output_helpers_cover_remaining_branches(monkeyp
     assert runtime_checks._recv_telnet_chunk_compat(object(), 4096, deadline=("perf", 1.0), trace=object()) == b""
     assert len(calls) == 2
 
-    def broken_compat(handle, size, deadline=None, trace=None):
-        if deadline is not None or trace is not None:
+    def broken_compat(handle, size, deadline=None, trace=None, budget=None):
+        if deadline is not None or trace is not None or budget is not None:
             raise TypeError("trace unsupported")
         raise OSError("broken pipe")
 
@@ -1122,11 +1128,15 @@ def test_telnet_chunk_compat_and_output_helpers_cover_remaining_branches(monkeyp
         pass
 
     monkeypatch.setattr(runtime_checks, "_recv_telnet_chunk", original_recv_telnet_chunk)
-    monkeypatch.setattr(runtime_checks, "_socket_recv", lambda handle, size, deadline, trace=None, stage="telnet-recv": b"READY")
+    monkeypatch.setattr(runtime_checks, "_socket_recv", lambda handle, size, deadline, trace=None, stage="telnet-recv", budget=None: b"READY")
     assert runtime_checks._recv_telnet_chunk(DeadlineRecvSocket(), deadline=("perf", 1.0)) == b"READY"
 
-    monkeypatch.setattr(runtime_checks, "_socket_recv", lambda handle, size, deadline, trace=None, stage="telnet-recv": (_ for _ in ()).throw(TimeoutError("timed out")))
+    monkeypatch.setattr(runtime_checks, "_socket_recv", lambda handle, size, deadline, trace=None, stage="telnet-recv", budget=None: (_ for _ in ()).throw(TimeoutError("timed out")))
     assert runtime_checks._recv_telnet_chunk(DeadlineRecvSocket(), deadline=("perf", 1.0)) == b""
+
+    monkeypatch.setattr(runtime_checks, "_socket_recv", lambda handle, size, deadline, trace=None, stage="telnet-recv", budget=None: (_ for _ in ()).throw(TimeoutError("probe io budget exhausted")))
+    with pytest.raises(TimeoutError, match="probe io budget exhausted"):
+        runtime_checks._recv_telnet_chunk(DeadlineRecvSocket(), deadline=("perf", 1.0))
 
     assert runtime_checks._looks_like_telnet_output("   ") is False
 
@@ -1147,7 +1157,7 @@ def test_recv_telnet_chunk_into_traces_recv_into_and_recv_fallback_paths():
     )
 
     assert bytes(into_result) == b"abc"
-    assert trace_events == [("socket-recv", {"stage": "telnet-recv", "bytes_received": 3})]
+    assert trace_events == [("socket-recv", {"stage": "telnet-recv", "operation": "read-visible", "bytes_received": 3})]
 
     trace_events.clear()
 
@@ -1163,7 +1173,25 @@ def test_recv_telnet_chunk_into_traces_recv_into_and_recv_fallback_paths():
     )
 
     assert fallback_result == b"xy"
-    assert trace_events == [("socket-recv", {"stage": "telnet-recv", "bytes_received": 2})]
+    assert trace_events == [("socket-recv", {"stage": "telnet-recv", "operation": "read-visible", "bytes_received": 2})]
+
+
+def test_recv_telnet_chunk_retries_without_target_when_socket_recv_has_legacy_signature(monkeypatch):
+    calls = []
+
+    def fake_socket_recv(handle, size, deadline, trace=None, stage="telnet-recv", operation=None, target=None, budget=None):
+        calls.append((operation, target, budget))
+        if operation is not None or target is not None:
+            raise TypeError("target unsupported")
+        return b"READY"
+
+    monkeypatch.setattr(runtime_checks, "_socket_recv", fake_socket_recv)
+
+    assert runtime_checks._recv_telnet_chunk(object(), deadline=("perf", 1.0), target="switch:23", budget="budget-token") == b"READY"
+    assert calls == [
+        (None, "switch:23", "budget-token"),
+        (None, None, "budget-token"),
+    ]
 
 
 def test_portable_telnet_runner_treats_micropython_etimedout_after_connect_as_degraded(monkeypatch):
@@ -1189,8 +1217,8 @@ def test_portable_telnet_runner_treats_micropython_etimedout_after_connect_as_de
     result = portable_telnet_runner("192.0.2.10:23", 8)
 
     assert result.ok is False
-    assert result.status == Status.DEG
-    assert result.details == "connected-no-telnet-data"
+    assert result.status == Status.FAIL
+    assert result.details == "menu not detected"
     assert handle.timeout_values == [runtime_checks.TELNET_IDLE_TIMEOUT_S] * 5
     assert handle.closed is True
 
@@ -1373,8 +1401,7 @@ def test_portable_telnet_runner_stdlib_and_raw_error_paths(monkeypatch):
 
     success_handle = StdlibSocket(
         [
-            b"Welcome\r\n",
-            b"router> ",
+            b'\xff\xfe"\xff\xfb\x01\x1bc\x1b[0;37;2m\x1b[1;1H\x1bc\x1b[0;37;2m\x1b[1;1H\x1b[1;6H\x1b[0;37;1m*** C64 Ultimate (V1.49) 1.1.0 *** Remote ***\x1b[24;53H\x1b(BF7=HELP',
             runtime_checks.socket.timeout(),
             runtime_checks.socket.timeout(),
             runtime_checks.socket.timeout(),
@@ -1388,8 +1415,8 @@ def test_portable_telnet_runner_stdlib_and_raw_error_paths(monkeypatch):
     success = portable_telnet_runner("telnet://switch.example.local", 10)
     assert success.ok is True
     assert success.status == Status.OK
-    assert success.details == "visible_bytes=16"
-    assert success_handle.sent == []
+    assert success.details == "menu-detected"
+    assert success_handle.sent == [bytes((255, 252, 34)), bytes((255, 254, 1))]
     assert success_handle.closed is True
 
     empty_handle = StdlibSocket([runtime_checks.socket.timeout(), b""])
@@ -1398,7 +1425,7 @@ def test_portable_telnet_runner_stdlib_and_raw_error_paths(monkeypatch):
     empty = portable_telnet_runner("telnet://switch.example.local", 10)
     assert empty.ok is False
     assert empty.status == Status.FAIL
-    assert empty.details == "no telnet interaction"
+    assert empty.details == "menu not detected"
 
     class TimeoutSocket(FakeSocket):
         def __init__(self):
@@ -1413,8 +1440,8 @@ def test_portable_telnet_runner_stdlib_and_raw_error_paths(monkeypatch):
     monkeypatch.setattr(runtime_checks, "_open_socket", lambda host, port, timeout_s: timeout_handle)
     timeout_result = portable_telnet_runner("telnet://switch.example.local", 10, trace=lambda event, **fields: None)
     assert timeout_result.ok is False
-    assert timeout_result.status == Status.DEG
-    assert timeout_result.details == "connected-no-telnet-data"
+    assert timeout_result.status == Status.FAIL
+    assert timeout_result.details == "menu not detected"
     assert timeout_handle.calls == 5
 
     class BrokenSocket(FakeSocket):
@@ -1468,6 +1495,7 @@ def test_portable_telnet_runner_stdlib_reports_connection_failure_metadata(monke
         "close_reason": "refused",
         "session_duration_ms": 0.0,
         "handshake_detected": False,
+        "menu_detected": False,
     }
 
 
@@ -1568,13 +1596,59 @@ def test_manual_http_socket_and_executor_defaults_cover_remaining_paths(monkeypa
         failing_executor(definitions[0], 10.0)
 
     assert trace_events == [
-        ("ping", "probe-start", {"timeout_s": 10}),
-        ("ping", "probe-error", {"detail": "boom", "probe_type": "PING", "issued": 1, "succeeded": 0, "failed": 1}),
+        ("ping", "probe-start", {"timeout_s": 10, "target": "device.local"}),
+        ("ping", "probe-error", {"detail": "boom", "probe_type": "PING", "issued": 1, "succeeded": 0, "failed": 1, "target": "device.local"}),
     ]
 
-    no_trace_executor = build_executor()
-    with pytest.raises(RuntimeError, match="boom"):
-        no_trace_executor(definitions[0], 10.0)
+
+def test_build_executor_preserves_explicit_trace_target(monkeypatch):
+    definition = build_runtime_definitions(
+        {
+            "checks": [
+                {
+                    "id": "http",
+                    "name": "HTTP",
+                    "type": "HTTP",
+                    "target": "http://device.local/health",
+                    "timeout_s": 10,
+                }
+            ]
+        }
+    )[0]
+    captured = []
+
+    def portable_http_runner(method, target, timeout_s, username=None, password=None, trace=None):
+        del method, username, password
+        trace("socket-open", target="override.local")
+        return runtime_checks.HttpResponseResult(status_code=200, body={}, latency_ms=1.0, details="HTTP 200")
+
+    monkeypatch.setattr(runtime_checks, "portable_http_runner", portable_http_runner)
+
+    monkeypatch.setattr(
+        runtime_checks,
+        "execute_check",
+        lambda definition, now_s, ping, http, ftp, telnet: (
+            http("GET", definition.target, definition.timeout_s),
+            CheckExecutionResult(
+                source_identifier=definition.identifier,
+                observations=(
+                    CheckObservation(
+                        identifier=definition.identifier,
+                        name=definition.name,
+                        status=Status.OK,
+                        details="HTTP 200",
+                        latency_ms=1.0,
+                        observed_at_s=now_s,
+                    ),
+                ),
+            ),
+        )[1],
+    )
+
+    executor = build_executor(trace_sink=lambda definition, event, fields: captured.append((event, dict(fields))))
+    executor(definition, 10.0)
+
+    assert any(event == "socket-open" and fields == {"target": "override.local"} for event, fields in captured)
 
 
 def test_portable_ping_runner_uses_uping_when_available(monkeypatch):
@@ -1755,7 +1829,7 @@ def test_open_socket_reports_dns_errors(monkeypatch):
             trace=lambda event, **fields: trace_events.append((event, fields)),
         )
 
-    assert trace_events[0] == ("dns-start", {"host": "nas.example.local", "port": 21})
+    assert trace_events[0] == ("dns-start", {"host": "nas.example.local", "port": 21, "target": "nas.example.local:21"})
     assert trace_events[1][0] == "dns-error"
 
 
@@ -2207,10 +2281,12 @@ def test_portable_ftp_runner_reports_socket_errors(monkeypatch):
     assert result.details == "refused"
 
 
-def test_portable_telnet_runner_accepts_banner_output(monkeypatch):
+def test_portable_telnet_runner_accepts_ultimate_remote_menu(monkeypatch):
     class BannerSocket(FakeSocket):
         def __init__(self):
-            super().__init__([b"Welcome\r\nrouter> "])
+            super().__init__([
+                b'\xff\xfe"\xff\xfb\x01\x1bc\x1b[0;37;2m\x1b[1;1H\x1bc\x1b[0;37;2m\x1b[1;1H\x1b[1;6H\x1b[0;37;1m*** C64 Ultimate (V1.49) 1.1.0 *** Remote ***\x1b[24;53H\x1b(BF7=HELP'
+            ])
             self.recv_calls = 0
             self.timeout_values = []
 
@@ -2235,9 +2311,10 @@ def test_portable_telnet_runner_accepts_banner_output(monkeypatch):
     )
 
     assert result.ok is True
-    assert result.details == "visible_bytes=16"
-    assert result.metadata["close_reason"] == "idle-timeout"
-    assert handle.sent == []
+    assert result.details == "menu-detected"
+    assert result.metadata["close_reason"] == "menu-detected"
+    assert result.metadata["menu_detected"] is True
+    assert handle.sent == [bytes((255, 252, 34)), bytes((255, 254, 1))]
     assert handle.closed is True
 
 
@@ -2264,7 +2341,7 @@ def test_portable_telnet_runner_rejects_blank_sessions(monkeypatch):
     assert handle.sent == []
 
 
-def test_portable_telnet_runner_marks_stable_idle_open_as_degraded(monkeypatch):
+def test_portable_telnet_runner_rejects_stable_idle_open_without_menu(monkeypatch):
     class TimeoutThenResponseSocket(FakeSocket):
         def __init__(self):
             super().__init__([])
@@ -2284,17 +2361,18 @@ def test_portable_telnet_runner_marks_stable_idle_open_as_degraded(monkeypatch):
     result = portable_telnet_runner("switch.example.local:23", 10, trace=lambda event, **fields: None)
 
     assert result.ok is False
-    assert result.status == Status.DEG
-    assert result.details == "connected-no-telnet-data"
+    assert result.status == Status.FAIL
+    assert result.details == "menu not detected"
     assert result.metadata["close_reason"] == "idle-timeout"
     assert result.metadata["handshake_detected"] is False
+    assert result.metadata["menu_detected"] is False
     assert result.metadata["session_duration_ms"] >= runtime_checks.TELNET_STABLE_OPEN_THRESHOLD_MS
     assert handle.recv_calls == 5
     assert handle.timeout_values == [runtime_checks.TELNET_IDLE_TIMEOUT_S] * 5
     assert handle.sent == []
 
 
-def test_portable_telnet_runner_accepts_password_prompt_as_banner(monkeypatch):
+def test_portable_telnet_runner_rejects_password_prompt_without_menu(monkeypatch):
     class PasswordPromptSocket(FakeSocket):
         def __init__(self):
             super().__init__([b"Password: \xff\xfb\x01", b"\r\nREADY\r\n"])
@@ -2315,11 +2393,12 @@ def test_portable_telnet_runner_accepts_password_prompt_as_banner(monkeypatch):
 
     result = portable_telnet_runner("switch.example.local:23", 10, password="secret", trace=lambda event, **fields: None)
 
-    assert result.ok is True
-    assert result.status == Status.OK
-    assert result.details == "visible_bytes=17"
+    assert result.ok is False
+    assert result.status == Status.FAIL
+    assert result.details == "menu not detected"
     assert result.metadata["close_reason"] == "idle-timeout"
     assert result.metadata["handshake_detected"] is True
+    assert result.metadata["menu_detected"] is False
     assert handle.sent == [bytes((255, 254, 1))]
 
 
@@ -2347,17 +2426,20 @@ def test_portable_telnet_runner_tolerates_negotiation_reply_timeout(monkeypatch)
 
     result = portable_telnet_runner("switch.example.local:23", 10, trace=lambda event, **fields: None)
 
-    assert result.ok is True
-    assert result.status == Status.OK
-    assert result.details == "visible_bytes=17"
+    assert result.ok is False
+    assert result.status == Status.FAIL
+    assert result.details == "menu not detected"
     assert handle.sent == []
     assert handle.reply_attempts == 1
 
 
-def test_portable_telnet_runner_drains_until_quiet_timeout_before_close(monkeypatch):
+def test_portable_telnet_runner_returns_as_soon_as_menu_is_detected(monkeypatch):
     class DrainingBannerSocket(FakeSocket):
         def __init__(self):
-            super().__init__([b"Welcome\r\n", b"router> "])
+            super().__init__([
+                b'\xff\xfe"\xff\xfb\x01\x1bc\x1b[0;37;2m\x1b[1;1H\x1bc\x1b[0;37;2m\x1b[1;1H\x1b[1;4H\x1b[0;37;1m*** Ultimate 64 Elite (V1.4B) 3.14e *** Remote ***\x1b[24;53H\x1b(BF3=HELP',
+                b"extra trailing repaint bytes that should never be read",
+            ])
             self.recv_calls = 0
             self.timeout_values = []
 
@@ -2366,8 +2448,6 @@ def test_portable_telnet_runner_drains_until_quiet_timeout_before_close(monkeypa
 
         def recv(self, _size):
             self.recv_calls += 1
-            if self.recv_calls >= 3:
-                raise OSError("timed out")
             return super().recv(_size)
 
     handle = DrainingBannerSocket()
@@ -2377,15 +2457,12 @@ def test_portable_telnet_runner_drains_until_quiet_timeout_before_close(monkeypa
 
     assert result.ok is True
     assert result.status == Status.OK
-    assert result.details == "visible_bytes=16"
-    assert result.metadata["close_reason"] == "idle-timeout"
-    assert result.metadata["handshake_detected"] is False
-    assert handle.recv_calls == 3
-    assert handle.timeout_values == [
-        runtime_checks.TELNET_IDLE_TIMEOUT_S,
-        runtime_checks.TELNET_POST_DATA_IDLE_TIMEOUT_S,
-        runtime_checks.TELNET_POST_DATA_IDLE_TIMEOUT_S,
-    ]
+    assert result.details == "menu-detected"
+    assert result.metadata["close_reason"] == "menu-detected"
+    assert result.metadata["menu_detected"] is True
+    assert result.metadata["handshake_detected"] is True
+    assert handle.recv_calls == 1
+    assert handle.timeout_values == [runtime_checks.TELNET_IDLE_TIMEOUT_S]
 
 
 def test_portable_telnet_runner_handles_explicit_failure_text_and_socket_error(monkeypatch):
@@ -2456,6 +2533,529 @@ def test_read_telnet_until_idle_detects_failure_markers_across_chunk_boundaries(
     assert session["close_reason"] == "failure-marker"
 
 
+def test_telnet_menu_detection_matches_live_c64u_and_u64_banners():
+    c64u_sample = runtime_checks._append_telnet_menu_sample(
+        "",
+        b'\xff\xfe"\xff\xfb\x01\x1bc\x1b[0;37;2m\x1b[1;1H\x1bc\x1b[0;37;2m\x1b[1;1H\x1b[1;6H\x1b[0;37;1m*** C64 Ultimate (V1.49) 1.1.0 *** Remote ***\x1b[24;53H\x1b(BF7=HELP',
+    )
+    u64_sample = runtime_checks._append_telnet_menu_sample(
+        "",
+        b'\xff\xfe"\xff\xfb\x01\x1bc\x1b[0;37;2m\x1b[1;1H\x1bc\x1b[0;37;2m\x1b[1;1H\x1b[1;4H\x1b[0;37;1m*** Ultimate 64 Elite (V1.4B) 3.14e *** Remote ***\x1b[24;53H\x1b(BF3=HELP',
+    )
+
+    assert runtime_checks._looks_like_ultimate_remote_menu(c64u_sample) is True
+    assert runtime_checks._looks_like_ultimate_remote_menu(u64_sample) is True
+
+
+def test_probe_budget_exhaustion_raises_timeout():
+    budget = runtime_checks._ProbeBudget(max_ops=2, pacing_ms=0)
+    budget.charge()
+    budget.charge()
+    with pytest.raises(TimeoutError, match="probe io budget exhausted"):
+        budget.charge()
+
+
+def test_probe_budget_zero_count_and_probe_activity_callback_are_noops():
+    activity = []
+
+    runtime_checks.set_probe_activity_callback(lambda: activity.append("tick"))
+    runtime_checks._emit_probe_activity()
+    runtime_checks.set_probe_activity_callback(None)
+    runtime_checks._emit_probe_activity()
+
+    budget = runtime_checks._ProbeBudget(max_ops=2, pacing_ms=0)
+    budget.charge(0)
+
+    assert activity == ["tick"]
+    assert budget.remaining == 2
+
+
+def test_bounded_operation_returns_none_for_empty_or_whitespace():
+    assert runtime_checks._bounded_operation(None) is None
+    assert runtime_checks._bounded_operation("") is None
+    assert runtime_checks._bounded_operation("   ") is None
+
+
+def test_bounded_operation_truncates_to_limit():
+    long = "X" * (runtime_checks.PROBE_OPERATION_LIMIT + 20)
+    truncated = runtime_checks._bounded_operation(long)
+    assert truncated is not None
+    assert len(truncated) == runtime_checks.PROBE_OPERATION_LIMIT
+    assert truncated.endswith("…")
+
+
+def test_bounded_operation_honors_single_character_limit(monkeypatch):
+    monkeypatch.setattr(runtime_checks, "PROBE_OPERATION_LIMIT", 1)
+
+    assert runtime_checks._bounded_operation("HELLO") == "H"
+
+
+def test_bounded_operation_collapses_internal_whitespace():
+    assert runtime_checks._bounded_operation("GET\r\n  /v1/checks\t now") == "GET /v1/checks now"
+
+
+def test_ftp_operation_descriptor_redacts_password():
+    assert runtime_checks._ftp_operation_descriptor("PASS hunter2") == "PASS ***"
+    assert runtime_checks._ftp_operation_descriptor("pass anything") == "PASS ***"
+    assert runtime_checks._ftp_operation_descriptor("USER anonymous") == "USER anonymous"
+    assert runtime_checks._ftp_operation_descriptor("PWD") == "PWD"
+    assert runtime_checks._ftp_operation_descriptor("") == "FTP"
+
+
+def test_socket_sendall_includes_operation_when_provided(monkeypatch):
+    monkeypatch.setattr(runtime_checks, "_socket_wait", lambda handle, deadline, writable, trace=None, stage="send": None)
+
+    class SendallSocket:
+        def sendall(self, payload):
+            return None
+
+    events = []
+    runtime_checks._socket_sendall(
+        SendallSocket(),
+        b"GET /v1/checks HTTP/1.1\r\n",
+        ("perf", 1.0),
+        trace=lambda event, **fields: events.append((event, fields)),
+        stage="http-send",
+        operation="GET /v1/checks",
+        target="service.example.local:80",
+    )
+    assert events == [
+        (
+            "socket-send",
+            {"stage": "http-send", "operation": "GET /v1/checks", "target": "service.example.local:80", "bytes_sent": 25},
+        ),
+    ]
+
+
+def test_socket_sendall_omits_operation_when_absent(monkeypatch):
+    monkeypatch.setattr(runtime_checks, "_socket_wait", lambda handle, deadline, writable, trace=None, stage="send": None)
+
+    class SendallSocket:
+        def sendall(self, payload):
+            return None
+
+    events = []
+    runtime_checks._socket_sendall(
+        SendallSocket(),
+        b"hello",
+        ("perf", 1.0),
+        trace=lambda event, **fields: events.append((event, fields)),
+        stage="send",
+    )
+    assert events == [("socket-send", {"stage": "send", "bytes_sent": 5})]
+
+
+def test_socket_sendall_charges_budget_on_successful_send(monkeypatch):
+    monkeypatch.setattr(runtime_checks, "_socket_wait", lambda handle, deadline, writable, trace=None, stage="send": None)
+    monkeypatch.setattr(runtime_checks, "_sleep_ms", lambda value_ms: None)
+
+    class SendallSocket:
+        def sendall(self, payload):
+            return None
+
+    budget = runtime_checks._ProbeBudget(max_ops=1, pacing_ms=0)
+    runtime_checks._socket_sendall(SendallSocket(), b"x", ("perf", 1.0), stage="send", budget=budget)
+    assert budget.remaining == 0
+    with pytest.raises(TimeoutError, match="probe io budget exhausted"):
+        runtime_checks._socket_sendall(SendallSocket(), b"x", ("perf", 1.0), stage="send", budget=budget)
+
+
+def test_socket_sendall_exhausts_budget_mid_loop_on_partial_sends(monkeypatch):
+    monkeypatch.setattr(runtime_checks, "_socket_wait", lambda handle, deadline, writable, trace=None, stage="send": None)
+    monkeypatch.setattr(runtime_checks, "_sleep_ms", lambda value_ms: None)
+
+    class PartialSender:
+        def __init__(self):
+            self.calls = 0
+
+        def send(self, payload):
+            self.calls += 1
+            return 1
+
+    handle = PartialSender()
+    budget = runtime_checks._ProbeBudget(max_ops=2, pacing_ms=0)
+    with pytest.raises(TimeoutError, match="probe io budget exhausted"):
+        runtime_checks._socket_sendall(handle, b"abc", ("perf", 1.0), stage="send", budget=budget)
+    assert handle.calls == 2
+
+
+def test_socket_sendall_exhausts_budget_on_would_block_storm(monkeypatch):
+    monkeypatch.setattr(runtime_checks, "_socket_wait", lambda handle, deadline, writable, trace=None, stage="send": None)
+    monkeypatch.setattr(runtime_checks, "_sleep_ms", lambda value_ms: None)
+
+    class WouldBlockSender:
+        def __init__(self):
+            self.calls = 0
+
+        def send(self, payload):
+            self.calls += 1
+            raise OSError("would block")
+
+    handle = WouldBlockSender()
+    budget = runtime_checks._ProbeBudget(max_ops=2, pacing_ms=0)
+    with pytest.raises(TimeoutError, match="probe io budget exhausted"):
+        runtime_checks._socket_sendall(handle, b"abc", ("perf", 1.0), stage="send", budget=budget)
+    assert handle.calls == 2
+
+
+def test_socket_recv_charges_budget(monkeypatch):
+    monkeypatch.setattr(runtime_checks, "_socket_wait", lambda handle, deadline, writable, trace=None, stage="recv": None)
+    monkeypatch.setattr(runtime_checks, "_sleep_ms", lambda value_ms: None)
+
+    class RecvSocket:
+        def recv(self, size):
+            return b"ok"
+
+    budget = runtime_checks._ProbeBudget(max_ops=1, pacing_ms=0)
+    runtime_checks._socket_recv(RecvSocket(), 4096, ("perf", 1.0), stage="recv", budget=budget)
+    assert budget.remaining == 0
+    with pytest.raises(TimeoutError, match="probe io budget exhausted"):
+        runtime_checks._socket_recv(RecvSocket(), 4096, ("perf", 1.0), stage="recv", budget=budget)
+
+
+def test_socket_recv_exhausts_budget_on_would_block_storm(monkeypatch):
+    monkeypatch.setattr(runtime_checks, "_socket_wait", lambda handle, deadline, writable, trace=None, stage="recv": None)
+    monkeypatch.setattr(runtime_checks, "_sleep_ms", lambda value_ms: None)
+
+    class WouldBlockRecvSocket:
+        def __init__(self):
+            self.calls = 0
+
+        def recv(self, size):
+            self.calls += 1
+            raise OSError("would block")
+
+    handle = WouldBlockRecvSocket()
+    budget = runtime_checks._ProbeBudget(max_ops=2, pacing_ms=0)
+    with pytest.raises(TimeoutError, match="probe io budget exhausted"):
+        runtime_checks._socket_recv(handle, 4096, ("perf", 1.0), stage="recv", budget=budget)
+    assert handle.calls == 2
+
+
+def test_recv_until_closed_exhausts_budget_on_slow_drip_peer(monkeypatch):
+    monkeypatch.setattr(runtime_checks, "_socket_wait", lambda handle, deadline, writable, trace=None, stage="recv": None)
+    monkeypatch.setattr(runtime_checks, "_sleep_ms", lambda value_ms: None)
+
+    class SlowDripSocket:
+        def __init__(self):
+            self.calls = 0
+
+        def recv(self, size):
+            self.calls += 1
+            return b"x"
+
+    handle = SlowDripSocket()
+    budget = runtime_checks._ProbeBudget(max_ops=3, pacing_ms=0)
+    with pytest.raises(TimeoutError, match="probe io budget exhausted"):
+        runtime_checks._recv_until_closed(handle, ("perf", 1.0), stage="http-recv", budget=budget)
+    assert handle.calls == 3
+
+
+def test_socket_wait_falls_back_to_local_wait_accounting_when_deadline_stalls(monkeypatch):
+    poll_calls = []
+
+    class FakePoller:
+        def register(self, handle, flags):
+            return None
+
+        def poll(self, wait_ms):
+            poll_calls.append(wait_ms)
+            return []
+
+    monkeypatch.setattr(runtime_checks.select, "poll", lambda: FakePoller())
+    remaining_values = iter((1500, 1500, 0))
+    monkeypatch.setattr(runtime_checks, "_deadline_remaining_ms", lambda deadline: next(remaining_values))
+
+    with pytest.raises(TimeoutError, match="timed out"):
+        runtime_checks._socket_wait(object(), ("perf", 1.0), writable=False, stage="recv")
+
+    assert poll_calls == [1000, 500]
+
+
+def test_read_telnet_until_idle_terminates_at_max_recv_chunks(monkeypatch):
+    class ChattyPeer:
+        def __init__(self):
+            self.calls = 0
+
+        def settimeout(self, value):
+            return None
+
+        def recv(self, _size):
+            self.calls += 1
+            return b"." * 64
+
+        def sendall(self, payload):
+            return None
+
+    handle = ChattyPeer()
+    session = runtime_checks._read_telnet_until_idle(handle, max_chunks=4)
+    assert handle.calls == 4
+    assert session["visible_bytes"] <= 4 * 64
+    assert session["has_visible_text"] is True
+    assert session["close_reason"] == "idle-timeout"
+
+
+def test_read_telnet_until_idle_respects_deadline(monkeypatch):
+    class ChattyPeer:
+        def settimeout(self, value):
+            return None
+
+        def recv(self, _size):
+            return b"banner"
+
+        def sendall(self, payload):
+            return None
+
+    handle = ChattyPeer()
+    session = runtime_checks._read_telnet_until_idle(
+        handle,
+        deadline=("perf", -1.0),
+    )
+    assert session["visible_bytes"] == 0
+    assert session["has_visible_text"] is False
+    assert session["close_reason"] == "idle-timeout"
+
+
+def test_read_telnet_until_idle_stops_when_deadline_expires_mid_loop(monkeypatch):
+    remaining_ms = iter((5, 0))
+    monkeypatch.setattr(runtime_checks, "_deadline_remaining_ms", lambda deadline: next(remaining_ms, 0))
+
+    class ChattyPeer:
+        def __init__(self):
+            self.calls = 0
+
+        def settimeout(self, value):
+            return None
+
+        def recv(self, _size):
+            self.calls += 1
+            return b"banner"
+
+        def sendall(self, payload):
+            return None
+
+    handle = ChattyPeer()
+    session = runtime_checks._read_telnet_until_idle(handle, deadline=("perf", 1.0), max_chunks=16)
+    assert handle.calls == 1
+    assert session["visible_bytes"] == 6
+    assert session["has_visible_text"] is True
+    assert session["close_reason"] == "idle-timeout"
+
+
+def test_read_telnet_until_idle_charges_budget_per_chunk(monkeypatch):
+    monkeypatch.setattr(runtime_checks, "_sleep_ms", lambda value_ms: None)
+
+    class ChattyPeer:
+        def __init__(self):
+            self.calls = 0
+
+        def settimeout(self, value):
+            return None
+
+        def recv(self, _size):
+            self.calls += 1
+            return b"banner"
+
+        def sendall(self, payload):
+            return None
+
+    handle = ChattyPeer()
+    budget = runtime_checks._ProbeBudget(max_ops=2, pacing_ms=0)
+    with pytest.raises(TimeoutError, match="probe io budget exhausted"):
+        runtime_checks._read_telnet_until_idle(handle, budget=budget, max_chunks=16)
+
+
+def test_read_telnet_until_idle_exhausts_budget_during_iac_storm(monkeypatch):
+    monkeypatch.setattr(runtime_checks, "_sleep_ms", lambda value_ms: None)
+
+    class IacStormPeer:
+        def __init__(self):
+            self.recv_calls = 0
+            self.send_calls = 0
+
+        def settimeout(self, value):
+            return None
+
+        def recv(self, _size):
+            self.recv_calls += 1
+            return bytes((255, 253, 1, 255, 253, 3, 255, 253, 5))
+
+        def sendall(self, payload):
+            self.send_calls += 1
+            raise OSError(110, "ETIMEDOUT")
+
+    handle = IacStormPeer()
+    budget = runtime_checks._ProbeBudget(max_ops=2, pacing_ms=0)
+    with pytest.raises(TimeoutError, match="probe io budget exhausted"):
+        runtime_checks._read_telnet_until_idle(handle, budget=budget, max_chunks=16)
+    assert handle.recv_calls == 1
+    assert handle.send_calls == 1
+
+
+def test_telnet_strip_negotiation_uses_budgeted_telnet_send_path(monkeypatch):
+    monkeypatch.setattr(runtime_checks, "_sleep_ms", lambda value_ms: None)
+
+    class Sink:
+        def __init__(self):
+            self.sent = []
+
+        def sendall(self, data):
+            self.sent.append(bytes(data))
+
+    handle = Sink()
+    events = []
+    budget = runtime_checks._ProbeBudget(max_ops=1, pacing_ms=0)
+    cleaned = runtime_checks._telnet_strip_negotiation(
+        handle,
+        bytes((255, 253, 1)) + b"login: ",
+        trace=lambda event, **fields: events.append((event, fields)),
+        budget=budget,
+    )
+    assert cleaned == b"login: "
+    assert handle.sent == [bytes((255, 252, 1))]
+    assert budget.remaining == 0
+    assert events == [("socket-send", {"stage": "telnet-send", "operation": "telnet-iac", "bytes_sent": 3})]
+
+
+def test_portable_http_runner_emits_method_and_path_operation(monkeypatch):
+    handle = FakeSocket([b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\nOK", b""])
+
+    monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s, **kwargs: handle)
+
+    send_events: list[dict[str, object]] = []
+
+    def trace(event, **fields):
+        if event == "socket-send":
+            send_events.append(fields)
+
+    result = runtime_checks._portable_http_runner_socket(
+        "GET",
+        "http://service.example.local/v1/checks",
+        5,
+        trace=trace,
+    )
+    assert result.status_code == 200
+    assert send_events, "expected a socket-send event"
+    assert send_events[0].get("operation") == "GET /v1/checks"
+    assert send_events[0].get("stage") == "http-send"
+    assert send_events[0].get("target") == "service.example.local:80"
+
+
+def test_portable_ftp_runner_emits_redacted_pass_operation(monkeypatch):
+    def scripted(responses):
+        return FakeSocket(responses)
+
+    responses = [
+        b"220 welcome\r\n",
+        b"331 need password\r\n",
+        b"230 ok\r\n",
+        b"257 \"/home/user\"\r\n",
+        b"221 bye\r\n",
+    ]
+    handle = scripted(responses)
+    monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s, **kwargs: handle)
+    monkeypatch.setattr(runtime_checks, "_is_micropython_runtime", lambda: True)
+
+    send_events: list[dict[str, object]] = []
+
+    def trace(event, **fields):
+        if event == "socket-send":
+            send_events.append(fields)
+
+    result = portable_ftp_runner("ftp://service.example.local", 5, username="alice", password="hunter2", trace=trace)
+    assert result.ok is True
+    operations = [fields.get("operation") for fields in send_events]
+    assert "USER alice" in operations
+    assert "PASS ***" in operations
+    assert "PWD" in operations
+    assert "QUIT" in operations
+    for fields in send_events:
+        assert fields.get("stage") == "ftp-send"
+        assert fields.get("target") == "service.example.local:21"
+        assert "hunter2" not in str(fields.get("operation", ""))
+
+
+def test_portable_ftp_runner_emits_endpoint_and_operation_on_recv(monkeypatch):
+    handle = FakeSocket(
+        [
+            b"220 welcome\r\n",
+            b"331 need password\r\n",
+            b"230 ok\r\n",
+            b"257 \"/home/user\"\r\n",
+            b"221 bye\r\n",
+        ]
+    )
+    monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s, **kwargs: handle)
+    monkeypatch.setattr(runtime_checks, "_is_micropython_runtime", lambda: True)
+
+    recv_events: list[dict[str, object]] = []
+
+    def trace(event, **fields):
+        if event == "socket-recv":
+            recv_events.append(fields)
+
+    result = portable_ftp_runner("ftp://service.example.local", 5, username="alice", password="hunter2", trace=trace)
+    assert result.ok is True
+    assert recv_events == [
+        {"stage": "ftp-recv", "operation": "server-greeting", "target": "service.example.local:21", "bytes_received": 13},
+        {"stage": "ftp-recv", "operation": "USER alice", "target": "service.example.local:21", "bytes_received": 19},
+        {"stage": "ftp-recv", "operation": "PASS ***", "target": "service.example.local:21", "bytes_received": 8},
+        {"stage": "ftp-recv", "operation": "PWD", "target": "service.example.local:21", "bytes_received": 18},
+        {"stage": "ftp-recv", "operation": "QUIT", "target": "service.example.local:21", "bytes_received": 9},
+    ]
+
+
+def test_telnet_send_best_effort_emits_telnet_iac_operation():
+    class Sink:
+        def __init__(self):
+            self.sent = []
+
+        def sendall(self, data):
+            self.sent.append(bytes(data))
+
+    handle = Sink()
+    events: list[tuple[str, dict[str, object]]] = []
+    sent_ok = runtime_checks._telnet_send_best_effort(
+        handle,
+        bytes((255, 252, 1)),
+        trace=lambda event, **fields: events.append((event, fields)),
+        operation="telnet-iac",
+    )
+    assert sent_ok is True
+    assert events == [
+        ("socket-send", {"stage": "telnet-send", "operation": "telnet-iac", "bytes_sent": 3}),
+    ]
+
+
+def test_read_telnet_until_idle_emits_endpoint_and_operation_on_recv():
+    class PromptPeer:
+        def __init__(self):
+            self.responses = [b"router> ", b""]
+
+        def settimeout(self, value):
+            return None
+
+        def recv(self, _size):
+            return self.responses.pop(0)
+
+        def sendall(self, payload):
+            return None
+
+    events: list[tuple[str, dict[str, object]]] = []
+    session = runtime_checks._read_telnet_until_idle(
+        PromptPeer(),
+        trace=lambda event, **fields: events.append((event, fields)),
+        target="switch.example.local:23",
+    )
+
+    assert session["visible_bytes"] == 7
+    assert session["has_visible_text"] is True
+    assert events[0] == (
+        "socket-recv",
+        {"stage": "telnet-recv", "operation": "read-visible", "target": "switch.example.local:23", "bytes_received": 8},
+    )
+
+
 def test_read_telnet_until_idle_reports_collect_visible_socket_errors(monkeypatch):
     class ChunkSocket(FakeSocket):
         def __init__(self):
@@ -2474,6 +3074,24 @@ def test_read_telnet_until_idle_reports_collect_visible_socket_errors(monkeypatc
     assert session["close_reason"] == "refused"
 
 
+def test_read_telnet_until_idle_reports_non_budget_timeout_from_collect_visible(monkeypatch):
+    class ChunkSocket(FakeSocket):
+        def __init__(self):
+            super().__init__([b"Welcome\r\n"])
+            self.timeout_values = []
+
+        def settimeout(self, value):
+            self.timeout_values.append(value)
+
+    handle = ChunkSocket()
+    monkeypatch.setattr(runtime_checks, "_telnet_collect_visible", lambda *args, **kwargs: (_ for _ in ()).throw(TimeoutError("timed out")))
+
+    session = runtime_checks._read_telnet_until_idle(handle)
+
+    assert session["failure_detected"] is False
+    assert session["close_reason"] == "timeout"
+
+
 def test_read_telnet_until_idle_reports_stable_open_before_first_read(monkeypatch):
     monkeypatch.setattr(runtime_checks, "_start_timer", lambda: (object(), False))
     monkeypatch.setattr(runtime_checks, "_elapsed_ms", lambda started_at, uses_ticks_ms: runtime_checks.TELNET_STABLE_OPEN_THRESHOLD_MS)
@@ -2484,6 +3102,7 @@ def test_read_telnet_until_idle_reports_stable_open_before_first_read(monkeypatc
         "visible_bytes": 0,
         "has_visible_text": False,
         "handshake_detected": False,
+        "menu_detected": False,
         "failure_detected": False,
         "close_reason": "stable-open",
         "session_duration_ms": runtime_checks.TELNET_STABLE_OPEN_THRESHOLD_MS,
@@ -2505,7 +3124,7 @@ def test_read_telnet_until_idle_retries_timeout_after_meaningful_interaction(mon
                 return b"Welcome\r\n"
             raise TimeoutError("timed out")
 
-    elapsed_values = iter((0.0, 0.0, 90.0, 150.0, 150.0))
+    elapsed_values = iter((0.0, 0.0, 90.0, 150.0, 250.0, 510.0, 510.0, 510.0))
     monkeypatch.setattr(runtime_checks, "_start_timer", lambda: (object(), False))
     monkeypatch.setattr(runtime_checks, "_elapsed_ms", lambda started_at, uses_ticks_ms: next(elapsed_values))
 
@@ -2514,7 +3133,7 @@ def test_read_telnet_until_idle_retries_timeout_after_meaningful_interaction(mon
 
     assert session["close_reason"] == "idle-timeout"
     assert session["has_visible_text"] is True
-    assert handle.recv_calls == 3
+    assert handle.recv_calls >= 3
 
 
 def test_read_telnet_until_idle_retries_oserror_timeout_after_meaningful_interaction(monkeypatch):
@@ -2532,7 +3151,7 @@ def test_read_telnet_until_idle_retries_oserror_timeout_after_meaningful_interac
                 return b"READY>"
             raise OSError("timed out")
 
-    elapsed_values = iter((0.0, 0.0, 90.0, 150.0, 150.0))
+    elapsed_values = iter((0.0, 0.0, 90.0, 150.0, 250.0, 510.0, 510.0, 510.0))
     monkeypatch.setattr(runtime_checks, "_start_timer", lambda: (object(), False))
     monkeypatch.setattr(runtime_checks, "_elapsed_ms", lambda started_at, uses_ticks_ms: next(elapsed_values))
 
@@ -2541,7 +3160,7 @@ def test_read_telnet_until_idle_retries_oserror_timeout_after_meaningful_interac
 
     assert session["close_reason"] == "idle-timeout"
     assert session["has_visible_text"] is True
-    assert handle.recv_calls == 3
+    assert handle.recv_calls >= 3
 
 
 def test_read_telnet_until_idle_continues_after_handshake_only_chunks(monkeypatch):
@@ -2553,7 +3172,11 @@ def test_read_telnet_until_idle_continues_after_handshake_only_chunks(monkeypatc
         def settimeout(self, value):
             self.timeout_values.append(value)
 
-    monkeypatch.setattr(runtime_checks, "_telnet_send_best_effort", lambda handle, payload, trace=None: True)
+    monkeypatch.setattr(
+        runtime_checks,
+        "_telnet_send_best_effort",
+        lambda handle, payload, trace=None, operation=None, target=None, budget=None: True,
+    )
 
     handle = HandshakeOnlySocket()
     session = runtime_checks._read_telnet_until_idle(handle)

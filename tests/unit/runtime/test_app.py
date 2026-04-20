@@ -54,36 +54,16 @@ def test_runtime_app_render_once_returns_boot_logo_before_first_frame():
     assert app.render_once(1.0) == "boot-logo"
 
 
-def test_runtime_app_first_tick_uses_fresh_time_after_slow_startup_work_to_expire_boot_logo():
+def test_runtime_app_tick_uses_monotonic_loop_time_for_boot_logo_deadline():
     display = FakeDisplay()
-    definition = make_definition("router")
-
-    def executor(check_definition, now_s):
-        return CheckExecutionResult(
-            source_identifier=check_definition.identifier,
-            observations=(
-                CheckObservation(
-                    identifier=check_definition.identifier,
-                    name=check_definition.name,
-                    status=Status.OK,
-                    details="reachable",
-                    observed_at_s=now_s,
-                ),
-            ),
-        )
-
-    app = RuntimeApp(
-        definitions=(definition,),
-        executor=executor,
-        display=display,
-    )
+    app = RuntimeApp(definitions=(), executor=lambda definition, now_s: None, display=display)
     app.boot_logo_until_s = 4.0
     app.now_provider = lambda: 6.0
 
     reason = app.tick(0.0)
 
-    assert reason == "bootstrap"
-    assert len(display.frames) == 1
+    assert reason == "boot-logo"
+    assert display.frames == []
 
 
 def test_runtime_app_executes_due_checks_and_updates_state():
@@ -1148,6 +1128,28 @@ def test_runtime_app_probe_end_logs_latency_and_type_counters():
     )
 
     assert app.get_logs(limit=1)[0] == "[vivipi] [INFO][PROBE] probe-end id=router evt=probe-end type=PING status=OK lat_ms=12.0 issued=3 ok=2 fail=1"
+def test_runtime_app_probe_trace_logs_operation_immediately_after_stage():
+    definition = make_definition("router", check_type=CheckType.FTP)
+    app = RuntimeApp(
+        definitions=(definition,),
+        executor=lambda definition, now_s: None,
+        display=FakeDisplay(),
+    )
+
+    app._log_probe_trace(
+        definition,
+        "socket-send",
+        {
+            "stage": "ftp-send",
+            "operation": "USER anonymous",
+            "target": "192.0.2.10:21",
+        },
+    )
+
+    assert app.get_logs(limit=1)[0] == (
+        "[vivipi] [INFO][PROBE] socket-send id=router evt=socket-send "
+        "stage=ftp-send operation=USER anonymous target=192.0.2.10:21"
+    )
 
 
 def test_runtime_app_probe_end_logs_counters_and_probe_metadata():
@@ -1202,6 +1204,20 @@ def test_runtime_app_probe_trace_overlay_and_button_edge_paths_cover_remaining_b
 
     assert trace_calls == [("router", "socket-wait", {"remain_ms": 120})]
     assert any("remain_ms=120" in line for line in app.get_logs())
+
+    app.emit_probe_trace(
+        definition,
+        "socket-recv",
+        {
+            "stage": "http-recv",
+            "operation": "GET /health",
+            "target": "192.0.2.20:80",
+            "remain_ms": 80,
+        },
+    )
+
+    recv_log = app.get_logs(limit=1)[0]
+    assert "stage=http-recv operation=GET /health target=192.0.2.20:80 remain_ms=80" in recv_log
 
     app.tick(0.0)
     app._set_feedback("HELLO", 1.0, duration_s=1.0)
@@ -1541,4 +1557,49 @@ def test_runtime_app_spaces_same_host_requests_from_previous_probe_completion():
 
     assert [item[0] for item in started] == ["http", "ftp"]
     assert started[1][1] - started[0][1] == pytest.approx(0.35)
+    assert sleep_calls == [250]
+
+
+def test_runtime_app_enforces_minimum_same_host_backoff_floor():
+    display = FakeDisplay()
+    definitions = (
+        CheckDefinition(identifier="http", name="Http", check_type=CheckType.HTTP, target="http://router.local/health"),
+        CheckDefinition(identifier="ftp", name="Ftp", check_type=CheckType.FTP, target="router.local"),
+    )
+    sleep_calls = []
+    probe_clock = {"now": 0.0}
+
+    def sleep_ms(value):
+        sleep_calls.append(value)
+        probe_clock["now"] += value / 1000.0
+
+    def executor(definition, now_s):
+        return CheckExecutionResult(
+            source_identifier=definition.identifier,
+            observations=(
+                CheckObservation(
+                    identifier=definition.identifier,
+                    name=definition.name,
+                    status=Status.OK,
+                    observed_at_s=now_s,
+                ),
+            ),
+        )
+
+    app = RuntimeApp(
+        definitions=definitions,
+        executor=executor,
+        display=display,
+        page_interval_s=0,
+        probe_scheduling=ProbeSchedulingPolicy(same_host_backoff_ms=25),
+        sleep_ms=sleep_ms,
+        probe_time_provider=lambda: probe_clock["now"],
+    )
+
+    app.tick(0.0)
+    for _ in range(20):
+        if all(check.status == Status.OK for check in app.state.checks):
+            break
+        app.tick(0.05)
+
     assert sleep_calls == [250]

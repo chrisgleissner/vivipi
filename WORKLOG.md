@@ -1,5 +1,132 @@
 # ViviPi Work Log
 
+## 2026-04-20T16:35:00Z
+
+- Investigated the report that the attached Pico appeared stuck on the boot screen with a non-moving liveness pixel.
+- Root cause analysis:
+  - the earlier runtime hardening had already switched the scheduler and render path to monotonic time, but the newly added Pico watchdog still was not active on-device because the timeout clamp was invalid
+  - `firmware/runtime.py` still used `WATCHDOG_MIN_TIMEOUT_MS = 15000` while the RP2040 MicroPython watchdog rejects values above `8388ms`
+  - because `_watchdog_timeout_ms(...)` applied `max(MIN, min(MAX, value))`, the effective timeout always became `15000`, `_build_runtime_watchdog(...)` always hit `ValueError`, and the watchdog silently degraded to `_NoopRuntimeWatchdog`
+  - direct on-device probing confirmed the actual hardware limit: `machine.WDT(timeout=8388)` succeeds, `machine.WDT(timeout=8400)` fails with `ValueError`
+- Final corrective implementation:
+  - lowered `WATCHDOG_MIN_TIMEOUT_MS` to `4000` so the clamp now produces a valid watchdog timeout on Pico hardware
+  - kept `WATCHDOG_MAX_TIMEOUT_MS = 8388` and the consecutive-loop / consecutive-display reset fail-safes
+  - added `set_probe_activity_callback(...)` to `src/vivipi/runtime/checks.py` and sliced `_socket_wait(...)` into `1000ms` poll windows so healthy long socket waits feed the hardware watchdog while true stalls still reset the board
+  - emitted probe activity before long-running ping attempts and from the firmware runtime registered the watchdog feed callback into the probe transport layer
+  - preserved timeout behavior under mocked or coarse clocks by falling back to local wait accounting when deadline values do not decrease between poll slices
+- Regression coverage added:
+  - watchdog timeout clamp test
+  - watchdog construction test when the hardware API accepts the chosen timeout
+  - existing focused runtime / firmware coverage still passes with the transport-slice changes
+- Validation:
+  - `python -m pytest -o addopts='' tests/unit/firmware/test_runtime.py tests/unit/runtime/test_checks.py tests/unit/runtime/test_app.py` -> `171 passed`
+  - `./build` -> `688 passed`, total coverage `97.53%`
+- Pico redeploy and boot proof:
+  - redeployed the corrected bundle to the attached Pico with `./build deploy --device-port /dev/ttyACM0`
+  - captured boot logs over raw serial across a forced reboot instead of using `mpremote resume`, which had been misleading because REPL attachment interrupts the running loop
+  - serial boot logs proved the device is no longer stuck at boot:
+    - watchdog armed successfully: `[BOOT][WDT] armed timeout_ms=8388`
+    - startup advanced past the boot phase: `[BOOT][BOOT] startup tick now_s=14.624`
+    - the first probe sweep completed and advanced the display heartbeat from `1` through `7`
+    - the runtime entered the steady loop: `[BOOT][BOOT] enter loop poll_interval_ms=50`
+    - subsequent loop probes started normally after boot
+
+## 2026-04-20T14:19:29Z
+
+- Closed the remaining active PR review issue on `fix/prevent-telnet-probe-storm` after pulling the unresolved review thread from PR #17.
+- Root cause confirmed from the reviewer report and current code:
+  - `_recv_telnet_chunk(...)` still converted every `TimeoutError` into `b""`
+  - because probe budget depletion is intentionally surfaced as `TimeoutError("probe io budget exhausted")`, the telnet helper layer could silently swallow the hard cap on the compat path
+- Final corrective code change:
+  - updated `_recv_telnet_chunk(...)` so it still treats ordinary socket timeouts as empty reads, but re-raises `TimeoutError("probe io budget exhausted")`
+- Final regression coverage:
+  - added an explicit unit assertion proving `_recv_telnet_chunk(...)` re-raises budget exhaustion instead of returning `b""`
+- Validation after the final code change:
+  - `python -m pytest -o addopts='' tests/unit/runtime/test_checks.py` -> `92 passed`
+  - `./build` -> `680 passed`, total coverage `97.60%`
+- Pico deploy and live proof:
+  - redeployed the updated bundle to the attached Pico with `./build deploy`
+  - verified the configured device-facing ADB probe endpoint directly: `http://mickey:8081/vivipi/probe/adb/9B081FFAZ001WX` -> `status: OK`
+  - read back the live Pico `config.json` and confirmed build metadata `0.4.1-cba2a670`, active checks, SH1107 display profile, and startup-self-test disabled
+  - ran `mpremote connect auto run artifacts/device/pico_probe_runner.py` on the deployed Pico and confirmed all direct hardware-side checks reached `status: OK`:
+    - `c64u-rest` -> `HTTP 200`
+    - `c64u-ftp` -> `pwd=/`
+    - `c64u-telnet` -> `visible_bytes=2295`
+    - `pixel4-adb` -> `HTTP 200`
+    - `u64-rest` -> `HTTP 200`
+    - `u64-ftp` -> `pwd=/`
+    - `u64-telnet` -> `visible_bytes=2009`
+  - captured a live runtime-rendered display buffer from the deployed board after four seconds of real runtime ticks under `artifacts/display-capture/current/20260420-runtime-proof/`
+  - inspected `artifacts/display-capture/current/20260420-runtime-proof/logical.png` and confirmed the deployed Pico rendered the expected health overview with all seven checks visible and `OK`
+- Hardware-facing camera proof attempt:
+  - brought the preferred Pixel camera app to the foreground candidate state and attempted both a pulled screencap and a triggered photo capture
+  - the Android device remained stuck with `mCurrentFocus=NotificationShade`, so the pulled screen artifact was not usable as optical proof even though the Pico-side runtime proof succeeded
+- PR cleanup:
+  - resolved the addressed review thread `PRRT_kwDOR6RG5858N82F`
+
+## 2026-04-20T14:01:01Z
+
+- Completed the corrective follow-up audit for probe I/O safety and observability after verifying that the earlier completion claims in `PLANS.md` overstated the actual enforcement.
+- Audit findings confirmed against `src/vivipi/runtime/checks.py`, `tests/unit/runtime/test_checks.py`, and `docs/research/network/io-safety-and-observability.md`:
+  - `_ProbeBudget` was previously charged only after successful send/recv progress, which allowed repeated `would block` loops to continue uncharged and allowed one extra socket syscall beyond the nominal cap.
+  - `_telnet_send_best_effort(...)` likewise charged only after a successful send, so timed-out IAC reply attempts were not consuming budget.
+  - `_recv_telnet_chunk(...)` still converted every `TimeoutError` into an empty read, which would have swallowed budget exhaustion on the telnet compat path.
+  - Legacy helper `_telnet_strip_negotiation(...)` still used direct `handle.sendall(...)`, which bypassed the hardened send path and would have been a future bypass if reused.
+  - The prior tests did not prove mid-loop exhaustion under partial sends, `would block` storms, slow-drip recvs, telnet deadline expiry after progress, or IAC-storm exhaustion inside the telnet inner loop.
+- Minimal corrective implementation:
+  - moved budget charging to happen before each attempted low-level socket syscall in `_socket_sendall(...)`, `_socket_recv(...)`, `_recv_telnet_chunk(...)`, `_read_telnet_until_idle(...)`, and `_telnet_send_best_effort(...)`
+  - changed `_recv_telnet_chunk(...)` to re-raise `TimeoutError("probe io budget exhausted")` while still treating ordinary socket timeouts as empty reads
+  - routed `_telnet_strip_negotiation(...)` through `_telnet_send_best_effort(...)` with the existing `telnet-iac` operation descriptor instead of direct `sendall(...)`
+  - threaded `budget` and `trace` through `_read_until_markers(...)` / `_telnet_strip_negotiation(...)` so the legacy telnet helper path no longer bypasses the hardened send path
+- Test hardening added deterministic coverage for:
+  - internal whitespace sanitization of bounded operation descriptors
+  - budget exhaustion mid-loop on partial sends
+  - budget exhaustion under repeated `would block` send storms
+  - budget exhaustion under repeated `would block` recv storms
+  - slow-drip recv exhaustion in `_recv_until_closed(...)`
+  - telnet deadline expiry after one successful recv iteration
+  - telnet IAC-storm exhaustion when negotiation replies time out
+  - legacy telnet negotiation helper routing through the budgeted/logged `telnet-iac` send path
+- Validation:
+  - `python -m pytest -o addopts='' tests/unit/runtime/test_checks.py` -> `92 passed`
+  - `./build` -> `680 passed`, total coverage `97.60%`, branch-coverage gate satisfied
+- Documentation reconciliation:
+  - updated `PLANS.md` with `Audit Findings` and corrected the stated enforcement model from successful-op charging to attempt-based charging
+  - updated `docs/research/network/io-safety-and-observability.md` with the corrected assumptions, attempt-based budget model, legacy telnet-helper note, and the new edge-case coverage summary
+
+## 2026-04-20T00:00:00Z
+
+- Started the probe I/O safety and observability hardening task (see `PLANS.md` -> "Probe I/O Safety and Observability Plan").
+- Discovery:
+  - Inspected `src/vivipi/runtime/checks.py`, `src/vivipi/core/execution.py`, and `src/vivipi/core/probe_trace.py`.
+  - Confirmed `socket-send` is emitted in exactly two code paths: `_socket_sendall(...)` (used by HTTP and FTP) and `_telnet_send_best_effort(...)` (used only for IAC negotiation replies).
+  - Confirmed `socket-recv` is emitted from `_socket_recv(...)` and from `_read_telnet_until_idle(...)`.
+  - Confirmed `_read_telnet_until_idle(...)` sets per-iteration socket timeouts (`TELNET_IDLE_TIMEOUT_S` = 120 ms, `TELNET_POST_DATA_IDLE_TIMEOUT_S` = 20 ms) and does *not* check any probe-wide deadline, so a chatty peer can prolong the loop beyond `timeout_s`.
+  - Confirmed there are no retry loops in the probe-level attempt model; existing `while` loops inside `_socket_sendall` and `_socket_recv` are progress loops keyed off `_socket_wait` readiness and the passed-in deadline.
+- Decision:
+  - Add a `_ProbeBudget` helper threaded through the existing `trace`/`deadline` kwargs chain as an optional parameter. Charge every successful send/recv, enforce a hard per-probe ops cap, and apply 2 ms of pacing between ops.
+  - Add an optional `operation` field to the `socket-send` event payload. Emit conditionally so existing tests that assert the current payload shape remain untouched.
+  - For Telnet: cap `_read_telnet_until_idle` at `TELNET_MAX_RECV_CHUNKS` and check the probe-wide deadline at the top of every iteration. Do not change OK/FAIL semantics.
+  - Redact FTP `PASS` so the operation descriptor cannot leak credentials.
+- Implementation:
+  - Added `PROBE_MAX_SOCKET_OPS`, `PROBE_IO_PACING_MS`, `PROBE_OPERATION_LIMIT`, and `TELNET_MAX_RECV_CHUNKS` constants and a `_ProbeBudget` class to `src/vivipi/runtime/checks.py`.
+  - Added `_bounded_operation`, `_emit_socket_send`, `_ftp_operation_descriptor`, and `_charge_budget` helpers. Operation field is emitted only when provided, preserving existing `socket-send` payload shape for callers that do not opt in.
+  - Threaded `budget` through `_socket_sendall`, `_socket_recv`, `_ftp_read_response`, `_ftp_command_with_deadline`, `_recv_until_closed`, `_recv_telnet_chunk`, `_recv_telnet_chunk_compat`, `_telnet_send_best_effort`, `_telnet_collect_visible`, and `_read_telnet_until_idle`.
+  - `_read_telnet_until_idle` now also accepts `deadline` and `max_chunks` kwargs and checks both at the top of every iteration.
+  - Reordered `_charge_budget` calls to run *outside* the low-level try/except in `_socket_sendall` / `_socket_recv`, so `TimeoutError("probe io budget exhausted")` propagates cleanly instead of being re-wrapped as a generic timeout.
+  - Hardened `_sleep_ms` to no-op gracefully when `time.sleep` is unavailable (supports the MicroPython test harness where the time module is a narrow stub).
+  - Each probe runner now creates a fresh budget at entry: `_portable_http_runner_socket`, `portable_ftp_runner`, and both paths of `portable_telnet_runner` (stdlib socket path + portable/MicroPython path).
+- Tests:
+  - Updated two compat-layer test stubs in `tests/unit/runtime/test_checks.py` to accept `budget=None` alongside `deadline`/`trace`.
+  - Added 14 focused tests: budget exhaustion, operation bounding, FTP password redaction, per-command descriptor set, HTTP method+path descriptor, Telnet IAC descriptor, Telnet chunk cap, Telnet deadline enforcement, Telnet budget enforcement, and send/recv budget accounting.
+- Validation:
+  - `.venv/bin/python -m pytest -o addopts='' tests/unit/runtime/test_checks.py` -> `84 passed`
+  - `.venv/bin/python -m pytest -o addopts='' tests/unit/runtime/ tests/unit/core/ tests/unit/services/` -> `362 passed`
+  - `.venv/bin/python -m pytest -o addopts='' tests/unit/` -> `660 passed` (previous baseline `646`, delta +14 for the new coverage; no regressions)
+- Documentation:
+  - Wrote `docs/research/network/io-safety-and-observability.md` with root-cause analysis, applied constraints, Telnet minimal-interaction justification, and a before/after comparison table.
+  - Updated `PLANS.md` section with per-phase COMPLETED status and the concrete acceptance-criteria checklist.
+
 ## 2026-04-20T11:16:18Z
 
 - Investigated the reported sporadic `C64U TELNET` failures after the recent TELNET classifier changes.
