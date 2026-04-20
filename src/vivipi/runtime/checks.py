@@ -35,7 +35,6 @@ TELNET_WONT = 252
 TELNET_WILL = 251
 TELNET_IDLE_TIMEOUT_S = 0.12
 TELNET_POST_DATA_IDLE_TIMEOUT_S = 0.02
-TELNET_MAX_EMPTY_READS = 1
 TELNET_STABLE_OPEN_THRESHOLD_MS = 500
 TELNET_EARLY_CLOSE_THRESHOLD_MS = 100
 TELNET_SB = 250
@@ -861,14 +860,6 @@ def _looks_like_telnet_output(value: str) -> bool:
     if any(marker.decode("utf-8") in lowered for marker in TELNET_FAILURE_MARKERS):
         return False
     return _has_alnum_ascii(stripped) or stripped[-1:] in ">#$%"
-
-
-def _is_telnet_post_connect_success(error: BaseException) -> bool:
-    if isinstance(error, RuntimeError):
-        return False
-    return _classify_network_error(error) in {"reset", "timeout"}
-
-
 def _telnet_collect_visible(handle, chunk: bytes, trace=None) -> tuple[bytes, bool]:
     visible = bytearray()
     handshake_detected = False

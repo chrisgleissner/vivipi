@@ -4,8 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from vivipi.core.execution import PingProbeResult
-from vivipi.core.models import CheckType, Status
+from vivipi.core.execution import CheckExecutionResult, PingProbeResult
+from vivipi.core.models import CheckObservation, CheckType, Status
 import vivipi.runtime.checks as runtime_checks
 from vivipi.runtime.checks import (
     _close_socket,
@@ -171,6 +171,35 @@ def test_probe_end_helper_normalization_covers_enum_name_and_service_fallback_pa
     assert runtime_checks._probe_end_latency_ms(fallback_definition, fallback_result) == 9.0
     assert runtime_checks._probe_end_status(fallback_definition, SimpleNamespace(observations=(), probe_latency_ms=None)) == "?"
     assert fallback_definition.method == "GET"
+
+
+def test_telnet_session_helpers_cover_negotiated_and_fallback_failure_paths():
+    negotiated_status, negotiated_detail = runtime_checks._classify_telnet_session(
+        {
+            "session_duration_ms": runtime_checks.TELNET_EARLY_CLOSE_THRESHOLD_MS,
+            "close_reason": "idle-timeout",
+            "handshake_detected": True,
+            "has_visible_text": False,
+            "visible_bytes": 0,
+            "failure_detected": False,
+        }
+    )
+    fallback_status, fallback_detail = runtime_checks._classify_telnet_session(
+        {
+            "session_duration_ms": 50.0,
+            "close_reason": "refused",
+            "handshake_detected": False,
+            "has_visible_text": False,
+            "visible_bytes": 0,
+            "failure_detected": False,
+        }
+    )
+
+    assert negotiated_status == Status.OK
+    assert negotiated_detail == "negotiated"
+    assert fallback_status == Status.FAIL
+    assert fallback_detail == "refused"
+    assert runtime_checks._telnet_failure_detail({"close_reason": "idle-timeout", "session_duration_ms": 250.0}) == "no telnet interaction"
 
 
 def test_build_runtime_definitions_accepts_legacy_rest_alias_and_normalizes_to_http():
@@ -371,6 +400,68 @@ def test_build_executor_tracks_probe_type_counters_across_issued_succeeded_and_f
             "issued": 3,
             "succeeded": 1,
             "failed": 2,
+        },
+    )
+
+
+def test_build_executor_probe_end_adds_only_non_null_probe_metadata(monkeypatch):
+    definition = build_runtime_definitions(
+        {
+            "checks": [
+                {
+                    "id": "telnet-a",
+                    "name": "Telnet A",
+                    "type": "TELNET",
+                    "target": "telnet://192.168.1.2",
+                    "interval_s": 15,
+                    "timeout_s": 10,
+                }
+            ]
+        }
+    )[0]
+    captured = []
+
+    monkeypatch.setattr(
+        runtime_checks,
+        "execute_check",
+        lambda *args, **kwargs: CheckExecutionResult(
+            source_identifier=definition.identifier,
+            observations=(
+                CheckObservation(
+                    identifier=definition.identifier,
+                    name=definition.name,
+                    status=Status.DEG,
+                    details="connected-no-telnet-data",
+                    latency_ms=12.0,
+                    observed_at_s=10.0,
+                ),
+            ),
+            probe_metadata={
+                "close_reason": "idle-timeout",
+                "session_duration_ms": None,
+                "handshake_detected": False,
+            },
+        ),
+    )
+
+    executor = build_executor(trace_sink=lambda definition, event, fields: captured.append((definition.identifier, event, dict(fields))))
+    executor(definition, 10.0)
+
+    assert captured[-1] == (
+        "telnet-a",
+        "probe-end",
+        {
+            "status": "DEG",
+            "detail": "connected-no-telnet-data",
+            "latency_ms": 12.0,
+            "observations": 1,
+            "replace_source": False,
+            "probe_type": "TELNET",
+            "issued": 1,
+            "succeeded": 0,
+            "failed": 1,
+            "close_reason": "idle-timeout",
+            "handshake_detected": False,
         },
     )
 
@@ -1258,6 +1349,22 @@ def test_portable_telnet_runner_stdlib_rejects_immediate_post_connect_reset(monk
     assert result.status == Status.FAIL
     assert result.details == "closed immediately"
     assert handle.closed is True
+
+
+def test_portable_telnet_runner_stdlib_reports_connection_failure_metadata(monkeypatch):
+    monkeypatch.setattr(runtime_checks.socket, "create_connection", lambda address, timeout: (_ for _ in ()).throw(OSError("refused")))
+    monkeypatch.setattr(runtime_checks, "_is_micropython_runtime", lambda: False)
+
+    result = portable_telnet_runner("telnet://switch.example.local", 10)
+
+    assert result.ok is False
+    assert result.status == Status.FAIL
+    assert result.details == "refused"
+    assert result.metadata == {
+        "close_reason": "refused",
+        "session_duration_ms": 0.0,
+        "handshake_detected": False,
+    }
 
 
 def test_portable_telnet_runner_stdlib_rejects_failure_marker(monkeypatch):
@@ -2150,3 +2257,21 @@ def test_read_telnet_until_idle_detects_failure_markers_across_chunk_boundaries(
 
     assert session["failure_detected"] is True
     assert session["close_reason"] == "failure-marker"
+
+
+def test_read_telnet_until_idle_reports_collect_visible_socket_errors(monkeypatch):
+    class ChunkSocket(FakeSocket):
+        def __init__(self):
+            super().__init__([b"Welcome\r\n"])
+            self.timeout_values = []
+
+        def settimeout(self, value):
+            self.timeout_values.append(value)
+
+    handle = ChunkSocket()
+    monkeypatch.setattr(runtime_checks, "_telnet_collect_visible", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("refused")))
+
+    session = runtime_checks._read_telnet_until_idle(handle)
+
+    assert session["failure_detected"] is False
+    assert session["close_reason"] == "refused"

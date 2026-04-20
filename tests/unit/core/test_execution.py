@@ -1,3 +1,6 @@
+from types import SimpleNamespace
+
+import vivipi.core.execution as execution_module
 from vivipi.core.execution import HttpResponseResult, PingProbeResult, execute_check
 from vivipi.core.models import CheckDefinition, CheckType, Status
 
@@ -56,6 +59,14 @@ def test_execute_check_maps_http_status_codes_to_observations():
     assert result.observations[0].status == Status.FAIL
     assert result.observations[0].latency_ms == 45.0
     assert result.probe_latency_ms == 45.0
+
+
+def test_probe_helpers_normalize_enum_like_status_and_ignore_non_mapping_metadata():
+    enum_like_status = SimpleNamespace(value="DEG")
+    result = SimpleNamespace(ok=False, status=enum_like_status, metadata="not-a-dict")
+
+    assert execution_module._status_for_probe_result(result) == Status.DEG
+    assert execution_module._probe_metadata(result) == {}
 
 
 def test_execute_check_replaces_service_children_on_success():
