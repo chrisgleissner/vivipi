@@ -1113,6 +1113,30 @@ def test_runtime_app_probe_end_logs_latency_and_type_counters():
     assert app.get_logs(limit=1)[0] == "[vivipi] [INFO][PROBE] probe-end id=router evt=probe-end type=PING status=OK lat_ms=12.0 issued=3 ok=2 fail=1"
 
 
+def test_runtime_app_probe_trace_logs_operation_immediately_after_stage():
+    definition = make_definition("router", check_type=CheckType.FTP)
+    app = RuntimeApp(
+        definitions=(definition,),
+        executor=lambda definition, now_s: None,
+        display=FakeDisplay(),
+    )
+
+    app._log_probe_trace(
+        definition,
+        "socket-send",
+        {
+            "stage": "ftp-send",
+            "operation": "USER anonymous",
+            "target": "192.0.2.10:21",
+        },
+    )
+
+    assert app.get_logs(limit=1)[0] == (
+        "[vivipi] [INFO][PROBE] socket-send id=router evt=socket-send "
+        "stage=ftp-send operation=USER anonymous target=192.0.2.10:21"
+    )
+
+
 def test_runtime_app_probe_trace_overlay_and_button_edge_paths_cover_remaining_branches():
     definition = make_definition("router", check_type=CheckType.HTTP)
     trace_calls = []
@@ -1129,6 +1153,20 @@ def test_runtime_app_probe_trace_overlay_and_button_edge_paths_cover_remaining_b
 
     assert trace_calls == [("router", "socket-wait", {"remain_ms": 120})]
     assert any("remain_ms=120" in line for line in app.get_logs())
+
+    app.emit_probe_trace(
+        definition,
+        "socket-recv",
+        {
+            "stage": "http-recv",
+            "operation": "GET /health",
+            "target": "192.0.2.20:80",
+            "remain_ms": 80,
+        },
+    )
+
+    recv_log = app.get_logs(limit=1)[0]
+    assert "stage=http-recv operation=GET /health target=192.0.2.20:80 remain_ms=80" in recv_log
 
     app.tick(0.0)
     app._set_feedback("HELLO", 1.0, duration_s=1.0)

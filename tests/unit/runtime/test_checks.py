@@ -272,7 +272,7 @@ def test_build_executor_trace_sink_emits_probe_lifecycle_events():
 
     executor(definition, 10.0)
 
-    assert captured[0] == ("router", "probe-start", {"timeout_s": 10})
+    assert captured[0] == ("router", "probe-start", {"timeout_s": 10, "target": "192.168.1.1"})
     assert captured[-1][0] == "router"
     assert captured[-1][1] == "probe-end"
     assert captured[-1][2]["status"] == "OK"
@@ -345,6 +345,7 @@ def test_build_executor_tracks_probe_type_counters_across_issued_succeeded_and_f
             "issued": 1,
             "succeeded": 1,
             "failed": 0,
+            "target": "192.168.1.1",
         },
     )
     assert captured[3] == (
@@ -360,6 +361,7 @@ def test_build_executor_tracks_probe_type_counters_across_issued_succeeded_and_f
             "issued": 2,
             "succeeded": 1,
             "failed": 1,
+            "target": "192.168.1.2",
         },
     )
     assert captured[5] == (
@@ -371,6 +373,7 @@ def test_build_executor_tracks_probe_type_counters_across_issued_succeeded_and_f
             "issued": 3,
             "succeeded": 1,
             "failed": 2,
+            "target": "192.168.1.1",
         },
     )
 
@@ -968,6 +971,10 @@ def test_telnet_chunk_compat_and_output_helpers_cover_remaining_branches(monkeyp
     monkeypatch.setattr(runtime_checks, "_socket_recv", lambda handle, size, deadline, trace=None, stage="telnet-recv", budget=None: (_ for _ in ()).throw(TimeoutError("timed out")))
     assert runtime_checks._recv_telnet_chunk(DeadlineRecvSocket(), deadline=("perf", 1.0)) == b""
 
+    monkeypatch.setattr(runtime_checks, "_socket_recv", lambda handle, size, deadline, trace=None, stage="telnet-recv", budget=None: (_ for _ in ()).throw(TimeoutError("probe io budget exhausted")))
+    with pytest.raises(TimeoutError, match="probe io budget exhausted"):
+        runtime_checks._recv_telnet_chunk(DeadlineRecvSocket(), deadline=("perf", 1.0))
+
     assert runtime_checks._looks_like_telnet_output("   ") is False
 
 
@@ -1333,8 +1340,8 @@ def test_manual_http_socket_and_executor_defaults_cover_remaining_paths(monkeypa
         failing_executor(definitions[0], 10.0)
 
     assert trace_events == [
-        ("ping", "probe-start", {"timeout_s": 10}),
-        ("ping", "probe-error", {"detail": "boom", "probe_type": "PING", "issued": 1, "succeeded": 0, "failed": 1}),
+        ("ping", "probe-start", {"timeout_s": 10, "target": "device.local"}),
+        ("ping", "probe-error", {"detail": "boom", "probe_type": "PING", "issued": 1, "succeeded": 0, "failed": 1, "target": "device.local"}),
     ]
 
     no_trace_executor = build_executor()
@@ -1520,7 +1527,7 @@ def test_open_socket_reports_dns_errors(monkeypatch):
             trace=lambda event, **fields: trace_events.append((event, fields)),
         )
 
-    assert trace_events[0] == ("dns-start", {"host": "nas.example.local", "port": 21})
+    assert trace_events[0] == ("dns-start", {"host": "nas.example.local", "port": 21, "target": "nas.example.local:21"})
     assert trace_events[1][0] == "dns-error"
 
 
@@ -2114,11 +2121,12 @@ def test_socket_sendall_includes_operation_when_provided(monkeypatch):
         trace=lambda event, **fields: events.append((event, fields)),
         stage="http-send",
         operation="GET /v1/checks",
+        target="service.example.local:80",
     )
     assert events == [
         (
             "socket-send",
-            {"stage": "http-send", "operation": "GET /v1/checks", "bytes_sent": 25},
+            {"stage": "http-send", "operation": "GET /v1/checks", "target": "service.example.local:80", "bytes_sent": 25},
         ),
     ]
 
@@ -2410,6 +2418,7 @@ def test_portable_http_runner_emits_method_and_path_operation(monkeypatch):
     assert send_events, "expected a socket-send event"
     assert send_events[0].get("operation") == "GET /v1/checks"
     assert send_events[0].get("stage") == "http-send"
+    assert send_events[0].get("target") == "service.example.local:80"
 
 
 def test_portable_ftp_runner_emits_redacted_pass_operation(monkeypatch):
@@ -2442,7 +2451,38 @@ def test_portable_ftp_runner_emits_redacted_pass_operation(monkeypatch):
     assert "QUIT" in operations
     for fields in send_events:
         assert fields.get("stage") == "ftp-send"
+        assert fields.get("target") == "service.example.local:21"
         assert "hunter2" not in str(fields.get("operation", ""))
+
+
+def test_portable_ftp_runner_emits_endpoint_and_operation_on_recv(monkeypatch):
+    handle = FakeSocket(
+        [
+            b"220 welcome\r\n",
+            b"331 need password\r\n",
+            b"230 ok\r\n",
+            b"257 \"/home/user\"\r\n",
+            b"221 bye\r\n",
+        ]
+    )
+    monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s, **kwargs: handle)
+    monkeypatch.setattr(runtime_checks, "_is_micropython_runtime", lambda: True)
+
+    recv_events: list[dict[str, object]] = []
+
+    def trace(event, **fields):
+        if event == "socket-recv":
+            recv_events.append(fields)
+
+    result = portable_ftp_runner("ftp://service.example.local", 5, username="alice", password="hunter2", trace=trace)
+    assert result.ok is True
+    assert recv_events == [
+        {"stage": "ftp-recv", "operation": "server-greeting", "target": "service.example.local:21", "bytes_received": 13},
+        {"stage": "ftp-recv", "operation": "USER alice", "target": "service.example.local:21", "bytes_received": 19},
+        {"stage": "ftp-recv", "operation": "PASS ***", "target": "service.example.local:21", "bytes_received": 8},
+        {"stage": "ftp-recv", "operation": "PWD", "target": "service.example.local:21", "bytes_received": 18},
+        {"stage": "ftp-recv", "operation": "QUIT", "target": "service.example.local:21", "bytes_received": 9},
+    ]
 
 
 def test_telnet_send_best_effort_emits_telnet_iac_operation():
@@ -2465,3 +2505,32 @@ def test_telnet_send_best_effort_emits_telnet_iac_operation():
     assert events == [
         ("socket-send", {"stage": "telnet-send", "operation": "telnet-iac", "bytes_sent": 3}),
     ]
+
+
+def test_read_telnet_until_idle_emits_endpoint_and_operation_on_recv():
+    class PromptPeer:
+        def __init__(self):
+            self.responses = [b"router> ", b""]
+
+        def settimeout(self, value):
+            return None
+
+        def recv(self, _size):
+            return self.responses.pop(0)
+
+        def sendall(self, payload):
+            return None
+
+    events: list[tuple[str, dict[str, object]]] = []
+    visible_bytes, has_visible_text = runtime_checks._read_telnet_until_idle(
+        PromptPeer(),
+        trace=lambda event, **fields: events.append((event, fields)),
+        target="switch.example.local:23",
+    )
+
+    assert visible_bytes == 7
+    assert has_visible_text is True
+    assert events[0] == (
+        "socket-recv",
+        {"stage": "telnet-recv", "operation": "read-visible", "target": "switch.example.local:23", "bytes_received": 8},
+    )

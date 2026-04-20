@@ -1,5 +1,68 @@
 # ViviPi Work Log
 
+## 2026-04-20T14:19:29Z
+
+- Closed the remaining active PR review issue on `fix/prevent-telnet-probe-storm` after pulling the unresolved review thread from PR #17.
+- Root cause confirmed from the reviewer report and current code:
+  - `_recv_telnet_chunk(...)` still converted every `TimeoutError` into `b""`
+  - because probe budget depletion is intentionally surfaced as `TimeoutError("probe io budget exhausted")`, the telnet helper layer could silently swallow the hard cap on the compat path
+- Final corrective code change:
+  - updated `_recv_telnet_chunk(...)` so it still treats ordinary socket timeouts as empty reads, but re-raises `TimeoutError("probe io budget exhausted")`
+- Final regression coverage:
+  - added an explicit unit assertion proving `_recv_telnet_chunk(...)` re-raises budget exhaustion instead of returning `b""`
+- Validation after the final code change:
+  - `python -m pytest -o addopts='' tests/unit/runtime/test_checks.py` -> `92 passed`
+  - `./build` -> `680 passed`, total coverage `97.60%`
+- Pico deploy and live proof:
+  - redeployed the updated bundle to the attached Pico with `./build deploy`
+  - verified the configured device-facing ADB probe endpoint directly: `http://mickey:8081/vivipi/probe/adb/9B081FFAZ001WX` -> `status: OK`
+  - read back the live Pico `config.json` and confirmed build metadata `0.4.1-cba2a670`, active checks, SH1107 display profile, and startup-self-test disabled
+  - ran `mpremote connect auto run artifacts/device/pico_probe_runner.py` on the deployed Pico and confirmed all direct hardware-side checks reached `status: OK`:
+    - `c64u-rest` -> `HTTP 200`
+    - `c64u-ftp` -> `pwd=/`
+    - `c64u-telnet` -> `visible_bytes=2295`
+    - `pixel4-adb` -> `HTTP 200`
+    - `u64-rest` -> `HTTP 200`
+    - `u64-ftp` -> `pwd=/`
+    - `u64-telnet` -> `visible_bytes=2009`
+  - captured a live runtime-rendered display buffer from the deployed board after four seconds of real runtime ticks under `artifacts/display-capture/current/20260420-runtime-proof/`
+  - inspected `artifacts/display-capture/current/20260420-runtime-proof/logical.png` and confirmed the deployed Pico rendered the expected health overview with all seven checks visible and `OK`
+- Hardware-facing camera proof attempt:
+  - brought the preferred Pixel camera app to the foreground candidate state and attempted both a pulled screencap and a triggered photo capture
+  - the Android device remained stuck with `mCurrentFocus=NotificationShade`, so the pulled screen artifact was not usable as optical proof even though the Pico-side runtime proof succeeded
+- PR cleanup:
+  - resolved the addressed review thread `PRRT_kwDOR6RG5858N82F`
+
+## 2026-04-20T14:01:01Z
+
+- Completed the corrective follow-up audit for probe I/O safety and observability after verifying that the earlier completion claims in `PLANS.md` overstated the actual enforcement.
+- Audit findings confirmed against `src/vivipi/runtime/checks.py`, `tests/unit/runtime/test_checks.py`, and `docs/research/network/io-safety-and-observability.md`:
+  - `_ProbeBudget` was previously charged only after successful send/recv progress, which allowed repeated `would block` loops to continue uncharged and allowed one extra socket syscall beyond the nominal cap.
+  - `_telnet_send_best_effort(...)` likewise charged only after a successful send, so timed-out IAC reply attempts were not consuming budget.
+  - `_recv_telnet_chunk(...)` still converted every `TimeoutError` into an empty read, which would have swallowed budget exhaustion on the telnet compat path.
+  - Legacy helper `_telnet_strip_negotiation(...)` still used direct `handle.sendall(...)`, which bypassed the hardened send path and would have been a future bypass if reused.
+  - The prior tests did not prove mid-loop exhaustion under partial sends, `would block` storms, slow-drip recvs, telnet deadline expiry after progress, or IAC-storm exhaustion inside the telnet inner loop.
+- Minimal corrective implementation:
+  - moved budget charging to happen before each attempted low-level socket syscall in `_socket_sendall(...)`, `_socket_recv(...)`, `_recv_telnet_chunk(...)`, `_read_telnet_until_idle(...)`, and `_telnet_send_best_effort(...)`
+  - changed `_recv_telnet_chunk(...)` to re-raise `TimeoutError("probe io budget exhausted")` while still treating ordinary socket timeouts as empty reads
+  - routed `_telnet_strip_negotiation(...)` through `_telnet_send_best_effort(...)` with the existing `telnet-iac` operation descriptor instead of direct `sendall(...)`
+  - threaded `budget` and `trace` through `_read_until_markers(...)` / `_telnet_strip_negotiation(...)` so the legacy telnet helper path no longer bypasses the hardened send path
+- Test hardening added deterministic coverage for:
+  - internal whitespace sanitization of bounded operation descriptors
+  - budget exhaustion mid-loop on partial sends
+  - budget exhaustion under repeated `would block` send storms
+  - budget exhaustion under repeated `would block` recv storms
+  - slow-drip recv exhaustion in `_recv_until_closed(...)`
+  - telnet deadline expiry after one successful recv iteration
+  - telnet IAC-storm exhaustion when negotiation replies time out
+  - legacy telnet negotiation helper routing through the budgeted/logged `telnet-iac` send path
+- Validation:
+  - `python -m pytest -o addopts='' tests/unit/runtime/test_checks.py` -> `92 passed`
+  - `./build` -> `680 passed`, total coverage `97.60%`, branch-coverage gate satisfied
+- Documentation reconciliation:
+  - updated `PLANS.md` with `Audit Findings` and corrected the stated enforcement model from successful-op charging to attempt-based charging
+  - updated `docs/research/network/io-safety-and-observability.md` with the corrected assumptions, attempt-based budget model, legacy telnet-helper note, and the new edge-case coverage summary
+
 ## 2026-04-20T00:00:00Z
 
 - Started the probe I/O safety and observability hardening task (see `PLANS.md` -> "Probe I/O Safety and Observability Plan").
@@ -30,7 +93,7 @@
   - `.venv/bin/python -m pytest -o addopts='' tests/unit/runtime/ tests/unit/core/ tests/unit/services/` -> `362 passed`
   - `.venv/bin/python -m pytest -o addopts='' tests/unit/` -> `660 passed` (previous baseline `646`, delta +14 for the new coverage; no regressions)
 - Documentation:
-  - Wrote `doc/research/probes/io-safety-and-observability.md` with root-cause analysis, applied constraints, Telnet minimal-interaction justification, and a before/after comparison table.
+  - Wrote `docs/research/network/io-safety-and-observability.md` with root-cause analysis, applied constraints, Telnet minimal-interaction justification, and a before/after comparison table.
   - Updated `PLANS.md` section with per-phase COMPLETED status and the concrete acceptance-criteria checklist.
 
 ## 2026-04-18T21:30:00Z

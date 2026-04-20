@@ -28,6 +28,16 @@ Authoritative execution plan for eliminating unbounded/rapid-fire I/O paths in t
 - Redact FTP credentials in the `operation` descriptor: `USER <name>` is fine; `PASS` is emitted as `PASS ***` regardless of the actual password value.
 - All descriptors go through `bound_text(..., PROBE_OPERATION_LIMIT)` to guarantee single-line, bounded output.
 
+### Audit Findings
+
+- Previous completion claims overstated the budget guarantee. The original hardening charged `_ProbeBudget` only after successful send/recv progress, which left two correctness gaps:
+	- repeated `would block` send/recv attempts could continue uncharged until the deadline, so the number of socket syscalls was still not strictly bounded by the budget
+	- successful loops could perform one socket syscall beyond the nominal cap because the budget check happened after the low-level call rather than before it
+- `_telnet_send_best_effort(...)` previously charged the budget only after a successful `sendall(...)`. Under an IAC-heavy chunk where each negotiation reply timed out, the probe could issue multiple reply attempts without consuming budget.
+- `_recv_telnet_chunk(...)` still translated every `TimeoutError` into `b""`, which incorrectly swallowed `TimeoutError("probe io budget exhausted")` and prevented callers from seeing budget depletion on the telnet compat path.
+- Legacy helper `_telnet_strip_negotiation(...)` still replied to IAC negotiation with direct `handle.sendall(...)`, bypassing both the hardened send logging path and budget pacing. That helper is not part of the active probe runner, but it contradicted the claimed module-wide guarantee and would have been a future bypass path if reused.
+- Test coverage did not prove the strongest stated guarantees. The earlier tests covered happy-path accounting and immediate deadline expiry, but did not cover budget exhaustion inside partial-send loops, `would block` storms, slow-drip recv loops, deadline expiry after progress had already started, or IAC-storm exhaustion inside the telnet inner loop.
+
 ### Phases
 
 Phase 1: Discovery  
@@ -50,7 +60,7 @@ Status: COMPLETED
 
 - Added `_ProbeBudget(max_ops=PROBE_MAX_SOCKET_OPS, pacing_ms=PROBE_IO_PACING_MS)` class with `.charge(...)` that raises `TimeoutError("probe io budget exhausted")` on depletion and applies `_sleep_ms(pacing_ms)` on every charged op.
 - Each probe runner (`_portable_http_runner_socket`, `portable_ftp_runner`, both `portable_telnet_runner` paths) now instantiates a fresh budget at entry.
-- `_socket_sendall` and `_socket_recv` now charge the budget *after* the low-level try/except on the socket, so budget-exhaustion errors propagate cleanly instead of being re-wrapped as generic timeout errors.
+- `_socket_sendall`, `_socket_recv`, `_recv_telnet_chunk`, `_read_telnet_until_idle`, and `_telnet_send_best_effort` now charge the budget before each attempted socket syscall, so partial sends, `would block` churn, timeout churn, and reply storms all consume from the same hard cap.
 - Hardened `_sleep_ms` to no-op gracefully when the `time` module exposes neither `sleep_ms` nor `sleep`, preserving existing monkeypatched test harness compatibility.
 - No new retry loops introduced; existing progress loops that handle partial sends and `would_block` readiness were preserved as required by MicroPython socket semantics.
 
@@ -60,27 +70,30 @@ Status: COMPLETED
 - `_read_telnet_until_idle(...)` now accepts `deadline`, `budget`, and `max_chunks` kwargs.
 - Added `TELNET_MAX_RECV_CHUNKS = 8` default cap enforced at the top of each recv iteration.
 - Probe-wide deadline is re-checked at the top of each iteration in addition to the existing per-iteration socket timeout.
-- Budget is charged per successful chunk *and* per IAC negotiation reply, so IAC storms count against the cap.
+- Budget is charged per attempted recv chunk and per attempted IAC negotiation reply, so IAC storms and timed-out reply attempts count against the cap as well.
+- `_recv_telnet_chunk(...)` now preserves budget-exhaustion `TimeoutError`s instead of converting them into empty reads, so telnet callers can fail deterministically when the cap is hit.
+- Legacy `_telnet_strip_negotiation(...)` now routes negotiation replies through `_telnet_send_best_effort(...)`, removing the remaining direct-send bypass path inside the telnet helper set.
 - Idle-based termination and failure-marker detection are preserved unchanged.
 - Confirmed no login/session simulation; `username`/`password` remain on the signature for API stability but are discarded (`del username, password`).
 
 Phase 5: Validation  
 Status: COMPLETED
 
-- Added 14 focused tests in `tests/unit/runtime/test_checks.py` proving: budget exhaustion raises the expected `TimeoutError`; operation descriptors are emitted conditionally; FTP `PASS` is redacted; HTTP emits method+path; FTP emits the full command set; Telnet emits `telnet-iac`; Telnet recv loop terminates at `max_chunks`; Telnet respects probe-wide `deadline`; Telnet recv loop respects the budget.
+- Added focused tests in `tests/unit/runtime/test_checks.py` proving: budget exhaustion raises the expected `TimeoutError`; operation descriptors are bounded and sanitized; FTP `PASS` is redacted; HTTP emits method+path; FTP emits the full command set; Telnet emits `telnet-iac`; send loops exhaust budget under partial-send and `would block` storms; recv loops exhaust budget under `would block` and slow-drip peers; Telnet respects probe-wide `deadline` both immediately and mid-loop; and the telnet inner loop exhausts the budget under IAC storms.
 - Updated two compat-layer test stubs for the new `budget=None` kwarg on `_recv_telnet_chunk` and `_socket_recv`.
-- `.venv/bin/python -m pytest -o addopts='' tests/unit/` → `660 passed` (no regressions; previously `646 passed` before the 14 new tests).
+- Validation rerun completed after the corrective audit and minimal patch set; the final counts are recorded in `WORKLOG.md`.
+- Deployed the updated bundle to the attached Pico, verified the live ADB-backed probe endpoint at `mickey:8081`, confirmed all direct on-device checks returned `OK`, and captured a live runtime-rendered SH1107 display buffer showing the health overview on the deployed board.
 
 Phase 6: Documentation  
 Status: COMPLETED
 
-- Wrote `doc/research/probes/io-safety-and-observability.md` with root-cause analysis, applied constraints, telnet minimal-interaction justification, and a before/after behavioral comparison table.
+- Wrote `docs/research/network/io-safety-and-observability.md` with root-cause analysis, applied constraints, telnet minimal-interaction justification, and a before/after behavioral comparison table.
 
 ### Acceptance Criteria
 
 - [x] Every probe `socket-send` log contains a meaningful operation descriptor (method+path, FTP command, or telnet-iac).
 - [x] No new log events or log volume added.
-- [x] Probe runtime and socket operations are both strictly bounded (deadline + budget + telnet chunk cap).
+- [x] Probe runtime and socket operations are both strictly bounded (deadline + attempt-based budget + telnet chunk cap).
 - [x] Telnet probe cannot enter sustained recv/send loops under any peer behavior.
 - [x] FTP `PASS` command does not leak the password to the log.
 - [x] Existing tests still pass; new tests cover the new bounds and descriptors.

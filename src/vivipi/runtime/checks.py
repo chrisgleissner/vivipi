@@ -84,12 +84,24 @@ def _bounded_operation(value: object) -> str | None:
     return text[: PROBE_OPERATION_LIMIT - 1] + "…"
 
 
-def _emit_socket_send(trace, *, stage: str, bytes_sent: int, operation=None) -> None:
+def _emit_socket_send(trace, *, stage: str, bytes_sent: int, operation=None, target=None) -> None:
     descriptor = _bounded_operation(operation)
-    if descriptor is None:
-        _emit_probe_trace(trace, "socket-send", stage=stage, bytes_sent=bytes_sent)
-        return
-    _emit_probe_trace(trace, "socket-send", stage=stage, operation=descriptor, bytes_sent=bytes_sent)
+    fields = {"stage": stage, "bytes_sent": bytes_sent}
+    if descriptor is not None:
+        fields["operation"] = descriptor
+    if target is not None:
+        fields["target"] = target
+    _emit_probe_trace(trace, "socket-send", **fields)
+
+
+def _emit_socket_recv(trace, *, stage: str, bytes_received: int, operation=None, target=None) -> None:
+    descriptor = _bounded_operation(operation)
+    fields = {"stage": stage, "bytes_received": bytes_received}
+    if descriptor is not None:
+        fields["operation"] = descriptor
+    if target is not None:
+        fields["target"] = target
+    _emit_probe_trace(trace, "socket-recv", **fields)
 
 
 def _charge_budget(budget, count: int = 1) -> None:
@@ -368,7 +380,9 @@ def load_runtime_checks(path, env=None) -> tuple[CheckDefinition, ...]:
     return load_checks_config(path, env=env)
 
 
-def portable_ping_runner(target: str, timeout_s: int) -> PingProbeResult:
+def portable_ping_runner(target: str, timeout_s: int, trace=None) -> PingProbeResult:
+    del trace
+
     def _single_ping() -> PingProbeResult:
         try:
             import uping  # type: ignore
@@ -581,17 +595,19 @@ def _recv_telnet_chunk_compat(handle, size: int, deadline=None, trace=None, budg
 
 
 def _open_socket(host: str, port: int, timeout_s: int, *, deadline=None, trace=None):
-    _emit_probe_trace(trace, "dns-start", host=host, port=port)
+    endpoint = f"{host}:{port}"
+    _emit_probe_trace(trace, "dns-start", host=host, port=port, target=endpoint)
     try:
         addresses = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
     except Exception as error:
-        _emit_probe_trace(trace, "dns-error", host=host, port=port, detail=_format_network_error(error))
+        _emit_probe_trace(trace, "dns-error", host=host, port=port, target=endpoint, detail=_format_network_error(error))
         raise
     _emit_probe_trace(
         trace,
         "dns-result",
         host=host,
         port=port,
+        target=endpoint,
         addresses=tuple(_format_socket_address(address) for _, _, _, _, address in addresses),
     )
     last_error: OSError | None = None
@@ -619,7 +635,7 @@ def _close_socket(handle, trace=None, *, target=None):
     _emit_probe_trace(trace, "socket-close", stage="close", target=target)
 
 
-def _socket_sendall(handle, payload: bytes, deadline, trace=None, stage: str = "send", operation=None, budget=None):
+def _socket_sendall(handle, payload: bytes, deadline, trace=None, stage: str = "send", operation=None, target=None, budget=None):
     if not payload:
         return
     sender = getattr(handle, "send", None)
@@ -638,7 +654,7 @@ def _socket_sendall(handle, payload: bytes, deadline, trace=None, stage: str = "
                 return
             if sent <= 0:
                 raise OSError("send failed")
-            _emit_socket_send(trace, stage=stage, bytes_sent=sent, operation=operation)
+            _emit_socket_send(trace, stage=stage, bytes_sent=sent, operation=operation, target=target)
             view = view[sent:]
         return
 
@@ -651,11 +667,11 @@ def _socket_sendall(handle, payload: bytes, deadline, trace=None, stage: str = "
             if _is_would_block(error):
                 continue
             raise
-        _emit_socket_send(trace, stage=stage, bytes_sent=len(payload), operation=operation)
+        _emit_socket_send(trace, stage=stage, bytes_sent=len(payload), operation=operation, target=target)
         return
 
 
-def _socket_recv(handle, size: int, deadline, trace=None, stage: str = "recv", budget=None) -> bytes:
+def _socket_recv(handle, size: int, deadline, trace=None, stage: str = "recv", operation=None, target=None, budget=None) -> bytes:
     while True:
         _socket_wait(handle, deadline, writable=False, trace=trace, stage=stage)
         _charge_budget(budget)
@@ -668,15 +684,15 @@ def _socket_recv(handle, size: int, deadline, trace=None, stage: str = "recv", b
             if _is_would_block(error):
                 continue
             raise
-        _emit_probe_trace(trace, "socket-recv", stage=stage, bytes_received=len(chunk))
+        _emit_socket_recv(trace, stage=stage, bytes_received=len(chunk), operation=operation, target=target)
         return chunk
 
 
-def _ftp_read_response(handle, deadline=None, trace=None, budget=None) -> tuple[int, str]:
+def _ftp_read_response(handle, deadline=None, trace=None, operation=None, target=None, budget=None) -> tuple[int, str]:
     buffer = bytearray()
     while not buffer.endswith(b"\n"):
         if deadline is not None:
-            chunk = _socket_recv(handle, 4096, deadline, trace=trace, stage="ftp-recv", budget=budget)
+            chunk = _socket_recv(handle, 4096, deadline, trace=trace, stage="ftp-recv", operation=operation, target=target, budget=budget)
         else:
             chunk = handle.recv(4096)
         if not chunk:
@@ -702,7 +718,7 @@ def _ftp_operation_descriptor(value: str) -> str:
     return text
 
 
-def _ftp_command_with_deadline(handle, value: str, deadline, trace=None, budget=None):
+def _ftp_command_with_deadline(handle, value: str, deadline, trace=None, target=None, budget=None):
     operation = _ftp_operation_descriptor(value)
     _socket_sendall(
         handle,
@@ -711,6 +727,7 @@ def _ftp_command_with_deadline(handle, value: str, deadline, trace=None, budget=
         trace=trace,
         stage="ftp-send",
         operation=operation,
+        target=target,
         budget=budget,
     )
 
@@ -750,10 +767,10 @@ def _recv_all(handle) -> bytes:
     return b"".join(chunks)
 
 
-def _recv_until_closed(handle, deadline, trace=None, stage: str = "recv-all", budget=None) -> bytes:
+def _recv_until_closed(handle, deadline, trace=None, stage: str = "recv-all", operation=None, target=None, budget=None) -> bytes:
     chunks: list[bytes] = []
     while True:
-        chunk = _socket_recv(handle, 4096, deadline, trace=trace, stage=stage, budget=budget)
+        chunk = _socket_recv(handle, 4096, deadline, trace=trace, stage=stage, operation=operation, target=target, budget=budget)
         if not chunk:
             break
         chunks.append(chunk)
@@ -762,6 +779,7 @@ def _recv_until_closed(handle, deadline, trace=None, stage: str = "recv-all", bu
 
 def portable_ftp_runner(target: str, timeout_s: int, username: str | None = None, password: str | None = None, trace=None) -> PingProbeResult:
     host, port = _parse_socket_target(target, 21, expected_scheme="ftp")
+    endpoint = f"{host}:{port}"
     if trace is None and not _is_micropython_runtime():
         try:
             import ftplib
@@ -807,29 +825,33 @@ def portable_ftp_runner(target: str, timeout_s: int, username: str | None = None
     control_socket = None
     try:
         control_socket = _open_socket_compat(host, port, timeout_s, deadline, trace=trace)
-        code, response = _ftp_read_response(control_socket, deadline=deadline, trace=trace, budget=budget)
+        code, response = _ftp_read_response(control_socket, deadline=deadline, trace=trace, operation="server-greeting", target=endpoint, budget=budget)
         if code != 220:
             raise RuntimeError(f"expected FTP 220, got {response}")
 
         login_username = username or "anonymous"
         login_password = password or ""
 
-        _ftp_command_with_deadline(control_socket, f"USER {login_username}", deadline, trace=trace, budget=budget)
-        code, response = _ftp_read_response(control_socket, deadline=deadline, trace=trace, budget=budget)
+        user_operation = _ftp_operation_descriptor(f"USER {login_username}")
+        _ftp_command_with_deadline(control_socket, f"USER {login_username}", deadline, trace=trace, target=endpoint, budget=budget)
+        code, response = _ftp_read_response(control_socket, deadline=deadline, trace=trace, operation=user_operation, target=endpoint, budget=budget)
         if code == 331:
-            _ftp_command_with_deadline(control_socket, f"PASS {login_password}", deadline, trace=trace, budget=budget)
-            code, response = _ftp_read_response(control_socket, deadline=deadline, trace=trace, budget=budget)
+            pass_operation = _ftp_operation_descriptor(f"PASS {login_password}")
+            _ftp_command_with_deadline(control_socket, f"PASS {login_password}", deadline, trace=trace, target=endpoint, budget=budget)
+            code, response = _ftp_read_response(control_socket, deadline=deadline, trace=trace, operation=pass_operation, target=endpoint, budget=budget)
         if code != 230:
             raise RuntimeError(f"expected FTP 230, got {response}")
 
-        _ftp_command_with_deadline(control_socket, "PWD", deadline, trace=trace, budget=budget)
-        code, response = _ftp_read_response(control_socket, deadline=deadline, trace=trace, budget=budget)
+        pwd_operation = _ftp_operation_descriptor("PWD")
+        _ftp_command_with_deadline(control_socket, "PWD", deadline, trace=trace, target=endpoint, budget=budget)
+        code, response = _ftp_read_response(control_socket, deadline=deadline, trace=trace, operation=pwd_operation, target=endpoint, budget=budget)
         if code != 257:
             raise RuntimeError(f"expected FTP 257, got {response}")
         working_directory = _ftp_parse_pwd(response)
 
-        _ftp_command_with_deadline(control_socket, "QUIT", deadline, trace=trace, budget=budget)
-        code, response = _ftp_read_response(control_socket, deadline=deadline, trace=trace, budget=budget)
+        quit_operation = _ftp_operation_descriptor("QUIT")
+        _ftp_command_with_deadline(control_socket, "QUIT", deadline, trace=trace, target=endpoint, budget=budget)
+        code, response = _ftp_read_response(control_socket, deadline=deadline, trace=trace, operation=quit_operation, target=endpoint, budget=budget)
         if code != 221:
             raise RuntimeError(f"expected FTP 221, got {response}")
         return PingProbeResult(
@@ -840,10 +862,10 @@ def portable_ftp_runner(target: str, timeout_s: int, username: str | None = None
     except Exception as error:
         return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details=_probe_error_detail(error))
     finally:
-        _close_socket(control_socket, trace=trace, target=f"{host}:{port}")
+        _close_socket(control_socket, trace=trace, target=endpoint)
 
 
-def _telnet_strip_negotiation(handle, chunk: bytes, trace=None, budget=None) -> bytes:
+def _telnet_strip_negotiation(handle, chunk: bytes, trace=None, target=None, budget=None) -> bytes:
     output = bytearray()
     index = 0
     while index < len(chunk):
@@ -866,6 +888,7 @@ def _telnet_strip_negotiation(handle, chunk: bytes, trace=None, budget=None) -> 
                     bytes((TELNET_IAC, TELNET_WONT, option)),
                     trace=trace,
                     operation="telnet-iac",
+                    target=target,
                     budget=budget,
                 )
             else:
@@ -874,6 +897,7 @@ def _telnet_strip_negotiation(handle, chunk: bytes, trace=None, budget=None) -> 
                     bytes((TELNET_IAC, TELNET_DONT, option)),
                     trace=trace,
                     operation="telnet-iac",
+                    target=target,
                     budget=budget,
                 )
             index += 3
@@ -915,13 +939,29 @@ def _read_until_markers(handle, markers: tuple[bytes, ...], deadline=None, trace
     return bytes(buffer)
 
 
-def _recv_telnet_chunk(handle, size: int = 4096, deadline=None, trace=None, budget=None) -> bytes:
+def _recv_telnet_chunk(handle, size: int = 4096, deadline=None, trace=None, operation=None, target=None, budget=None) -> bytes:
     try:
         if deadline is not None:
-            return _socket_recv(handle, size, deadline, trace=trace, stage="telnet-recv", budget=budget)
+            try:
+                return _socket_recv(
+                    handle,
+                    size,
+                    deadline,
+                    trace=trace,
+                    stage="telnet-recv",
+                    operation=operation,
+                    target=target,
+                    budget=budget,
+                )
+            except TypeError as error:
+                if "operation" not in str(error) and "target" not in str(error):
+                    raise
+                return _socket_recv(handle, size, deadline, trace=trace, stage="telnet-recv", budget=budget)
         _charge_budget(budget)
         return handle.recv(size)
-    except TimeoutError:
+    except TimeoutError as error:
+        if _normalize_error_text(error) == "probe io budget exhausted":
+            raise
         return b""
     except OSError as error:
         if _classify_network_error(error) == "timeout":
@@ -929,7 +969,7 @@ def _recv_telnet_chunk(handle, size: int = 4096, deadline=None, trace=None, budg
         raise
 
 
-def _telnet_send_best_effort(handle, payload: bytes, trace=None, operation=None, budget=None) -> bool:
+def _telnet_send_best_effort(handle, payload: bytes, trace=None, operation=None, target=None, budget=None) -> bool:
     _charge_budget(budget)
     try:
         handle.sendall(payload)
@@ -937,7 +977,7 @@ def _telnet_send_best_effort(handle, payload: bytes, trace=None, operation=None,
         if _classify_network_error(error) == "timeout":
             return False
         raise
-    _emit_socket_send(trace, stage="telnet-send", bytes_sent=len(payload), operation=operation)
+    _emit_socket_send(trace, stage="telnet-send", bytes_sent=len(payload), operation=operation, target=target)
     return True
 
 
@@ -957,7 +997,7 @@ def _is_telnet_post_connect_success(error: BaseException) -> bool:
     return _classify_network_error(error) in {"reset", "timeout"}
 
 
-def _telnet_collect_visible(handle, chunk: bytes, trace=None, budget=None) -> bytes:
+def _telnet_collect_visible(handle, chunk: bytes, trace=None, target=None, budget=None) -> bytes:
     visible = bytearray()
     index = 0
     while index < len(chunk):
@@ -966,7 +1006,7 @@ def _telnet_collect_visible(handle, chunk: bytes, trace=None, budget=None) -> by
             command = chunk[index + 1]
             option = chunk[index + 2]
             reply = bytes((TELNET_IAC, TELNET_WONT if command in (TELNET_DO, TELNET_DONT) else TELNET_DONT, option))
-            _telnet_send_best_effort(handle, reply, trace=trace, operation="telnet-iac", budget=budget)
+            _telnet_send_best_effort(handle, reply, trace=trace, operation="telnet-iac", target=target, budget=budget)
             index += 3
             continue
         visible.append(byte)
@@ -982,6 +1022,7 @@ def _read_telnet_until_idle(
     quiet_timeout_s: float = TELNET_POST_DATA_IDLE_TIMEOUT_S,
     trace=None,
     deadline=None,
+    target=None,
     budget=None,
     max_chunks: int = TELNET_MAX_RECV_CHUNKS,
 ) -> tuple[int, bool]:
@@ -1012,13 +1053,13 @@ def _read_telnet_until_idle(
                 continue
             raise
         if trace is not None:
-            _emit_probe_trace(trace, "socket-recv", stage="telnet-recv", bytes_received=len(chunk))
+            _emit_socket_recv(trace, stage="telnet-recv", bytes_received=len(chunk), operation="read-visible", target=target)
         if not chunk:
             break
         chunks_received += 1
         saw_data = True
         empty_reads = 0
-        visible = _telnet_collect_visible(handle, chunk, trace=trace, budget=budget)
+        visible = _telnet_collect_visible(handle, chunk, trace=trace, target=target, budget=budget)
         if not visible:
             continue
         failure_window.extend(visible.lower())
@@ -1044,6 +1085,7 @@ def _read_telnet_until_idle(
 def portable_telnet_runner(target: str, timeout_s: int, username: str | None = None, password: str | None = None, trace=None) -> PingProbeResult:
     del username, password
     host, port = _parse_socket_target(target, 23, expected_scheme="telnet")
+    endpoint = f"{host}:{port}"
     if trace is None and not _is_micropython_runtime() and hasattr(socket, "create_connection"):
         started_at, uses_ticks_ms = _start_timer()
         handle = None
@@ -1051,7 +1093,7 @@ def portable_telnet_runner(target: str, timeout_s: int, username: str | None = N
             deadline = _deadline_after_s(timeout_s)
             budget = _ProbeBudget()
             handle = socket.create_connection((host, port), timeout=timeout_s)
-            visible_bytes, has_visible_text = _read_telnet_until_idle(handle, deadline=deadline, budget=budget)
+            visible_bytes, has_visible_text = _read_telnet_until_idle(handle, deadline=deadline, target=endpoint, budget=budget)
             return PingProbeResult(
                 ok=True,
                 latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
@@ -1070,7 +1112,7 @@ def portable_telnet_runner(target: str, timeout_s: int, username: str | None = N
                 details=_probe_error_detail(error),
             )
         finally:
-            _close_socket(handle, trace=trace, target=f"{host}:{port}")
+            _close_socket(handle, trace=trace, target=endpoint)
 
     started_at, uses_ticks_ms = _start_timer()
     handle = None
@@ -1078,7 +1120,7 @@ def portable_telnet_runner(target: str, timeout_s: int, username: str | None = N
         deadline = _deadline_after_s(timeout_s)
         budget = _ProbeBudget()
         handle = _open_socket_compat(host, port, timeout_s, deadline, trace=trace)
-        visible_bytes, has_visible_text = _read_telnet_until_idle(handle, trace=trace, deadline=deadline, budget=budget)
+        visible_bytes, has_visible_text = _read_telnet_until_idle(handle, trace=trace, deadline=deadline, target=endpoint, budget=budget)
         return PingProbeResult(
             ok=True,
             latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
@@ -1089,7 +1131,7 @@ def portable_telnet_runner(target: str, timeout_s: int, username: str | None = N
             return PingProbeResult(ok=True, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details="connected")
         return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details=_probe_error_detail(error))
     finally:
-        _close_socket(handle, trace=trace, target=f"{host}:{port}")
+        _close_socket(handle, trace=trace, target=endpoint)
 
 
 def _parse_http_target(target: str) -> tuple[str, str, int, str]:
@@ -1157,8 +1199,9 @@ def _portable_http_runner_socket(method: str, target: str, timeout_s: int, trace
     handle = None
     try:
         handle = _open_socket_compat(host, port, timeout_s, deadline, trace=trace)
-        _socket_sendall(handle, request_payload, deadline, trace=trace, stage="http-send", operation=http_operation, budget=budget)
-        payload = _recv_until_closed(handle, deadline, trace=trace, stage="http-recv", budget=budget)
+        endpoint = f"{host}:{port}"
+        _socket_sendall(handle, request_payload, deadline, trace=trace, stage="http-send", operation=http_operation, target=endpoint, budget=budget)
+        payload = _recv_until_closed(handle, deadline, trace=trace, stage="http-recv", operation=http_operation, target=endpoint, budget=budget)
         status_code, body = _parse_http_response(payload)
         return HttpResponseResult(
             status_code=status_code,
@@ -1224,6 +1267,8 @@ def build_executor(ping_runner=None, http_runner=None, ftp_runner=None, telnet_r
         trace = None
         if trace_sink is not None:
             def trace(event, **fields):
+                if "target" not in fields:
+                    fields["target"] = definition.target
                 return trace_sink(definition, event, fields)
         if trace is not None:
             trace("probe-start", timeout_s=definition.timeout_s)

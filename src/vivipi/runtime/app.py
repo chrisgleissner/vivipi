@@ -366,10 +366,13 @@ class RuntimeApp:
             trace_fields.append(log_field("type", probe_type))
         if "stage" in fields:
             trace_fields.append(log_field("stage", fields["stage"]))
+        operation = fields.get("operation")
+        if operation is not None:
+            trace_fields.append(log_field("operation", operation))
         target = fields.get("target")
         if target is not None:
             trace_fields.append(log_field("target", target))
-        elif "remain_ms" in fields:
+        if "remain_ms" in fields:
             trace_fields.append(log_field("remain_ms", fields["remain_ms"]))
         if event == "probe-end":
             if "status" in fields:

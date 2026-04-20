@@ -20,6 +20,14 @@ Three code paths could, under pathological peer behavior, extend socket activity
 
 None of these was a *retry* in the traditional sense. They were progress loops that depended on peer cooperation to terminate early. Under burst scheduling (multiple probes, short intervals) this created a worst-case I/O pattern that resembled rapid-fire / DoS-like behavior against the target.
 
+### Corrected assumptions from the first pass
+
+The first hardening pass improved the active probe runners but still left two subtle gaps:
+
+1. Budget charging happened after successful socket progress. That meant a hot loop of repeated `would block` attempts consumed time but not budget, and even a healthy partial-send or slow-drip loop could make one more socket syscall than the configured budget because the check ran after the syscall.
+2. The legacy telnet helper `_telnet_strip_negotiation(...)` still replied to IAC negotiation with direct `handle.sendall(...)`. It is not on the main probe runner path, but it contradicted the claimed helper-level guarantee and would have been a future bypass if reused.
+3. `_recv_telnet_chunk(...)` still converted every `TimeoutError` into `b""`, which incorrectly masked `TimeoutError("probe io budget exhausted")` and could let the telnet compat path treat budget depletion like an ordinary idle read.
+
 ### No I/O pacing
 
 `_socket_wait` uses `select.poll(...)` and returns as soon as the socket is readable/writable. There was no small delay between consecutive socket operations, so transient hot paths (e.g. repeated `EAGAIN` or tiny partial sends) could busy-spin at whatever rate `poll` was willing to return.
@@ -38,7 +46,7 @@ None of these was a *retry* in the traditional sense. They were progress loops t
 ### I/O budget per probe execution
 
 - `_ProbeBudget(max_ops=PROBE_MAX_SOCKET_OPS, pacing_ms=PROBE_IO_PACING_MS)` is created once per probe invocation and threaded through the existing `trace`/`deadline` kwargs chain.
-- Every successful `_socket_sendall`, `_socket_recv`, `_telnet_send_best_effort`, and top-level `_read_telnet_until_idle` recv charges the budget. Telnet IAC replies charge the same budget as the enclosing recv loop, so IAC storms count against the same cap as the data they respond to.
+- Every attempted `_socket_sendall`, `_socket_recv`, `_recv_telnet_chunk`, `_telnet_send_best_effort`, and top-level `_read_telnet_until_idle` recv charges the budget before the low-level socket syscall. Telnet IAC replies charge the same budget as the enclosing recv loop, so IAC storms and timed-out reply attempts count against the same cap as the data they respond to.
 - When the budget is exhausted the helper raises `TimeoutError("probe io budget exhausted")`. The probe runners' existing exception handlers translate this into a normal probe-fail result; no new log event is introduced.
 - `PROBE_MAX_SOCKET_OPS = 48` was chosen so healthy live targets (HTTP one-shot, FTP four-command login, Telnet banner read) finish well under the cap while pathological peers are terminated before they can burst.
 
@@ -49,7 +57,7 @@ None of these was a *retry* in the traditional sense. They were progress loops t
 
 ### I/O pacing
 
-- `_ProbeBudget.charge(...)` calls `_sleep_ms(pacing_ms)` after every charged op. `PROBE_IO_PACING_MS = 2` yields at most a small, deterministic pause between consecutive socket operations, which prevents tight bursts without meaningfully extending healthy probe latency.
+- `_ProbeBudget.charge(...)` calls `_sleep_ms(pacing_ms)` before every attempted low-level socket op. `PROBE_IO_PACING_MS = 2` yields at most a small, deterministic pause between consecutive socket operations, which prevents tight bursts without meaningfully extending healthy probe latency.
 - `_sleep_ms` gracefully no-ops when the time module exposes neither `sleep_ms` nor `sleep` (a test-harness edge case), which keeps the existing monkeypatched unit tests working.
 
 ### No retry loops
@@ -68,6 +76,9 @@ The Telnet probe is a liveness check, not a session. The probe:
 
 The effect is that the Telnet probe cannot degrade into a sustained recv/send loop even against a chatty or adversarial peer: the chunk cap, time deadline, and budget are enforced in triplicate and each is independently sufficient to terminate the probe.
 
+The same reply path is now used by the legacy `_telnet_strip_negotiation(...)` helper, so there is no remaining telnet negotiation send path inside this module that bypasses budget accounting or operation-tagged `socket-send` tracing.
+Likewise, `_recv_telnet_chunk(...)` now preserves budget-exhaustion timeouts instead of translating them into empty reads, so the telnet helper layer cannot silently bypass the hard cap.
+
 ## Before vs after
 
 | Concern | Before | After |
@@ -76,8 +87,8 @@ The effect is that the Telnet probe cannot degrade into a sustained recv/send lo
 | FTP `socket-send` payload | `{"stage": "ftp-send", "bytes_sent": N}` | `{"stage": "ftp-send", "operation": "USER anonymous" / "PASS ***" / "PWD" / "QUIT", "bytes_sent": N}` |
 | Telnet `socket-send` payload (IAC) | `{"stage": "telnet-send", "bytes_sent": 3}` | `{"stage": "telnet-send", "operation": "telnet-iac", "bytes_sent": 3}` |
 | Telnet recv termination | idle-timeout or peer close only | idle-timeout, peer close, `TELNET_MAX_RECV_CHUNKS`, probe-wide deadline, or `_ProbeBudget` exhaustion — whichever fires first |
-| Per-probe socket-op cap | none | `PROBE_MAX_SOCKET_OPS = 48` combined send+recv |
-| Pacing between socket ops | none | `PROBE_IO_PACING_MS = 2` after every charged op |
+| Per-probe socket-op cap | none | `PROBE_MAX_SOCKET_OPS = 48` combined send+recv attempts |
+| Pacing between socket ops | none | `PROBE_IO_PACING_MS = 2` before every charged op |
 | Probe time bound enforcement | enforced in `_socket_wait`, not re-checked in telnet recv loop | enforced in `_socket_wait` *and* re-checked at the top of the telnet recv loop |
 | Password leakage via trace | `PASS hunter2` would have appeared verbatim had `operation` existed | `PASS ***` is emitted unconditionally |
 | New log events introduced | n/a | none |
@@ -87,11 +98,11 @@ The effect is that the Telnet probe cannot degrade into a sustained recv/send lo
 
 - OK / FAIL semantics are preserved. Budget exhaustion surfaces as a normal probe failure through the existing `_execution_error` path without adding a new code identifier.
 - Existing unit tests continue to pass after a small update to two compat-layer test stubs (they now accept `budget=None` alongside `deadline` and `trace`, reflecting the addition of the new kwarg).
-- Fourteen new unit tests in `tests/unit/runtime/test_checks.py` cover: budget exhaustion, operation descriptor truncation, FTP password redaction, HTTP method/path descriptor, FTP full-command descriptor set, Telnet IAC descriptor, Telnet chunk cap, Telnet deadline enforcement, and Telnet budget enforcement.
+- The corrective audit added deterministic coverage for the previously unproven edge cases: partial-send budget exhaustion, repeated `would block` send/recv storms, slow-drip recv exhaustion, deadline expiry after telnet progress has already started, IAC-storm exhaustion inside the telnet inner loop, preservation of budget-exhaustion failures in `_recv_telnet_chunk(...)`, whitespace sanitization for operation descriptors, and the legacy telnet-negotiation helper's routing through the hardened send path.
 
 ## Files changed
 
 - `src/vivipi/runtime/checks.py` — added `_ProbeBudget`, `_bounded_operation`, `_emit_socket_send`, `_ftp_operation_descriptor`, `_charge_budget`, new constants, telnet chunk cap, and threaded the budget/operation kwargs through the helper chain.
 - `tests/unit/runtime/test_checks.py` — updated two compat-test stubs to accept `budget=None`; added fourteen new tests.
 - `PLANS.md`, `WORKLOG.md` — execution tracking.
-- `doc/research/probes/io-safety-and-observability.md` — this document.
+- `docs/research/network/io-safety-and-observability.md` — this document.
