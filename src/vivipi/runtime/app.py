@@ -391,8 +391,8 @@ class RuntimeApp:
                 trace_fields.append(log_field("close", fields["close_reason"]))
             if fields.get("handshake_detected") is not None:
                 trace_fields.append(log_field("hs", bool(fields["handshake_detected"])))
-            if fields.get("menu_detected") is not None:
-                trace_fields.append(log_field("menu", bool(fields["menu_detected"])))
+            if fields.get("response_received") is not None:
+                trace_fields.append(log_field("resp", bool(fields["response_received"])))
         elif event == "probe-error":
             for field_name, label in (("issued", "issued"), ("succeeded", "ok"), ("failed", "fail")):
                 if fields.get(field_name) is not None:
@@ -715,8 +715,8 @@ class RuntimeApp:
             summary_fields.append(log_field("close", probe_metadata["close_reason"]))
         if probe_metadata.get("handshake_detected") is not None:
             summary_fields.append(log_field("hs", bool(probe_metadata["handshake_detected"])))
-        if probe_metadata.get("menu_detected") is not None:
-            summary_fields.append(log_field("menu", bool(probe_metadata["menu_detected"])))
+        if probe_metadata.get("response_received") is not None:
+            summary_fields.append(log_field("resp", bool(probe_metadata["response_received"])))
         if emit_summary:
             self.logger.info("CHECK", "run", tuple(summary_fields))
 
@@ -736,7 +736,7 @@ class RuntimeApp:
                     log_field("status", status),
                     log_field("close", probe_metadata.get("close_reason", "-")),
                     log_field("hs", probe_metadata.get("handshake_detected", False)),
-                    log_field("menu", probe_metadata.get("menu_detected", False)),
+                    log_field("resp", probe_metadata.get("response_received", False)),
                     log_field("detail", details),
                     log_field("manual", manual),
                 ),

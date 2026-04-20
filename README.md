@@ -77,7 +77,7 @@ The bottom scanline shows a 3-pixel health indicator that moves from left to rig
 | `PING` | ICMP ping | Response received; latency measured locally | No response or timeout |
 | `HTTP` | HTTP request | Response status is `2xx` or `3xx`; latency measured locally | Non-`2xx`/`3xx` response or timeout |
 | `FTP` | FTP control session with optional credentials | A valid FTP greeting is received and the control socket stays usable long enough to quit cleanly | Missing or invalid greeting, connection failure, or timeout |
-| `TELNET` | Telnet session with optional credentials | `OK` only after the returned screen shows the Ultimate remote menu banner plus menu/help markers; the probe closes as soon as that menu is confirmed | Connection failure, explicit login failure text, timeout before menu detection, or immediate close/reset before the menu is confirmed |
+| `TELNET` | Telnet session with optional credentials | `OK` after Telnet returns a non-empty response with no clear failure markers and the probe drains that response before closing the session | Connection failure, explicit failure-marker text such as denied/incorrect/failed/invalid, no non-empty response before idle/close, incomplete response consumption before timeout/chunk limit, or immediate close/reset before any non-empty response is received |
 | `SERVICE` | HTTP request to a `/checks` endpoint | Response returns a valid checks payload; each returned check becomes an independent ViviPi check | Default backend uses `adb` to report Android availability, but any backend can return checks through the same schema |
 
 ## Default Hardware Target
