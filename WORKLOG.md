@@ -1,5 +1,36 @@
 # ViviPi Work Log
 
+## 2026-04-20T16:35:00Z
+
+- Investigated the report that the attached Pico appeared stuck on the boot screen with a non-moving liveness pixel.
+- Root cause analysis:
+  - the earlier runtime hardening had already switched the scheduler and render path to monotonic time, but the newly added Pico watchdog still was not active on-device because the timeout clamp was invalid
+  - `firmware/runtime.py` still used `WATCHDOG_MIN_TIMEOUT_MS = 15000` while the RP2040 MicroPython watchdog rejects values above `8388ms`
+  - because `_watchdog_timeout_ms(...)` applied `max(MIN, min(MAX, value))`, the effective timeout always became `15000`, `_build_runtime_watchdog(...)` always hit `ValueError`, and the watchdog silently degraded to `_NoopRuntimeWatchdog`
+  - direct on-device probing confirmed the actual hardware limit: `machine.WDT(timeout=8388)` succeeds, `machine.WDT(timeout=8400)` fails with `ValueError`
+- Final corrective implementation:
+  - lowered `WATCHDOG_MIN_TIMEOUT_MS` to `4000` so the clamp now produces a valid watchdog timeout on Pico hardware
+  - kept `WATCHDOG_MAX_TIMEOUT_MS = 8388` and the consecutive-loop / consecutive-display reset fail-safes
+  - added `set_probe_activity_callback(...)` to `src/vivipi/runtime/checks.py` and sliced `_socket_wait(...)` into `1000ms` poll windows so healthy long socket waits feed the hardware watchdog while true stalls still reset the board
+  - emitted probe activity before long-running ping attempts and from the firmware runtime registered the watchdog feed callback into the probe transport layer
+  - preserved timeout behavior under mocked or coarse clocks by falling back to local wait accounting when deadline values do not decrease between poll slices
+- Regression coverage added:
+  - watchdog timeout clamp test
+  - watchdog construction test when the hardware API accepts the chosen timeout
+  - existing focused runtime / firmware coverage still passes with the transport-slice changes
+- Validation:
+  - `python -m pytest -o addopts='' tests/unit/firmware/test_runtime.py tests/unit/runtime/test_checks.py tests/unit/runtime/test_app.py` -> `171 passed`
+  - `./build` -> `688 passed`, total coverage `97.53%`
+- Pico redeploy and boot proof:
+  - redeployed the corrected bundle to the attached Pico with `./build deploy --device-port /dev/ttyACM0`
+  - captured boot logs over raw serial across a forced reboot instead of using `mpremote resume`, which had been misleading because REPL attachment interrupts the running loop
+  - serial boot logs proved the device is no longer stuck at boot:
+    - watchdog armed successfully: `[BOOT][WDT] armed timeout_ms=8388`
+    - startup advanced past the boot phase: `[BOOT][BOOT] startup tick now_s=14.624`
+    - the first probe sweep completed and advanced the display heartbeat from `1` through `7`
+    - the runtime entered the steady loop: `[BOOT][BOOT] enter loop poll_interval_ms=50`
+    - subsequent loop probes started normally after boot
+
 ## 2026-04-20T14:19:29Z
 
 - Closed the remaining active PR review issue on `fix/prevent-telnet-probe-storm` after pulling the unresolved review thread from PR #17.

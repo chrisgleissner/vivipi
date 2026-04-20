@@ -52,6 +52,22 @@ PROBE_MAX_SOCKET_OPS = 48
 PROBE_IO_PACING_MS = 2
 PROBE_OPERATION_LIMIT = 48
 TELNET_MAX_RECV_CHUNKS = 8
+SOCKET_WAIT_SLICE_MS = 1000
+
+
+_PROBE_ACTIVITY_CALLBACK = None
+
+
+def set_probe_activity_callback(callback) -> None:
+    global _PROBE_ACTIVITY_CALLBACK
+    _PROBE_ACTIVITY_CALLBACK = callback
+
+
+def _emit_probe_activity() -> None:
+    callback = _PROBE_ACTIVITY_CALLBACK
+    if callback is None:
+        return
+    callback()
 
 
 class _ProbeBudget:
@@ -384,6 +400,7 @@ def portable_ping_runner(target: str, timeout_s: int, trace=None) -> PingProbeRe
     del trace
 
     def _single_ping() -> PingProbeResult:
+        _emit_probe_activity()
         try:
             import uping  # type: ignore
         except ImportError:
@@ -518,7 +535,8 @@ def _socket_wait(handle, deadline, *, writable: bool, trace=None, stage: str):
         raise TimeoutError("timed out")
 
     if not hasattr(select, "poll"):
-        _set_socket_timeout(handle, _deadline_remaining_s(deadline))
+        _emit_probe_activity()
+        _set_socket_timeout(handle, min(_deadline_remaining_s(deadline), float(SOCKET_WAIT_SLICE_MS) / 1000.0))
         return
 
     poller = select.poll()
@@ -527,13 +545,24 @@ def _socket_wait(handle, deadline, *, writable: bool, trace=None, stage: str):
     try:
         poller.register(handle, flags)
     except Exception:
-        _set_socket_timeout(handle, _deadline_remaining_s(deadline))
+        _emit_probe_activity()
+        _set_socket_timeout(handle, min(_deadline_remaining_s(deadline), float(SOCKET_WAIT_SLICE_MS) / 1000.0))
         return
 
-    events = poller.poll(remaining_ms)
-    if not events:
-        _emit_probe_trace(trace, "socket-timeout", stage=stage, remain_ms=0)
-        raise TimeoutError("timed out")
+    while remaining_ms > 0:
+        _emit_probe_activity()
+        wait_ms = min(remaining_ms, SOCKET_WAIT_SLICE_MS)
+        events = poller.poll(wait_ms)
+        if events:
+            return
+        updated_remaining_ms = _deadline_remaining_ms(deadline)
+        if updated_remaining_ms >= remaining_ms:
+            remaining_ms -= wait_ms
+            continue
+        remaining_ms = updated_remaining_ms
+
+    _emit_probe_trace(trace, "socket-timeout", stage=stage, remain_ms=0)
+    raise TimeoutError("timed out")
 
 
 def _connect_socket(handle, address, timeout_s: int, deadline, trace=None):

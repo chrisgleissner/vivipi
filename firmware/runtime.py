@@ -14,6 +14,11 @@ except ImportError:  # pragma: no cover - imported on-device
     network = None
     time = None
 
+try:
+    import machine
+except ImportError:  # pragma: no cover - imported on-device
+    machine = None
+
 from vivipi.core.input import InputController
 from vivipi.core.config import parse_probe_schedule_config
 from vivipi.core.display import normalize_display_config
@@ -21,6 +26,7 @@ from vivipi.core.logging import bound_text
 from vivipi.core.models import DiagnosticEvent, DisplayMode, TransitionThresholds
 from vivipi.core.probe_trace import ProbeTraceCollector
 from vivipi.core.render import Frame
+import vivipi.runtime.checks as runtime_checks_module
 from vivipi.runtime import state as runtime_state
 from vivipi.runtime.syslog import build_syslog_sink, resolve_syslog_config
 from vivipi.runtime import RuntimeApp, build_executor, build_runtime_definitions
@@ -43,6 +49,45 @@ except ImportError as error:  # pragma: no cover - used by CPython tests
 DEFAULT_BUTTON_PINS = {"a": "GP15", "b": "GP17"}
 BUTTON_SELF_TEST_DISCOVERY_PINS = (15, 17, 21, 22)
 _BOOT_LOG_SINK = None
+DEFAULT_WIFI_CONNECT_TIMEOUT_S = 10
+WATCHDOG_SLEEP_SLICE_MS = 250
+WATCHDOG_MIN_TIMEOUT_MS = 4000
+WATCHDOG_MAX_TIMEOUT_MS = 8388
+MAX_CONSECUTIVE_LOOP_FAILURES = 5
+MAX_CONSECUTIVE_DISPLAY_FAILURES = 5
+
+
+class _NoopRuntimeWatchdog:
+    enabled = False
+    timeout_ms = None
+
+    def feed(self):
+        return False
+
+    def request_reset(self, reason: str, **fields):
+        del reason, fields
+        return False
+
+
+class _RuntimeWatchdog:
+    enabled = True
+
+    def __init__(self, handle, timeout_ms: int, reset_fn=None):
+        self._handle = handle
+        self.timeout_ms = int(timeout_ms)
+        self._reset_fn = reset_fn
+
+    def feed(self):
+        self._handle.feed()
+        return True
+
+    def request_reset(self, reason: str, **fields):
+        payload = {"reason": reason, "timeout_ms": self.timeout_ms}
+        payload.update(fields)
+        _serial_log("WDT", "reset requested", **payload)
+        if callable(self._reset_fn):
+            self._reset_fn()
+        return True
 
 
 class HeadlessDisplay:
@@ -316,6 +361,56 @@ def _button_self_test_duration_s(button_config) -> float:
         return 0.0
 
 
+def _watchdog_timeout_ms(definitions, boot_logo_duration_s: float, button_self_test_s: float) -> int:
+    probe_window_s = sum(max(1, int(getattr(definition, "timeout_s", 0) or 0)) for definition in definitions)
+    baseline_s = max(0.0, float(boot_logo_duration_s)) + max(0.0, float(button_self_test_s)) + float(DEFAULT_WIFI_CONNECT_TIMEOUT_S)
+    margin_s = max(15.0, min(45.0, (probe_window_s * 0.5) if probe_window_s else 15.0))
+    timeout_ms = int((probe_window_s + baseline_s + margin_s) * 1000.0)
+    return max(WATCHDOG_MIN_TIMEOUT_MS, min(WATCHDOG_MAX_TIMEOUT_MS, timeout_ms))
+
+
+def _build_runtime_watchdog(definitions, boot_logo_duration_s: float, button_self_test_s: float):
+    if machine is None or not hasattr(machine, "WDT"):
+        return _NoopRuntimeWatchdog()
+
+    timeout_ms = _watchdog_timeout_ms(definitions, boot_logo_duration_s, button_self_test_s)
+    try:
+        handle = machine.WDT(timeout=timeout_ms)
+    except TypeError:
+        handle = machine.WDT(timeout_ms)
+    except Exception as error:
+        _serial_log("WDT", "disabled", error=type(error).__name__)
+        return _NoopRuntimeWatchdog()
+
+    _serial_log("WDT", "armed", timeout_ms=timeout_ms)
+    return _RuntimeWatchdog(handle, timeout_ms=timeout_ms, reset_fn=getattr(machine, "reset", None))
+
+
+def _feed_watchdog(watchdog):
+    if watchdog is None:
+        return False
+    return bool(watchdog.feed())
+
+
+def _wifi_connector_with_watchdog(connector, watchdog):
+    if connector is None:
+        return None
+
+    def wrapped(config):
+        _feed_watchdog(watchdog)
+        try:
+            try:
+                return connector(config, watchdog=watchdog)
+            except TypeError as error:
+                if "watchdog" not in str(error):
+                    raise
+                return connector(config)
+        finally:
+            _feed_watchdog(watchdog)
+
+    return wrapped
+
+
 def _format_button_snapshot(label: str, snapshot: dict) -> str:
     pin = str(snapshot.get("pin", "GP?"))
     pin_suffix = pin.replace("GP", "")
@@ -337,7 +432,7 @@ def _button_self_test_frame(snapshot, probe_snapshot, row_width: int, page_size:
     return Frame(rows=tuple(rows[:page_size]))
 
 
-def _run_button_self_test(display, button_reader, button_config, row_width: int, page_size: int, now_provider, sleep_ms):
+def _run_button_self_test(display, button_reader, button_config, row_width: int, page_size: int, now_provider, sleep_ms, watchdog=None):
     duration_s = _button_self_test_duration_s(button_config)
     if duration_s <= 0:
         _serial_log("BTNTEST", "skip", reason="disabled")
@@ -350,6 +445,7 @@ def _run_button_self_test(display, button_reader, button_config, row_width: int,
     deadline_s = now_provider() + duration_s
     last_serial_snapshot = None
     while True:
+        _feed_watchdog(watchdog)
         now_s = now_provider()
         remaining_s = deadline_s - now_s
         if remaining_s <= 0:
@@ -395,7 +491,7 @@ def _button_config_from_runtime_config(config):
     return buttons
 
 
-def _maybe_run_button_self_test_from_app(app, now_provider, sleep_ms):
+def _maybe_run_button_self_test_from_app(app, now_provider, sleep_ms, watchdog=None):
     if getattr(app, "button_self_test_ran", False):
         return False
     config = getattr(app, "config", None)
@@ -409,12 +505,13 @@ def _maybe_run_button_self_test_from_app(app, now_provider, sleep_ms):
         getattr(state, "page_size", 8),
         now_provider,
         sleep_ms,
+        watchdog,
     )
     app.button_self_test_ran = bool(ran)
     return bool(ran)
 
 
-def connect_wifi(config, timeout_s=10):
+def connect_wifi(config, timeout_s=DEFAULT_WIFI_CONNECT_TIMEOUT_S, watchdog=None):
     if network is None or time is None:  # pragma: no cover - imported on-device
         return (DiagnosticEvent(code="WIFI", message="module missing"),)
 
@@ -433,12 +530,14 @@ def connect_wifi(config, timeout_s=10):
     attempt = 0
     while time.ticks_diff(deadline_ms, time.ticks_ms()) > 0 and attempt < 3:
         attempt += 1
+        _feed_watchdog(watchdog)
         wlan.connect(ssid, password)
         remaining_ms = max(0, time.ticks_diff(deadline_ms, time.ticks_ms()))
         per_attempt_ms = max(200, remaining_ms // max(1, 4 - attempt))
         attempt_deadline_ms = time.ticks_add(time.ticks_ms(), per_attempt_ms)
         # Hot path: wait deterministically without per-iteration logging.
         while not wlan.isconnected() and time.ticks_diff(attempt_deadline_ms, time.ticks_ms()) > 0:
+            _feed_watchdog(watchdog)
             _sleep_ms(200)
         if wlan.isconnected():
             return ()
@@ -474,7 +573,7 @@ def read_wifi_state(config):
     return snapshot
 
 
-def reconnect_wifi(config, timeout_s=10):
+def reconnect_wifi(config, timeout_s=DEFAULT_WIFI_CONNECT_TIMEOUT_S, watchdog=None):
     if network is None or time is None:  # pragma: no cover - imported on-device
         return (DiagnosticEvent(code="WIFI", message="module missing"),)
 
@@ -483,7 +582,7 @@ def reconnect_wifi(config, timeout_s=10):
     if hasattr(wlan, "disconnect"):
         wlan.disconnect()
         _sleep_ms(100)
-    return connect_wifi(config, timeout_s=timeout_s)
+    return connect_wifi(config, timeout_s=timeout_s, watchdog=watchdog)
 
 
 def build_runtime_app(
@@ -563,7 +662,36 @@ def build_runtime_app(
     collected_diagnostics.extend(definition_diagnostics)
     collected_errors.extend(definition_errors)
 
-    button_self_test_ran = _run_button_self_test(display, button_reader, button_input, row_width, page_size, now_provider, sleep_ms)
+    boot_logo_duration_s = float(display_config.get("boot_logo_duration_s", 4.0))
+    runtime_watchdog = _build_runtime_watchdog(
+        definitions,
+        boot_logo_duration_s=boot_logo_duration_s,
+        button_self_test_s=_button_self_test_duration_s(button_input),
+    )
+    runtime_checks_module.set_probe_activity_callback(runtime_watchdog.feed if getattr(runtime_watchdog, "enabled", False) else None)
+    try:
+        button_self_test_ran = _run_button_self_test(
+            display,
+            button_reader,
+            button_input,
+            row_width,
+            page_size,
+            now_provider,
+            sleep_ms,
+            watchdog=runtime_watchdog,
+        )
+    except TypeError as error:
+        if "watchdog" not in str(error):
+            raise
+        button_self_test_ran = _run_button_self_test(
+            display,
+            button_reader,
+            button_input,
+            row_width,
+            page_size,
+            now_provider,
+            sleep_ms,
+        )
 
     app = runtime_app_factory(
         definitions=definitions,
@@ -594,8 +722,15 @@ def build_runtime_app(
         trace_sink = getattr(app, "emit_probe_trace", None)
     app.executor = _build_executor_with_optional_trace(executor_factory, trace_sink)
     app.probe_trace_sink = _build_probe_trace_sink(config)
-    boot_logo_duration_s = float(display_config.get("boot_logo_duration_s", 4.0))
-    app.boot_logo_until_s = boot_start_s + boot_logo_duration_s
+    if hasattr(app, "_probe_now_s"):
+        try:
+            app.boot_logo_until_s = app._probe_now_s() + boot_logo_duration_s
+        except Exception:
+            app.boot_logo_until_s = boot_start_s + boot_logo_duration_s
+    else:
+        app.boot_logo_until_s = boot_start_s + boot_logo_duration_s
+    app.runtime_watchdog = runtime_watchdog
+    app.runtime_watchdog_timeout_ms = getattr(runtime_watchdog, "timeout_ms", None)
     if hasattr(app, "logger"):
         syslog_sink = boot_syslog_sink
         if syslog_sink is None and syslog_settings.get("enabled"):
@@ -607,8 +742,8 @@ def build_runtime_app(
         app.configure_observability(
             config=config,
             now_provider=now_provider,
-            wifi_connector=wifi_connector,
-            wifi_reconnector=reconnect_wifi,
+            wifi_connector=_wifi_connector_with_watchdog(wifi_connector, runtime_watchdog),
+            wifi_reconnector=_wifi_connector_with_watchdog(reconnect_wifi, runtime_watchdog),
             network_state_reader=read_wifi_state,
         )
         app._refresh_network_state()
@@ -686,10 +821,12 @@ def _render_initial_frame(app, now_s):
             app._record_exception("loop", error, observed_at_s=now_s)
 
 
-def _run_startup_tick(app, now_s):
+def _run_startup_tick(app, now_s, watchdog=None):
     if hasattr(app, "prime_due_checks"):
         try:
+            _feed_watchdog(watchdog)
             app.prime_due_checks(now_s)
+            _feed_watchdog(watchdog)
         except Exception as error:
             if hasattr(app, "_record_exception"):
                 app._record_exception("loop", error, observed_at_s=now_s)
@@ -697,7 +834,9 @@ def _run_startup_tick(app, now_s):
     if all(hasattr(app, attribute) for attribute in ("definitions", "_run_check", "render_once")):
         for definition in getattr(app, "definitions", ()):  # pragma: no branch - tiny startup loop
             try:
+                _feed_watchdog(watchdog)
                 app._run_check(definition, now_s)
+                _feed_watchdog(watchdog)
             except Exception as error:
                 if hasattr(app, "_record_exception"):
                     app._record_exception("loop", error, observed_at_s=now_s)
@@ -711,14 +850,16 @@ def _run_startup_tick(app, now_s):
     if not hasattr(app, "tick"):
         return
     try:
+        _feed_watchdog(watchdog)
         app.tick(now_s, button_events=())
+        _feed_watchdog(watchdog)
     except Exception as error:
         if hasattr(app, "_record_exception"):
             app._record_exception("loop", error, observed_at_s=now_s)
 
 
-def _wait_for_boot_logo(app, now_provider=None, sleep_ms=None):
-    now_provider = _now_s if now_provider is None else now_provider
+def _wait_for_boot_logo(app, now_provider=None, sleep_ms=None, watchdog=None):
+    now_provider = _steady_now_s if now_provider is None else now_provider
     sleep_ms = _sleep_ms if sleep_ms is None else sleep_ms
     ready_at_s = getattr(app, "boot_logo_until_s", None)
     now_s = now_provider()
@@ -726,41 +867,70 @@ def _wait_for_boot_logo(app, now_provider=None, sleep_ms=None):
         return now_s
 
     remaining_ms = max(0, int(((float(ready_at_s) - now_s) * 1000.0) + 0.5))
-    if remaining_ms > 0:
-        sleep_ms(remaining_ms)
+    while remaining_ms > 0:
+        _feed_watchdog(watchdog)
+        step_ms = min(WATCHDOG_SLEEP_SLICE_MS, remaining_ms)
+        sleep_ms(step_ms)
+        remaining_ms -= step_ms
     return now_provider()
 
 
-def run_loop(app, poll_interval_ms=50, iterations=None, now_provider=_now_s, sleep_ms=_sleep_ms):
+def run_loop(
+    app,
+    poll_interval_ms=50,
+    iterations=None,
+    now_provider=_steady_now_s,
+    sleep_ms=_sleep_ms,
+    watchdog=None,
+    max_consecutive_loop_failures: int = MAX_CONSECUTIVE_LOOP_FAILURES,
+    max_consecutive_display_failures: int = MAX_CONSECUTIVE_DISPLAY_FAILURES,
+):
     iteration = 0
+    consecutive_loop_failures = 0
     while iterations is None or iteration < iterations:  # pragma: no branch - tiny loop helper
         now_s = now_provider()
+        _feed_watchdog(watchdog)
         try:
             app.tick(now_s)
         except KeyboardInterrupt:
             raise
         except Exception as error:
+            consecutive_loop_failures += 1
             _serial_log("LOOP", "exception", error=type(error).__name__, detail=repr(error))
             if hasattr(app, "_record_exception"):
                 app._record_exception("loop", error, observed_at_s=now_s)
+            if consecutive_loop_failures >= max(1, int(max_consecutive_loop_failures)) and watchdog is not None:
+                if watchdog.request_reset("loop-failures", count=consecutive_loop_failures, error=type(error).__name__):
+                    return
+        else:
+            consecutive_loop_failures = 0
+            display_failure_count = int(getattr(app, "display_failure_count", 0) or 0)
+            if display_failure_count >= max(1, int(max_consecutive_display_failures)) and watchdog is not None:
+                if watchdog.request_reset("display-failures", count=display_failure_count):
+                    return
         iteration += 1
+        _feed_watchdog(watchdog)
         sleep_ms(poll_interval_ms)
 
 
 def run_forever(config_path="config.json", poll_interval_ms=50):
     app = build_runtime_app_from_path(config_path)
-    _maybe_run_button_self_test_from_app(app, _now_s, _sleep_ms)
+    watchdog = getattr(app, "runtime_watchdog", None)
+    steady_now_provider = getattr(app, "_probe_now_s", _steady_now_s)
+    _maybe_run_button_self_test_from_app(app, steady_now_provider, _sleep_ms, watchdog=watchdog)
     _run_startup_network(app, _now_s())
-    startup_now_s = _wait_for_boot_logo(app, now_provider=_now_s, sleep_ms=_sleep_ms)
+    startup_now_s = _wait_for_boot_logo(app, now_provider=steady_now_provider, sleep_ms=_sleep_ms, watchdog=watchdog)
     _serial_log("BOOT", "startup tick", now_s=f"{startup_now_s:.3f}")
-    _run_startup_tick(app, startup_now_s)
+    _run_startup_tick(app, startup_now_s, watchdog=watchdog)
     if hasattr(app, "tick"):
         try:
+            _feed_watchdog(watchdog)
             app.tick(startup_now_s, button_events=())
+            _feed_watchdog(watchdog)
         except Exception as error:
             if hasattr(app, "_record_exception"):
                 app._record_exception("loop", error, observed_at_s=startup_now_s)
     else:
         _render_initial_frame(app, startup_now_s)
     _serial_log("BOOT", "enter loop", poll_interval_ms=poll_interval_ms)
-    run_loop(app, poll_interval_ms=poll_interval_ms)
+    run_loop(app, poll_interval_ms=poll_interval_ms, now_provider=steady_now_provider, watchdog=watchdog)

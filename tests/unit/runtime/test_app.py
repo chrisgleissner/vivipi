@@ -54,36 +54,16 @@ def test_runtime_app_render_once_returns_boot_logo_before_first_frame():
     assert app.render_once(1.0) == "boot-logo"
 
 
-def test_runtime_app_first_tick_uses_fresh_time_after_slow_startup_work_to_expire_boot_logo():
+def test_runtime_app_tick_uses_monotonic_loop_time_for_boot_logo_deadline():
     display = FakeDisplay()
-    definition = make_definition("router")
-
-    def executor(check_definition, now_s):
-        return CheckExecutionResult(
-            source_identifier=check_definition.identifier,
-            observations=(
-                CheckObservation(
-                    identifier=check_definition.identifier,
-                    name=check_definition.name,
-                    status=Status.OK,
-                    details="reachable",
-                    observed_at_s=now_s,
-                ),
-            ),
-        )
-
-    app = RuntimeApp(
-        definitions=(definition,),
-        executor=executor,
-        display=display,
-    )
+    app = RuntimeApp(definitions=(), executor=lambda definition, now_s: None, display=display)
     app.boot_logo_until_s = 4.0
     app.now_provider = lambda: 6.0
 
     reason = app.tick(0.0)
 
-    assert reason == "bootstrap"
-    assert len(display.frames) == 1
+    assert reason == "boot-logo"
+    assert display.frames == []
 
 
 def test_runtime_app_executes_due_checks_and_updates_state():

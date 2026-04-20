@@ -898,8 +898,8 @@ class RuntimeApp:
                 )
         self.state = record_diagnostic_events(self.state, events, activate=activate)
 
-    def _apply_button_events(self, button_events: tuple[ButtonEvent, ...]):
-        now_s = self.current_time_s() or self._probe_now_s()
+    def _apply_button_events(self, button_events: tuple[ButtonEvent, ...], now_s: float | None = None):
+        event_now_s = self._probe_now_s() if now_s is None else float(now_s)
         for event in button_events:
             button = event.button
             if isinstance(button, str):
@@ -921,7 +921,7 @@ class RuntimeApp:
             previous_selection = self.state.selected_id
             self.state = self.input_controller.apply(self.state, button, held_ms=event.held_ms)
             if button in (Button.A, Button.B):
-                self._set_press_feedback(button, now_s)
+                self._set_press_feedback(button, event_now_s)
             if self.state.mode == previous_mode and self.state.selected_id == previous_selection:
                 self.logger.debug(
                     "BTN",
@@ -984,10 +984,8 @@ class RuntimeApp:
         return float(self.probe_time_provider())
 
     def _event_now_s(self, fallback_now_s: float) -> float:
-        current_now_s = self.current_time_s()
-        if current_now_s is None:
-            return float(fallback_now_s)
-        return float(current_now_s)
+        del fallback_now_s
+        return self._probe_now_s()
 
     def _wait_for_probe_slot(self, definition: CheckDefinition):
         if self._background_enabled():
@@ -1274,14 +1272,14 @@ class RuntimeApp:
         self._run_due_checks(now_s)
 
     def run_all_checks(self, now_s: float | None = None):
-        observed_at_s = now_s if now_s is not None else (self.current_time_s() or 0.0)
+        observed_at_s = self._probe_now_s() if now_s is None else float(now_s)
         for definition in self.definitions:
             self._run_check(definition, observed_at_s, manual=True)
         self._capture_memory_snapshot("manual-run", now_s=observed_at_s)
         return self.get_registered_checks()
 
     def request_refresh(self, now_s: float | None = None):
-        requested_at_s = now_s if now_s is not None else (self.current_time_s() or 0.0)
+        requested_at_s = self._probe_now_s() if now_s is None else float(now_s)
         for definition in self.definitions:
             self._queue_check(definition, requested_at_s, manual=True)
         return requested_at_s
@@ -1569,7 +1567,7 @@ class RuntimeApp:
             else:
                 events = tuple(self.button_reader.poll())
 
-        self._apply_button_events(events)
+        self._apply_button_events(events, now_s=now_s)
         self._drain_probe_traces()
         self._drain_completed_checks()
         self._maybe_reconnect_network(now_s)
@@ -1577,7 +1575,7 @@ class RuntimeApp:
         self._drain_probe_traces()
         self._drain_completed_checks()
         self._drain_probe_traces()
-        frame_now_s = self.current_time_s() or now_s
+        frame_now_s = float(now_s)
         self._apply_page_rotation(frame_now_s)
         self._apply_shift(frame_now_s)
 

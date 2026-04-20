@@ -67,6 +67,39 @@ def test_connect_wifi_requires_ssid(monkeypatch):
     assert diagnostics == (DiagnosticEvent(code="WIFI", message="ssid missing"),)
 
 
+def test_watchdog_timeout_ms_clamps_to_pico_supported_range():
+    class Definition:
+        def __init__(self, timeout_s):
+            self.timeout_s = timeout_s
+
+    timeout_ms = firmware_runtime._watchdog_timeout_ms(
+        (Definition(8),) * 7,
+        boot_logo_duration_s=4.0,
+        button_self_test_s=0.0,
+    )
+
+    assert timeout_ms == firmware_runtime.WATCHDOG_MAX_TIMEOUT_MS
+
+
+def test_build_runtime_watchdog_uses_supported_timeout_when_machine_wdt_accepts_it(monkeypatch):
+    created = {}
+
+    class FakeWDT:
+        def __init__(self, timeout=None):
+            created["timeout"] = timeout
+
+        def feed(self):
+            return None
+
+    monkeypatch.setattr(firmware_runtime, "machine", SimpleNamespace(WDT=FakeWDT, reset=lambda: None))
+
+    watchdog = firmware_runtime._build_runtime_watchdog((), 4.0, 0.0)
+
+    assert type(watchdog).__name__ == "_RuntimeWatchdog"
+    assert created["timeout"] == firmware_runtime.WATCHDOG_MAX_TIMEOUT_MS
+    assert watchdog.timeout_ms == firmware_runtime.WATCHDOG_MAX_TIMEOUT_MS
+
+
 def test_connect_wifi_joins_network_when_available(monkeypatch):
     fake_time = FakeTime()
     wlan = FakeWlan(connected=False)
@@ -733,18 +766,18 @@ def test_run_forever_runs_second_chance_button_self_test_before_startup_tick(mon
     monkeypatch.setattr(
         firmware_runtime,
         "_maybe_run_button_self_test_from_app",
-        lambda app, now_provider, sleep_ms: self_test_calls.append(app),
+        lambda app, now_provider, sleep_ms, watchdog=None: self_test_calls.append(app),
     )
     monkeypatch.setattr(firmware_runtime, "_run_startup_network", lambda app, now_s: now_s)
     monkeypatch.setattr(
         firmware_runtime,
         "_wait_for_boot_logo",
-        lambda app, now_provider=None, sleep_ms=None: 18.5,
+        lambda app, now_provider=None, sleep_ms=None, watchdog=None: 18.5,
     )
     monkeypatch.setattr(
         firmware_runtime,
         "run_loop",
-        lambda app, poll_interval_ms=50: called.update({"app": app, "poll_interval_ms": poll_interval_ms}),
+        lambda app, poll_interval_ms=50, now_provider=None, watchdog=None: called.update({"app": app, "poll_interval_ms": poll_interval_ms}),
     )
 
     firmware_runtime.run_forever(poll_interval_ms=75)
@@ -773,6 +806,103 @@ def test_run_loop_ticks_and_sleeps_with_injected_clock():
     assert sleeps == [50, 50, 50]
 
 
+def test_wait_for_boot_logo_sleeps_in_chunks_and_feeds_watchdog():
+    clock = {"now": 0.0}
+    sleeps = []
+
+    class Watchdog:
+        def __init__(self):
+            self.feed_count = 0
+
+        def feed(self):
+            self.feed_count += 1
+            return True
+
+    def sleep_ms(value):
+        sleeps.append(value)
+        clock["now"] += value / 1000.0
+
+    ready_now_s = firmware_runtime._wait_for_boot_logo(
+        SimpleNamespace(boot_logo_until_s=1.0),
+        now_provider=lambda: clock["now"],
+        sleep_ms=sleep_ms,
+        watchdog=Watchdog(),
+    )
+
+    assert ready_now_s == pytest.approx(1.0)
+    assert sleeps == [250, 250, 250, 250]
+
+
+def test_run_loop_requests_watchdog_reset_after_repeated_tick_failures():
+    class App:
+        def tick(self, now_s):
+            raise RuntimeError(f"boom-{now_s}")
+
+    class Watchdog:
+        def __init__(self):
+            self.feed_calls = 0
+            self.reset_requests = []
+
+        def feed(self):
+            self.feed_calls += 1
+            return True
+
+        def request_reset(self, reason, **fields):
+            self.reset_requests.append((reason, fields))
+            return True
+
+    clock = iter([1.0, 2.0, 3.0])
+    watchdog = Watchdog()
+
+    firmware_runtime.run_loop(
+        App(),
+        iterations=3,
+        now_provider=lambda: next(clock),
+        sleep_ms=lambda value: None,
+        watchdog=watchdog,
+        max_consecutive_loop_failures=2,
+    )
+
+    assert watchdog.reset_requests == [
+        ("loop-failures", {"count": 2, "error": "RuntimeError"}),
+    ]
+
+
+def test_run_loop_requests_watchdog_reset_after_repeated_display_failures():
+    class App:
+        def __init__(self):
+            self.display_failure_count = 5
+
+        def tick(self, now_s):
+            return None
+
+    class Watchdog:
+        def __init__(self):
+            self.reset_requests = []
+
+        def feed(self):
+            return True
+
+        def request_reset(self, reason, **fields):
+            self.reset_requests.append((reason, fields))
+            return True
+
+    watchdog = Watchdog()
+
+    firmware_runtime.run_loop(
+        App(),
+        iterations=1,
+        now_provider=lambda: 1.0,
+        sleep_ms=lambda value: None,
+        watchdog=watchdog,
+        max_consecutive_display_failures=5,
+    )
+
+    assert watchdog.reset_requests == [
+        ("display-failures", {"count": 5}),
+    ]
+
+
 def test_run_forever_waits_for_boot_logo_before_startup_work_and_enters_run_loop(monkeypatch):
     class FakeApp:
         def __init__(self):
@@ -796,12 +926,12 @@ def test_run_forever_waits_for_boot_logo_before_startup_work_and_enters_run_loop
     monkeypatch.setattr(
         firmware_runtime,
         "_wait_for_boot_logo",
-        lambda app, now_provider=None, sleep_ms=None: wait_calls.append(app.boot_logo_until_s) or 18.5,
+        lambda app, now_provider=None, sleep_ms=None, watchdog=None: wait_calls.append(app.boot_logo_until_s) or 18.5,
     )
     monkeypatch.setattr(
         firmware_runtime,
         "run_loop",
-        lambda app, poll_interval_ms=50: called.update({"app": app, "poll_interval_ms": poll_interval_ms}),
+        lambda app, poll_interval_ms=50, now_provider=None, watchdog=None: called.update({"app": app, "poll_interval_ms": poll_interval_ms}),
     )
 
     firmware_runtime.run_forever(poll_interval_ms=75)
@@ -873,12 +1003,12 @@ def test_run_forever_connects_network_before_waiting_for_boot_logo(monkeypatch):
     monkeypatch.setattr(
         firmware_runtime,
         "_wait_for_boot_logo",
-        lambda app, now_provider=None, sleep_ms=None: events.append(("wait", app.boot_logo_until_s)) or 16.5,
+        lambda app, now_provider=None, sleep_ms=None, watchdog=None: events.append(("wait", app.boot_logo_until_s)) or 16.5,
     )
     monkeypatch.setattr(
         firmware_runtime,
         "run_loop",
-        lambda app, poll_interval_ms=50: called.update({"app": app, "poll_interval_ms": poll_interval_ms}),
+        lambda app, poll_interval_ms=50, now_provider=None, watchdog=None: called.update({"app": app, "poll_interval_ms": poll_interval_ms}),
     )
 
     firmware_runtime.run_forever(poll_interval_ms=75)
