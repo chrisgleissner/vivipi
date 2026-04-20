@@ -22,9 +22,8 @@ Authoritative execution plan for eliminating TELNET false positives where a bare
 
 - `OK`: the TCP session is established and at least one of these deterministic criteria is met before close or timeout:
 	- TELNET negotiation is observed via `IAC DO/DONT/WILL/WONT`, or
-	- non-whitespace visible TELNET payload is read, or
-	- the socket remains open for at least `500 ms` after connect without an early close.
-- `DEG`: the TCP session is established but the probe only reaches the stable-open threshold without negotiation or visible TELNET payload.
+	- non-whitespace visible TELNET payload is read.
+- `DEG`: the TCP session is established, remains open for at least `500 ms` after connect, but no TELNET negotiation or visible TELNET payload is observed.
 - `FAIL`: connection refusal, timeout before session establishment, explicit failure text, or early remote close before `100 ms` and before any negotiation or visible payload.
 
 ### Phases

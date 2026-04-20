@@ -210,9 +210,11 @@ def test_execute_check_preserves_explicit_telnet_degraded_status():
             latency_ms=8.0,
             details="connected-no-telnet-data",
             metadata={
+                7: "normalized-key",
                 "close_reason": "idle-timeout",
                 "session_duration_ms": 600.0,
                 "handshake_detected": False,
+                "ignored": None,
             },
         ),
     )
@@ -220,6 +222,7 @@ def test_execute_check_preserves_explicit_telnet_degraded_status():
     assert result.observations[0].status == Status.DEG
     assert result.observations[0].details == "connected-no-telnet-data"
     assert result.probe_metadata == {
+        "7": "normalized-key",
         "close_reason": "idle-timeout",
         "session_duration_ms": 600.0,
         "handshake_detected": False,
