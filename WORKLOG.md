@@ -23,6 +23,34 @@
   - extend socket-level probe traces with operation-specific labels so logs clearly show which FTP command, HTTP phase, or TELNET interaction is happening at each send/receive step
   - keep that work separate from the current TELNET correctness patch so the false-positive fix can complete and validate independently
 
+## 2026-04-19T21:32:00Z
+
+- Completed the TELNET false-positive correction task.
+- Final implementation changes:
+  - extended `PingProbeResult` / `CheckExecutionResult` so direct probes can carry explicit status plus probe metadata without changing unrelated probe architecture
+  - rewrote `portable_telnet_runner()` and the TELNET session reader in `src/vivipi/runtime/checks.py` so connect-only, blank, reset, and early-close sessions are no longer treated as healthy
+  - added deterministic TELNET session metadata: `close_reason`, `session_duration_ms`, `handshake_detected`
+  - preserved TELNET `DEG` through `src/vivipi/core/execution.py`, `src/vivipi/runtime/app.py`, and `src/vivipi/services/adb_service.py`
+  - updated `docs/spec.md`, `README.md`, and `docs/spec-traceability.md` to match the new TELNET contract
+- Deterministic classification now enforced:
+  - remote close/reset before `100 ms` => `FAIL`
+  - stable open for at least `500 ms` with no meaningful TELNET interaction => `DEG`
+  - meaningful TELNET interaction that survives the non-immediate-close window => `OK`
+- Regression and validation evidence:
+  - focused TELNET/execution/runtime/service slice passed: `135 passed`
+  - traceability slice passed: `3 passed`
+  - final full repository validation passed again: `./build` -> `661 passed`, coverage `97.26%`
+  - deterministic local socket fixtures now prove the corrected classifier end to end:
+    - `immediate-close -> FAIL closed immediately`
+    - `idle-open -> DEG connected-no-telnet-data`
+    - `negotiated-open -> OK visible_bytes=5`
+- Live target results:
+  - updated TELNET probe against `192.168.1.167:23` now reports `OK visible_bytes=2295`, `handshake_detected=true`, `session_duration_ms=103.2`
+  - updated TELNET probe against `192.168.1.13:23` now reports `OK visible_bytes=2009`, `handshake_detected=true`, `session_duration_ms=149.4`
+  - raw socket inspection against both targets showed first TELNET data arriving at about `37-48 ms`, about `2.0-2.3 KiB` total payload, and no remote close within a `1s` observation window, so these live targets are currently behaving like valid TELNET services rather than reproducing the false-positive scenario
+  - the shell `telnet` client still printed `Connected ... Connection closed by foreign host.`, but the raw socket capture showed that this current operator-side symptom is not sufficient on its own to prove an immediate remote close on the wire for these targets
+  - direct Pico-side probe execution via `mpremote connect auto run artifacts/device/pico_probe_runner.py` showed `c64u-telnet` still in the visible-payload path, while `u64-rest`, `u64-ftp`, and `u64-telnet` all timed out together from the Pico on that pass, which points to a broader `u64` reachability issue on the device path rather than a TELNET-only false-positive classification
+
 ## 2026-04-18T21:30:00Z
 
 - Completed the runtime syslog and observability expansion and fixed the stuck-looking bottom heartbeat behavior.

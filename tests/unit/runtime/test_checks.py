@@ -971,7 +971,7 @@ def test_telnet_chunk_compat_and_output_helpers_cover_remaining_branches(monkeyp
     assert runtime_checks._looks_like_telnet_output("   ") is False
 
 
-def test_portable_telnet_runner_treats_micropython_etimedout_after_connect_as_success(monkeypatch):
+def test_portable_telnet_runner_treats_micropython_etimedout_after_connect_as_degraded(monkeypatch):
     class TimeoutSocket:
         def __init__(self):
             self.timeout_values = []
@@ -993,9 +993,10 @@ def test_portable_telnet_runner_treats_micropython_etimedout_after_connect_as_su
 
     result = portable_telnet_runner("192.0.2.10:23", 8)
 
-    assert result.ok is True
-    assert result.details == "connected"
-    assert handle.timeout_values == [runtime_checks.TELNET_IDLE_TIMEOUT_S]
+    assert result.ok is False
+    assert result.status == Status.DEG
+    assert result.details == "connected-no-telnet-data"
+    assert handle.timeout_values == [runtime_checks.TELNET_IDLE_TIMEOUT_S] * 5
     assert handle.closed is True
 
 
@@ -1165,6 +1166,8 @@ def test_portable_telnet_runner_stdlib_and_raw_error_paths(monkeypatch):
             self.sent.append(data)
 
         def recv(self, size):
+            if not self.responses:
+                return b""
             response = self.responses.pop(0)
             if isinstance(response, BaseException):
                 raise response
@@ -1173,12 +1176,23 @@ def test_portable_telnet_runner_stdlib_and_raw_error_paths(monkeypatch):
         def close(self):
             self.closed = True
 
-    success_handle = StdlibSocket([b"Welcome\r\n", b"router> ", runtime_checks.socket.timeout()])
+    success_handle = StdlibSocket(
+        [
+            b"Welcome\r\n",
+            b"router> ",
+            runtime_checks.socket.timeout(),
+            runtime_checks.socket.timeout(),
+            runtime_checks.socket.timeout(),
+            runtime_checks.socket.timeout(),
+            runtime_checks.socket.timeout(),
+        ]
+    )
     monkeypatch.setattr(runtime_checks.socket, "create_connection", lambda address, timeout: success_handle)
     monkeypatch.setattr(runtime_checks, "_is_micropython_runtime", lambda: False)
 
     success = portable_telnet_runner("telnet://switch.example.local", 10)
     assert success.ok is True
+    assert success.status == Status.OK
     assert success.details == "visible_bytes=16"
     assert success_handle.sent == []
     assert success_handle.closed is True
@@ -1187,18 +1201,26 @@ def test_portable_telnet_runner_stdlib_and_raw_error_paths(monkeypatch):
     monkeypatch.setattr(runtime_checks.socket, "create_connection", lambda address, timeout: empty_handle)
 
     empty = portable_telnet_runner("telnet://switch.example.local", 10)
-    assert empty.ok is True
-    assert empty.details == "connected"
+    assert empty.ok is False
+    assert empty.status == Status.FAIL
+    assert empty.details == "no telnet interaction"
 
     class TimeoutSocket(FakeSocket):
+        def __init__(self):
+            super().__init__([])
+            self.calls = 0
+
         def recv(self, size):
+            self.calls += 1
             raise TimeoutError("timed out")
 
-    timeout_handle = TimeoutSocket([])
+    timeout_handle = TimeoutSocket()
     monkeypatch.setattr(runtime_checks, "_open_socket", lambda host, port, timeout_s: timeout_handle)
     timeout_result = portable_telnet_runner("telnet://switch.example.local", 10, trace=lambda event, **fields: None)
-    assert timeout_result.ok is True
-    assert timeout_result.details == "connected"
+    assert timeout_result.ok is False
+    assert timeout_result.status == Status.DEG
+    assert timeout_result.details == "connected-no-telnet-data"
+    assert timeout_handle.calls == 5
 
     class BrokenSocket(FakeSocket):
         def recv(self, size):
@@ -1207,11 +1229,12 @@ def test_portable_telnet_runner_stdlib_and_raw_error_paths(monkeypatch):
     broken_handle = BrokenSocket([])
     monkeypatch.setattr(runtime_checks, "_open_socket", lambda host, port, timeout_s: broken_handle)
     broken_result = portable_telnet_runner("telnet://switch.example.local", 10, trace=lambda event, **fields: None)
-    assert broken_result.ok is True
-    assert broken_result.details == "connected"
+    assert broken_result.ok is False
+    assert broken_result.status == Status.FAIL
+    assert broken_result.details == "closed immediately"
 
 
-def test_portable_telnet_runner_stdlib_treats_post_connect_reset_as_connected(monkeypatch):
+def test_portable_telnet_runner_stdlib_rejects_immediate_post_connect_reset(monkeypatch):
     class ResetSocket:
         def __init__(self):
             self.closed = False
@@ -1231,8 +1254,9 @@ def test_portable_telnet_runner_stdlib_treats_post_connect_reset_as_connected(mo
 
     result = portable_telnet_runner("telnet://switch.example.local", 10)
 
-    assert result.ok is True
-    assert result.details == "connected"
+    assert result.ok is False
+    assert result.status == Status.FAIL
+    assert result.details == "closed immediately"
     assert handle.closed is True
 
 
@@ -1892,7 +1916,22 @@ def test_portable_ftp_runner_reports_socket_errors(monkeypatch):
 
 
 def test_portable_telnet_runner_accepts_banner_output(monkeypatch):
-    handle = FakeSocket([b"Welcome\r\nrouter> ", b""])
+    class BannerSocket(FakeSocket):
+        def __init__(self):
+            super().__init__([b"Welcome\r\nrouter> "])
+            self.recv_calls = 0
+            self.timeout_values = []
+
+        def settimeout(self, value):
+            self.timeout_values.append(value)
+
+        def recv(self, _size):
+            self.recv_calls += 1
+            if self.recv_calls == 1:
+                return super().recv(_size)
+            raise OSError("timed out")
+
+    handle = BannerSocket()
     monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: handle)
 
     result = portable_telnet_runner(
@@ -1905,6 +1944,7 @@ def test_portable_telnet_runner_accepts_banner_output(monkeypatch):
 
     assert result.ok is True
     assert result.details == "visible_bytes=16"
+    assert result.metadata["close_reason"] == "idle-timeout"
     assert handle.sent == []
     assert handle.closed is True
 
@@ -1926,44 +1966,68 @@ def test_portable_telnet_runner_rejects_blank_sessions(monkeypatch):
 
     result = portable_telnet_runner("switch.example.local:23", 10, trace=lambda event, **fields: None)
 
-    assert result.ok is True
-    assert result.details == "connected"
+    assert result.ok is False
+    assert result.status == Status.FAIL
+    assert result.details == "closed immediately"
     assert handle.sent == []
 
 
-def test_portable_telnet_runner_stops_on_idle_timeout(monkeypatch):
+def test_portable_telnet_runner_marks_stable_idle_open_as_degraded(monkeypatch):
     class TimeoutThenResponseSocket(FakeSocket):
         def __init__(self):
             super().__init__([])
             self.recv_calls = 0
+            self.timeout_values = []
 
         def settimeout(self, value):
-            return None
+            self.timeout_values.append(value)
 
         def recv(self, _size):
             self.recv_calls += 1
-            if self.recv_calls == 1:
-                raise OSError("timed out")
-            return b""
+            raise OSError("timed out")
 
     handle = TimeoutThenResponseSocket()
     monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: handle)
 
     result = portable_telnet_runner("switch.example.local:23", 10, trace=lambda event, **fields: None)
 
-    assert result.ok is True
-    assert result.details == "connected"
+    assert result.ok is False
+    assert result.status == Status.DEG
+    assert result.details == "connected-no-telnet-data"
+    assert result.metadata["close_reason"] == "idle-timeout"
+    assert result.metadata["handshake_detected"] is False
+    assert result.metadata["session_duration_ms"] >= runtime_checks.TELNET_STABLE_OPEN_THRESHOLD_MS
+    assert handle.recv_calls == 5
+    assert handle.timeout_values == [runtime_checks.TELNET_IDLE_TIMEOUT_S] * 5
     assert handle.sent == []
 
 
 def test_portable_telnet_runner_accepts_password_prompt_as_banner(monkeypatch):
-    handle = FakeSocket([b"Password: \xff\xfb\x01", b"\r\nREADY\r\n"])
+    class PasswordPromptSocket(FakeSocket):
+        def __init__(self):
+            super().__init__([b"Password: \xff\xfb\x01", b"\r\nREADY\r\n"])
+            self.recv_calls = 0
+            self.timeout_values = []
+
+        def settimeout(self, value):
+            self.timeout_values.append(value)
+
+        def recv(self, _size):
+            self.recv_calls += 1
+            if self.recv_calls <= 2:
+                return super().recv(_size)
+            raise OSError("timed out")
+
+    handle = PasswordPromptSocket()
     monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: handle)
 
     result = portable_telnet_runner("switch.example.local:23", 10, password="secret", trace=lambda event, **fields: None)
 
     assert result.ok is True
+    assert result.status == Status.OK
     assert result.details == "visible_bytes=17"
+    assert result.metadata["close_reason"] == "idle-timeout"
+    assert result.metadata["handshake_detected"] is True
     assert handle.sent == [bytes((255, 254, 1))]
 
 
@@ -1972,6 +2036,7 @@ def test_portable_telnet_runner_tolerates_negotiation_reply_timeout(monkeypatch)
         def __init__(self, responses):
             super().__init__(responses)
             self.reply_attempts = 0
+            self.recv_calls = 0
 
         def sendall(self, data):
             if data != b"\r\n":
@@ -1979,12 +2044,19 @@ def test_portable_telnet_runner_tolerates_negotiation_reply_timeout(monkeypatch)
                 raise OSError(110, "timed out")
             super().sendall(data)
 
-    handle = ReplyTimeoutSocket([b"Password: \xff\xfb\x01", b"\r\nREADY\r\n", b""])
+        def recv(self, _size):
+            self.recv_calls += 1
+            if self.recv_calls <= 2:
+                return super().recv(_size)
+            raise OSError("timed out")
+
+    handle = ReplyTimeoutSocket([b"Password: \xff\xfb\x01", b"\r\nREADY\r\n"])
     monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: handle)
 
     result = portable_telnet_runner("switch.example.local:23", 10, trace=lambda event, **fields: None)
 
     assert result.ok is True
+    assert result.status == Status.OK
     assert result.details == "visible_bytes=17"
     assert handle.sent == []
     assert handle.reply_attempts == 1
@@ -2002,7 +2074,7 @@ def test_portable_telnet_runner_drains_until_quiet_timeout_before_close(monkeypa
 
         def recv(self, _size):
             self.recv_calls += 1
-            if self.recv_calls == 3:
+            if self.recv_calls >= 3:
                 raise OSError("timed out")
             return super().recv(_size)
 
@@ -2012,10 +2084,17 @@ def test_portable_telnet_runner_drains_until_quiet_timeout_before_close(monkeypa
     result = portable_telnet_runner("switch.example.local:23", 10, trace=lambda event, **fields: None)
 
     assert result.ok is True
+    assert result.status == Status.OK
     assert result.details == "visible_bytes=16"
-    assert handle.recv_calls == 3
+    assert result.metadata["close_reason"] == "idle-timeout"
+    assert result.metadata["handshake_detected"] is False
+    assert handle.recv_calls == 7
     assert handle.timeout_values == [
         runtime_checks.TELNET_IDLE_TIMEOUT_S,
+        runtime_checks.TELNET_POST_DATA_IDLE_TIMEOUT_S,
+        runtime_checks.TELNET_POST_DATA_IDLE_TIMEOUT_S,
+        runtime_checks.TELNET_POST_DATA_IDLE_TIMEOUT_S,
+        runtime_checks.TELNET_POST_DATA_IDLE_TIMEOUT_S,
         runtime_checks.TELNET_POST_DATA_IDLE_TIMEOUT_S,
         runtime_checks.TELNET_POST_DATA_IDLE_TIMEOUT_S,
     ]
@@ -2028,6 +2107,7 @@ def test_portable_telnet_runner_handles_explicit_failure_text_and_socket_error(m
     failed_login = portable_telnet_runner("telnet://switch.example.local", 10, trace=lambda event, **fields: None)
 
     assert failed_login.ok is False
+    assert failed_login.status == Status.FAIL
     assert failed_login.details == "telnet failure marker present"
 
     monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: (_ for _ in ()).throw(OSError("refused")))
@@ -2035,6 +2115,7 @@ def test_portable_telnet_runner_handles_explicit_failure_text_and_socket_error(m
     socket_failure = portable_telnet_runner("telnet://switch.example.local", 10, trace=lambda event, **fields: None)
 
     assert socket_failure.ok is False
+    assert socket_failure.status == Status.FAIL
     assert socket_failure.details == "refused"
 
 
@@ -2049,9 +2130,12 @@ def test_read_telnet_until_idle_counts_visible_bytes_without_buffering_full_tran
 
     handle = LargeBannerSocket()
 
-    visible_bytes, has_visible_text = runtime_checks._read_telnet_until_idle(handle)
+    session = runtime_checks._read_telnet_until_idle(handle)
 
-    assert (visible_bytes, has_visible_text) == (3072, True)
+    assert session["visible_bytes"] == 3072
+    assert session["has_visible_text"] is True
+    assert session["handshake_detected"] is False
+    assert session["close_reason"] == "remote-close"
     assert handle.timeout_values == [
         runtime_checks.TELNET_IDLE_TIMEOUT_S,
         runtime_checks.TELNET_POST_DATA_IDLE_TIMEOUT_S,
@@ -2062,5 +2146,7 @@ def test_read_telnet_until_idle_counts_visible_bytes_without_buffering_full_tran
 def test_read_telnet_until_idle_detects_failure_markers_across_chunk_boundaries():
     handle = FakeSocket([b"Access den", b"ied\r\n", b""])
 
-    with pytest.raises(RuntimeError, match="telnet failure marker present"):
-        runtime_checks._read_telnet_until_idle(handle)
+    session = runtime_checks._read_telnet_until_idle(handle)
+
+    assert session["failure_detected"] is True
+    assert session["close_reason"] == "failure-marker"

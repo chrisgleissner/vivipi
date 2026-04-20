@@ -188,6 +188,44 @@ def test_execute_check_maps_ftp_and_telnet_probe_results():
     assert telnet_result.probe_latency_ms == 8.0
 
 
+def test_execute_check_preserves_explicit_telnet_degraded_status():
+    telnet_definition = CheckDefinition(
+        identifier="switch-console",
+        name="Switch Console",
+        check_type=CheckType.TELNET,
+        target="telnet://switch.example.local",
+        interval_s=15,
+        timeout_s=10,
+    )
+
+    result = execute_check(
+        telnet_definition,
+        observed_at_s=11.0,
+        ping_runner=None,
+        http_runner=None,
+        ftp_runner=None,
+        telnet_runner=lambda target, timeout_s, username, password: PingProbeResult(
+            ok=False,
+            status=Status.DEG,
+            latency_ms=8.0,
+            details="connected-no-telnet-data",
+            metadata={
+                "close_reason": "idle-timeout",
+                "session_duration_ms": 600.0,
+                "handshake_detected": False,
+            },
+        ),
+    )
+
+    assert result.observations[0].status == Status.DEG
+    assert result.observations[0].details == "connected-no-telnet-data"
+    assert result.probe_metadata == {
+        "close_reason": "idle-timeout",
+        "session_duration_ms": 600.0,
+        "handshake_detected": False,
+    }
+
+
 def test_execute_check_passes_http_password_to_runner():
     definition = CheckDefinition(
         identifier="u64-rest",

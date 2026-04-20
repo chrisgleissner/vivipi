@@ -30,39 +30,55 @@ Authoritative execution plan for eliminating TELNET false positives where a bare
 ### Phases
 
 Phase 1: Root-cause confirmation  
-Status: IN PROGRESS
+Status: COMPLETED
 
 - Capture the current TELNET runner behavior and manual CLI telnet behavior against `c64u` and `u64`.
 - Confirm the current code path that promotes post-connect reset/timeout to `OK`.
 
 Phase 2: TELNET runner correction  
-Status: NOT STARTED
+Status: COMPLETED
 
 - Add explicit TELNET session outcome metadata and deterministic close classification.
 - Replace the old post-connect-success shortcut with session validation based on negotiation, visible payload, and stable-open thresholds.
 
 Phase 3: Shared result/logging seam  
-Status: NOT STARTED
+Status: COMPLETED
 
 - Extend direct-probe result handling so TELNET can emit `Status.DEG` without changing other probe semantics.
 - Extend probe-end and check-summary logging with `close_reason`, `session_duration_ms`, and `handshake_detected` when present.
 
 Phase 4: Regression coverage  
-Status: NOT STARTED
+Status: COMPLETED
 
 - Add deterministic tests for immediate close, sub-`100 ms` early close, stable idle open, and valid TELNET negotiation.
 - Update any execution/service tests affected by the explicit TELNET status model.
 
 Phase 5: Docs and traceability  
-Status: NOT STARTED
+Status: COMPLETED
 
 - Update `docs/spec.md`, `README.md`, and `docs/spec-traceability.md` to reflect the corrected TELNET semantics.
 
 Phase 6: Validation  
-Status: NOT STARTED
+Status: COMPLETED
 
 - Run focused TELNET-related tests, then `./build`.
 - Re-run the TELNET probe against `c64u` and `u64`, compare before/after classifications, and confirm that at least one previously incorrect `OK` now becomes non-`OK`.
+
+### Completion Notes
+
+- The TELNET runner no longer treats connect-only or early-close sessions as healthy. It now emits explicit `Status.OK`, `Status.DEG`, or `Status.FAIL` together with `close_reason`, `session_duration_ms`, and `handshake_detected` metadata.
+- Deterministic TELNET thresholds are now explicit in code and docs:
+	- close/reset before `100 ms` => `FAIL`
+	- no meaningful interaction but open for at least `500 ms` => `DEG`
+	- meaningful TELNET interaction that survives the non-immediate-close window => `OK`
+- Direct-probe execution and the default ADB service now preserve explicit TELNET `DEG` results instead of collapsing everything to boolean success/failure.
+- Runtime `CHECK` and `PROBE` logs now include TELNET session-close metadata so failures and degraded sessions are diagnosable without changing the existing log format.
+- Validation completed with:
+	- focused TELNET/execution/runtime/service slice passing
+	- `tests/spec/test_traceability.py` passing
+	- final `./build` passing at `661 passed` with `97.26%` total coverage
+	- deterministic socket-fixture proof: immediate close => `FAIL`, stable idle open => `DEG`, negotiated stable session => `OK`
+	- live target probe re-checks on `c64u` and `u64` still classify `OK`, while raw socket inspection shows both targets deliver TELNET payload and remain open for about `1s`, so they currently validate the non-regression side rather than the false-positive side
 
 ### Backlog
 

@@ -702,6 +702,38 @@ def test_runtime_app_record_result_falls_back_to_first_observation_and_warns_for
     assert any(line.startswith("[vivipi] [WARN][CHECK] failure") and "detail=slow" in line for line in app.get_logs())
 
 
+def test_runtime_app_record_result_logs_probe_metadata_fields():
+    definition = make_definition("router")
+    app = RuntimeApp(definitions=(definition,), executor=lambda definition, now_s: None, display=FakeDisplay(), page_interval_s=0)
+
+    app._record_result(
+        definition,
+        CheckExecutionResult(
+            source_identifier=definition.identifier,
+            observations=(
+                CheckObservation(
+                    identifier=definition.identifier,
+                    name=definition.name,
+                    status=Status.FAIL,
+                    details="closed immediately",
+                    latency_ms=12.0,
+                    observed_at_s=5.0,
+                ),
+            ),
+            probe_metadata={
+                "close_reason": "remote-close",
+                "session_duration_ms": 12.0,
+                "handshake_detected": False,
+            },
+        ),
+        duration_ms=20.0,
+    )
+
+    logs = app.get_logs()
+    assert any(line.startswith("[vivipi] [INFO][CHECK] run") and "close=remote-close" in line and "ses_ms=12.0" in line for line in logs)
+    assert any(line.startswith("[vivipi] [ERROR][CHECK] failure") and "close=remote-close" in line and "hs=False" in line for line in logs)
+
+
 def test_runtime_app_network_operation_helpers_cover_sync_async_and_guard_paths(monkeypatch):
     app = RuntimeApp(definitions=(), executor=lambda definition, now_s: None, display=FakeDisplay(), page_interval_s=0)
     app.config = {"wifi": {"ssid": "Office"}}

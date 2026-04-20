@@ -914,17 +914,18 @@ def _classify_telnet_session(session: dict[str, object]) -> tuple[Status, str]:
     has_visible_text = bool(session["has_visible_text"])
     visible_bytes = int(session["visible_bytes"])
     meaningful_interaction = handshake_detected or has_visible_text
+    verified_interaction = meaningful_interaction and session_duration_ms >= TELNET_EARLY_CLOSE_THRESHOLD_MS
     stable_session = session_duration_ms >= TELNET_STABLE_OPEN_THRESHOLD_MS
     early_close = close_reason in {"remote-close", "reset"} and session_duration_ms < TELNET_EARLY_CLOSE_THRESHOLD_MS
 
     if bool(session["failure_detected"]):
         return Status.FAIL, "telnet failure marker present"
-    if early_close:
-        return Status.FAIL, "closed immediately"
-    if meaningful_interaction:
+    if verified_interaction:
         if has_visible_text:
             return Status.OK, f"visible_bytes={visible_bytes}"
         return Status.OK, "negotiated"
+    if early_close:
+        return Status.FAIL, "closed immediately"
     if stable_session:
         return Status.DEG, "connected-no-telnet-data"
     return Status.FAIL, _telnet_failure_detail(session)
@@ -939,6 +940,10 @@ def _read_telnet_until_idle(
 ) -> dict[str, object]:
     started_at, uses_ticks_ms = _start_timer()
     waited_timeout_ms = 0.0
+
+    def session_duration_ms() -> float:
+        return max(_elapsed_ms(started_at, uses_ticks_ms), waited_timeout_ms)
+
     visible_bytes = 0
     has_visible_text = False
     handshake_detected = False
@@ -947,24 +952,28 @@ def _read_telnet_until_idle(
     saw_data = False
     while True:
         current_timeout_s = quiet_timeout_s if saw_data else initial_timeout_s
-        session_duration_ms = max(_elapsed_ms(started_at, uses_ticks_ms), waited_timeout_ms)
-        stable_without_interaction = (not saw_data) and (not has_visible_text) and (not handshake_detected)
-        if stable_without_interaction and session_duration_ms >= TELNET_STABLE_OPEN_THRESHOLD_MS:
+        current_duration_ms = session_duration_ms()
+        meaningful_interaction = handshake_detected or has_visible_text
+        stable_without_interaction = (not meaningful_interaction) and (not saw_data)
+        if stable_without_interaction and current_duration_ms >= TELNET_STABLE_OPEN_THRESHOLD_MS:
             return {
                 "visible_bytes": visible_bytes,
                 "has_visible_text": has_visible_text,
                 "handshake_detected": handshake_detected,
                 "failure_detected": False,
                 "close_reason": "stable-open",
-                "session_duration_ms": session_duration_ms,
+                "session_duration_ms": current_duration_ms,
             }
         _set_socket_timeout(handle, current_timeout_s)
         try:
             chunk = handle.recv(4096)
         except TimeoutError:
             waited_timeout_ms += current_timeout_s * 1000.0
-            session_duration_ms = max(_elapsed_ms(started_at, uses_ticks_ms), waited_timeout_ms)
-            if stable_without_interaction and session_duration_ms < TELNET_STABLE_OPEN_THRESHOLD_MS:
+            current_duration_ms = session_duration_ms()
+            meaningful_interaction = handshake_detected or has_visible_text
+            if meaningful_interaction and current_duration_ms < TELNET_EARLY_CLOSE_THRESHOLD_MS:
+                continue
+            if stable_without_interaction and current_duration_ms < TELNET_STABLE_OPEN_THRESHOLD_MS:
                 continue
             return {
                 "visible_bytes": visible_bytes,
@@ -972,15 +981,18 @@ def _read_telnet_until_idle(
                 "handshake_detected": handshake_detected,
                 "failure_detected": False,
                 "close_reason": "idle-timeout",
-                "session_duration_ms": session_duration_ms,
+                "session_duration_ms": current_duration_ms,
             }
         except OSError as error:
             category = _classify_network_error(error)
             if category == "timeout":
                 waited_timeout_ms += current_timeout_s * 1000.0
-            session_duration_ms = max(_elapsed_ms(started_at, uses_ticks_ms), waited_timeout_ms)
+            current_duration_ms = session_duration_ms()
+            meaningful_interaction = handshake_detected or has_visible_text
             if category == "timeout":
-                if stable_without_interaction and session_duration_ms < TELNET_STABLE_OPEN_THRESHOLD_MS:
+                if meaningful_interaction and current_duration_ms < TELNET_EARLY_CLOSE_THRESHOLD_MS:
+                    continue
+                if stable_without_interaction and current_duration_ms < TELNET_STABLE_OPEN_THRESHOLD_MS:
                     continue
                 return {
                     "visible_bytes": visible_bytes,
@@ -988,7 +1000,7 @@ def _read_telnet_until_idle(
                     "handshake_detected": handshake_detected,
                     "failure_detected": False,
                     "close_reason": "idle-timeout",
-                    "session_duration_ms": session_duration_ms,
+                    "session_duration_ms": current_duration_ms,
                 }
             return {
                 "visible_bytes": visible_bytes,
@@ -996,7 +1008,7 @@ def _read_telnet_until_idle(
                 "handshake_detected": handshake_detected,
                 "failure_detected": False,
                 "close_reason": category,
-                "session_duration_ms": session_duration_ms,
+                "session_duration_ms": current_duration_ms,
             }
         if trace is not None:
             _emit_probe_trace(trace, "socket-recv", stage="telnet-recv", bytes_received=len(chunk))
@@ -1007,7 +1019,7 @@ def _read_telnet_until_idle(
                 "handshake_detected": handshake_detected,
                 "failure_detected": False,
                 "close_reason": "remote-close",
-                "session_duration_ms": _elapsed_ms(started_at, uses_ticks_ms),
+                "session_duration_ms": session_duration_ms(),
             }
         saw_data = True
         try:
@@ -1019,7 +1031,7 @@ def _read_telnet_until_idle(
                 "handshake_detected": handshake_detected,
                 "failure_detected": False,
                 "close_reason": _classify_network_error(error),
-                "session_duration_ms": _elapsed_ms(started_at, uses_ticks_ms),
+                "session_duration_ms": session_duration_ms(),
             }
         handshake_detected = handshake_detected or chunk_handshake
         if not visible:
@@ -1032,7 +1044,7 @@ def _read_telnet_until_idle(
                 "handshake_detected": handshake_detected,
                 "failure_detected": True,
                 "close_reason": "failure-marker",
-                "session_duration_ms": _elapsed_ms(started_at, uses_ticks_ms),
+                "session_duration_ms": session_duration_ms(),
             }
         if len(failure_window) > TELNET_FAILURE_SCAN_TAIL_BYTES:
             failure_window = bytearray(failure_window[-TELNET_FAILURE_SCAN_TAIL_BYTES:])
@@ -1054,7 +1066,7 @@ def _read_telnet_until_idle(
         "handshake_detected": handshake_detected,
         "failure_detected": False,
         "close_reason": "idle-timeout",
-        "session_duration_ms": _elapsed_ms(started_at, uses_ticks_ms),
+        "session_duration_ms": session_duration_ms(),
     }
 
 
