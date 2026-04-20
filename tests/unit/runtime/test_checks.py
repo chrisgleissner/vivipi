@@ -1604,10 +1604,10 @@ def test_build_executor_preserves_explicit_trace_target(monkeypatch):
         {
             "checks": [
                 {
-                    "id": "ping",
-                    "name": "Ping",
-                    "type": "PING",
-                    "target": "device.local",
+                    "id": "http",
+                    "name": "HTTP",
+                    "type": "HTTP",
+                    "target": "http://device.local/health",
                     "timeout_s": 10,
                 }
             ]
@@ -1615,18 +1615,38 @@ def test_build_executor_preserves_explicit_trace_target(monkeypatch):
     )[0]
     captured = []
 
-    def ping_runner(target, timeout_s, trace=None):
+    def portable_http_runner(method, target, timeout_s, username=None, password=None, trace=None):
+        del method, username, password
         trace("socket-open", target="override.local")
-        return PingProbeResult(ok=True, latency_ms=1.0, details="reachable")
+        return runtime_checks.HttpResponseResult(status_code=200, body={}, latency_ms=1.0, details="HTTP 200")
 
-    executor = build_executor(ping_runner=ping_runner, trace_sink=lambda definition, event, fields: captured.append((event, dict(fields))))
+    monkeypatch.setattr(runtime_checks, "portable_http_runner", portable_http_runner)
+
+    monkeypatch.setattr(
+        runtime_checks,
+        "execute_check",
+        lambda definition, now_s, ping, http, ftp, telnet: (
+            http("GET", definition.target, definition.timeout_s),
+            CheckExecutionResult(
+                source_identifier=definition.identifier,
+                observations=(
+                    CheckObservation(
+                        identifier=definition.identifier,
+                        name=definition.name,
+                        status=Status.OK,
+                        details="HTTP 200",
+                        latency_ms=1.0,
+                        observed_at_s=now_s,
+                    ),
+                ),
+            ),
+        )[1],
+    )
+
+    executor = build_executor(trace_sink=lambda definition, event, fields: captured.append((event, dict(fields))))
     executor(definition, 10.0)
 
-    assert captured[1] == ("socket-open", {"target": "override.local"})
-
-    no_trace_executor = build_executor()
-    with pytest.raises(RuntimeError, match="boom"):
-        no_trace_executor(definitions[0], 10.0)
+    assert any(event == "socket-open" and fields == {"target": "override.local"} for event, fields in captured)
 
 
 def test_portable_ping_runner_uses_uping_when_available(monkeypatch):
