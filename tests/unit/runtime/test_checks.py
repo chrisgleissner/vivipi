@@ -182,6 +182,61 @@ def test_probe_end_helper_normalization_covers_enum_name_and_service_fallback_pa
     assert fallback_definition.method == "GET"
 
 
+def test_probe_end_helpers_cover_string_fallbacks_and_empty_non_service_paths():
+    class StringOnly:
+        value = None
+        name = None
+
+        def __str__(self):
+            return "mystery"
+
+    fallback_definition = build_runtime_definitions(
+        {
+            "checks": [
+                {
+                    "id": "router",
+                    "name": "Router",
+                    "type": "PING",
+                    "target": "192.168.1.1",
+                }
+            ]
+        }
+    )[0]
+    empty_result = SimpleNamespace(observations=(), probe_latency_ms=None)
+
+    assert runtime_checks._check_type_name(SimpleNamespace(check_type=StringOnly())) == "MYSTERY"
+    assert runtime_checks._status_text(StringOnly()) == "mystery"
+    assert runtime_checks._probe_end_detail(fallback_definition, empty_result) == ""
+    assert runtime_checks._probe_end_latency_ms(fallback_definition, empty_result) is None
+
+
+def test_maybe_collect_gc_handles_mem_free_errors_and_skips_when_memory_is_sufficient(monkeypatch):
+    class FakeGc:
+        def __init__(self):
+            self.collect_calls = 0
+            self.mode = "raise"
+
+        def collect(self):
+            self.collect_calls += 1
+
+        def mem_free(self):
+            if self.mode == "raise":
+                raise RuntimeError("boom")
+            return runtime_checks.TELNET_RECV_CHUNK_SIZE * 8
+
+    fake_gc = FakeGc()
+
+    monkeypatch.setattr(runtime_checks, "gc", fake_gc)
+    monkeypatch.setattr(runtime_checks, "_is_micropython_runtime", lambda: True)
+
+    runtime_checks._maybe_collect_gc()
+    assert fake_gc.collect_calls == 1
+
+    fake_gc.mode = "enough"
+    runtime_checks._maybe_collect_gc()
+    assert fake_gc.collect_calls == 1
+
+
 def test_telnet_session_helpers_cover_negotiated_and_fallback_failure_paths():
     negotiated_status, negotiated_detail = runtime_checks._classify_telnet_session(
         {
@@ -209,6 +264,11 @@ def test_telnet_session_helpers_cover_negotiated_and_fallback_failure_paths():
     assert fallback_status == Status.FAIL
     assert fallback_detail == "refused"
     assert runtime_checks._telnet_failure_detail({"close_reason": "idle-timeout", "session_duration_ms": 250.0}) == "no telnet interaction"
+
+
+def test_telnet_failure_detail_covers_immediate_close_and_failure_marker_paths():
+    assert runtime_checks._telnet_failure_detail({"close_reason": "remote-close", "session_duration_ms": 10.0}) == "closed immediately"
+    assert runtime_checks._telnet_failure_detail({"close_reason": "failure-marker", "session_duration_ms": 500.0}) == "telnet failure marker present"
 
 
 def test_build_runtime_definitions_accepts_legacy_rest_alias_and_normalizes_to_http():
@@ -1071,6 +1131,41 @@ def test_telnet_chunk_compat_and_output_helpers_cover_remaining_branches(monkeyp
     assert runtime_checks._looks_like_telnet_output("   ") is False
 
 
+def test_recv_telnet_chunk_into_traces_recv_into_and_recv_fallback_paths():
+    trace_events = []
+
+    class IntoSocket:
+        def recv_into(self, buffer):
+            payload = b"abc"
+            buffer[: len(payload)] = payload
+            return len(payload)
+
+    into_result = runtime_checks._recv_telnet_chunk_into(
+        IntoSocket(),
+        bytearray(8),
+        trace=lambda event, **fields: trace_events.append((event, fields)),
+    )
+
+    assert bytes(into_result) == b"abc"
+    assert trace_events == [("socket-recv", {"stage": "telnet-recv", "bytes_received": 3})]
+
+    trace_events.clear()
+
+    class FallbackSocket:
+        def recv(self, size):
+            assert size == 8
+            return b"xy"
+
+    fallback_result = runtime_checks._recv_telnet_chunk_into(
+        FallbackSocket(),
+        bytearray(8),
+        trace=lambda event, **fields: trace_events.append((event, fields)),
+    )
+
+    assert fallback_result == b"xy"
+    assert trace_events == [("socket-recv", {"stage": "telnet-recv", "bytes_received": 2})]
+
+
 def test_portable_telnet_runner_treats_micropython_etimedout_after_connect_as_degraded(monkeypatch):
     class TimeoutSocket:
         def __init__(self):
@@ -1842,12 +1937,25 @@ def test_socket_helpers_cover_open_close_and_response_errors(monkeypatch):
     assert opened.address == ("nas.example.local", 21)
 
     shutdown_socket = ShutdownRecordingSocket([])
+
+    class ShutdownErrorSocket(ShutdownRecordingSocket):
+        def shutdown(self, how):
+            super().shutdown(how)
+            raise OSError("shutdown failed")
+
+    shutdown_error_socket = ShutdownErrorSocket([])
+    trace_events = []
+
     _close_socket(None)
     _close_socket(shutdown_socket)
+    _close_socket(shutdown_error_socket, trace=lambda event, **fields: trace_events.append((event, fields)), target="ftp://nas.example.local")
     _close_socket(CloseErrorSocket([]))
 
     assert shutdown_socket.shutdown_calls == [runtime_checks.socket.SHUT_RDWR]
     assert shutdown_socket.closed is True
+    assert shutdown_error_socket.shutdown_calls == [runtime_checks.socket.SHUT_RDWR]
+    assert shutdown_error_socket.closed is True
+    assert trace_events == [("socket-close", {"stage": "close", "target": "ftp://nas.example.local"})]
 
     with pytest.raises(ValueError, match="invalid FTP response"):
         _ftp_read_response(FakeSocket([b"oops\r\n"]))
@@ -2364,3 +2472,92 @@ def test_read_telnet_until_idle_reports_collect_visible_socket_errors(monkeypatc
 
     assert session["failure_detected"] is False
     assert session["close_reason"] == "refused"
+
+
+def test_read_telnet_until_idle_reports_stable_open_before_first_read(monkeypatch):
+    monkeypatch.setattr(runtime_checks, "_start_timer", lambda: (object(), False))
+    monkeypatch.setattr(runtime_checks, "_elapsed_ms", lambda started_at, uses_ticks_ms: runtime_checks.TELNET_STABLE_OPEN_THRESHOLD_MS)
+
+    session = runtime_checks._read_telnet_until_idle(object())
+
+    assert session == {
+        "visible_bytes": 0,
+        "has_visible_text": False,
+        "handshake_detected": False,
+        "failure_detected": False,
+        "close_reason": "stable-open",
+        "session_duration_ms": runtime_checks.TELNET_STABLE_OPEN_THRESHOLD_MS,
+    }
+
+
+def test_read_telnet_until_idle_retries_timeout_after_meaningful_interaction(monkeypatch):
+    class VisibleThenTimeoutSocket:
+        def __init__(self):
+            self.timeout_values = []
+            self.recv_calls = 0
+
+        def settimeout(self, value):
+            self.timeout_values.append(value)
+
+        def recv(self, _size):
+            self.recv_calls += 1
+            if self.recv_calls == 1:
+                return b"Welcome\r\n"
+            raise TimeoutError("timed out")
+
+    elapsed_values = iter((0.0, 0.0, 90.0, 150.0, 150.0))
+    monkeypatch.setattr(runtime_checks, "_start_timer", lambda: (object(), False))
+    monkeypatch.setattr(runtime_checks, "_elapsed_ms", lambda started_at, uses_ticks_ms: next(elapsed_values))
+
+    handle = VisibleThenTimeoutSocket()
+    session = runtime_checks._read_telnet_until_idle(handle, quiet_timeout_s=0.01)
+
+    assert session["close_reason"] == "idle-timeout"
+    assert session["has_visible_text"] is True
+    assert handle.recv_calls == 3
+
+
+def test_read_telnet_until_idle_retries_oserror_timeout_after_meaningful_interaction(monkeypatch):
+    class VisibleThenOSErrorTimeoutSocket:
+        def __init__(self):
+            self.timeout_values = []
+            self.recv_calls = 0
+
+        def settimeout(self, value):
+            self.timeout_values.append(value)
+
+        def recv(self, _size):
+            self.recv_calls += 1
+            if self.recv_calls == 1:
+                return b"READY>"
+            raise OSError("timed out")
+
+    elapsed_values = iter((0.0, 0.0, 90.0, 150.0, 150.0))
+    monkeypatch.setattr(runtime_checks, "_start_timer", lambda: (object(), False))
+    monkeypatch.setattr(runtime_checks, "_elapsed_ms", lambda started_at, uses_ticks_ms: next(elapsed_values))
+
+    handle = VisibleThenOSErrorTimeoutSocket()
+    session = runtime_checks._read_telnet_until_idle(handle, quiet_timeout_s=0.01)
+
+    assert session["close_reason"] == "idle-timeout"
+    assert session["has_visible_text"] is True
+    assert handle.recv_calls == 3
+
+
+def test_read_telnet_until_idle_continues_after_handshake_only_chunks(monkeypatch):
+    class HandshakeOnlySocket(FakeSocket):
+        def __init__(self):
+            super().__init__([bytes((255, 251, 1)), b""])
+            self.timeout_values = []
+
+        def settimeout(self, value):
+            self.timeout_values.append(value)
+
+    monkeypatch.setattr(runtime_checks, "_telnet_send_best_effort", lambda handle, payload, trace=None: True)
+
+    handle = HandshakeOnlySocket()
+    session = runtime_checks._read_telnet_until_idle(handle)
+
+    assert session["close_reason"] == "remote-close"
+    assert session["handshake_detected"] is True
+    assert session["has_visible_text"] is False
