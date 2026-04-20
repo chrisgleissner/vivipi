@@ -1174,6 +1174,24 @@ def test_recv_telnet_chunk_into_traces_recv_into_and_recv_fallback_paths():
     assert trace_events == [("socket-recv", {"stage": "telnet-recv", "operation": "read-visible", "bytes_received": 2})]
 
 
+def test_recv_telnet_chunk_retries_without_target_when_socket_recv_has_legacy_signature(monkeypatch):
+    calls = []
+
+    def fake_socket_recv(handle, size, deadline, trace=None, stage="telnet-recv", operation=None, target=None, budget=None):
+        calls.append((operation, target, budget))
+        if operation is not None or target is not None:
+            raise TypeError("target unsupported")
+        return b"READY"
+
+    monkeypatch.setattr(runtime_checks, "_socket_recv", fake_socket_recv)
+
+    assert runtime_checks._recv_telnet_chunk(object(), deadline=("perf", 1.0), target="switch:23", budget="budget-token") == b"READY"
+    assert calls == [
+        (None, "switch:23", "budget-token"),
+        (None, None, "budget-token"),
+    ]
+
+
 def test_portable_telnet_runner_treats_micropython_etimedout_after_connect_as_degraded(monkeypatch):
     class TimeoutSocket:
         def __init__(self):
@@ -1579,6 +1597,32 @@ def test_manual_http_socket_and_executor_defaults_cover_remaining_paths(monkeypa
         ("ping", "probe-start", {"timeout_s": 10, "target": "device.local"}),
         ("ping", "probe-error", {"detail": "boom", "probe_type": "PING", "issued": 1, "succeeded": 0, "failed": 1, "target": "device.local"}),
     ]
+
+
+def test_build_executor_preserves_explicit_trace_target(monkeypatch):
+    definition = build_runtime_definitions(
+        {
+            "checks": [
+                {
+                    "id": "ping",
+                    "name": "Ping",
+                    "type": "PING",
+                    "target": "device.local",
+                    "timeout_s": 10,
+                }
+            ]
+        }
+    )[0]
+    captured = []
+
+    def ping_runner(target, timeout_s, trace=None):
+        trace("socket-open", target="override.local")
+        return PingProbeResult(ok=True, latency_ms=1.0, details="reachable")
+
+    executor = build_executor(ping_runner=ping_runner, trace_sink=lambda definition, event, fields: captured.append((event, dict(fields))))
+    executor(definition, 10.0)
+
+    assert captured[1] == ("socket-open", {"target": "override.local"})
 
     no_trace_executor = build_executor()
     with pytest.raises(RuntimeError, match="boom"):
@@ -2472,6 +2516,21 @@ def test_probe_budget_exhaustion_raises_timeout():
         budget.charge()
 
 
+def test_probe_budget_zero_count_and_probe_activity_callback_are_noops():
+    activity = []
+
+    runtime_checks.set_probe_activity_callback(lambda: activity.append("tick"))
+    runtime_checks._emit_probe_activity()
+    runtime_checks.set_probe_activity_callback(None)
+    runtime_checks._emit_probe_activity()
+
+    budget = runtime_checks._ProbeBudget(max_ops=2, pacing_ms=0)
+    budget.charge(0)
+
+    assert activity == ["tick"]
+    assert budget.remaining == 2
+
+
 def test_bounded_operation_returns_none_for_empty_or_whitespace():
     assert runtime_checks._bounded_operation(None) is None
     assert runtime_checks._bounded_operation("") is None
@@ -2486,6 +2545,12 @@ def test_bounded_operation_truncates_to_limit():
     assert truncated.endswith("…")
 
 
+def test_bounded_operation_honors_single_character_limit(monkeypatch):
+    monkeypatch.setattr(runtime_checks, "PROBE_OPERATION_LIMIT", 1)
+
+    assert runtime_checks._bounded_operation("HELLO") == "H"
+
+
 def test_bounded_operation_collapses_internal_whitespace():
     assert runtime_checks._bounded_operation("GET\r\n  /v1/checks\t now") == "GET /v1/checks now"
 
@@ -2495,6 +2560,7 @@ def test_ftp_operation_descriptor_redacts_password():
     assert runtime_checks._ftp_operation_descriptor("pass anything") == "PASS ***"
     assert runtime_checks._ftp_operation_descriptor("USER anonymous") == "USER anonymous"
     assert runtime_checks._ftp_operation_descriptor("PWD") == "PWD"
+    assert runtime_checks._ftp_operation_descriptor("") == "FTP"
 
 
 def test_socket_sendall_includes_operation_when_provided(monkeypatch):
@@ -2644,6 +2710,27 @@ def test_recv_until_closed_exhausts_budget_on_slow_drip_peer(monkeypatch):
     with pytest.raises(TimeoutError, match="probe io budget exhausted"):
         runtime_checks._recv_until_closed(handle, ("perf", 1.0), stage="http-recv", budget=budget)
     assert handle.calls == 3
+
+
+def test_socket_wait_falls_back_to_local_wait_accounting_when_deadline_stalls(monkeypatch):
+    poll_calls = []
+
+    class FakePoller:
+        def register(self, handle, flags):
+            return None
+
+        def poll(self, wait_ms):
+            poll_calls.append(wait_ms)
+            return []
+
+    monkeypatch.setattr(runtime_checks.select, "poll", lambda: FakePoller())
+    remaining_values = iter((1500, 1500, 0))
+    monkeypatch.setattr(runtime_checks, "_deadline_remaining_ms", lambda deadline: next(remaining_values))
+
+    with pytest.raises(TimeoutError, match="timed out"):
+        runtime_checks._socket_wait(object(), ("perf", 1.0), writable=False, stage="recv")
+
+    assert poll_calls == [1000, 500]
 
 
 def test_read_telnet_until_idle_terminates_at_max_recv_chunks(monkeypatch):
@@ -2946,6 +3033,24 @@ def test_read_telnet_until_idle_reports_collect_visible_socket_errors(monkeypatc
 
     assert session["failure_detected"] is False
     assert session["close_reason"] == "refused"
+
+
+def test_read_telnet_until_idle_reports_non_budget_timeout_from_collect_visible(monkeypatch):
+    class ChunkSocket(FakeSocket):
+        def __init__(self):
+            super().__init__([b"Welcome\r\n"])
+            self.timeout_values = []
+
+        def settimeout(self, value):
+            self.timeout_values.append(value)
+
+    handle = ChunkSocket()
+    monkeypatch.setattr(runtime_checks, "_telnet_collect_visible", lambda *args, **kwargs: (_ for _ in ()).throw(TimeoutError("timed out")))
+
+    session = runtime_checks._read_telnet_until_idle(handle)
+
+    assert session["failure_detected"] is False
+    assert session["close_reason"] == "timeout"
 
 
 def test_read_telnet_until_idle_reports_stable_open_before_first_read(monkeypatch):
