@@ -58,6 +58,19 @@ def test_route_request_handles_probe_routes(monkeypatch):
     assert namespaced_telnet_body["status"] == "FAIL"
 
 
+def test_route_request_returns_http_200_for_degraded_telnet_probe(monkeypatch):
+    monkeypatch.setattr(
+        adb_service,
+        "portable_telnet_runner",
+        lambda target, timeout_s: type("Result", (), {"ok": False, "status": "DEG", "details": "connected-no-telnet-data", "latency_ms": 15.0})(),
+    )
+
+    telnet_status, telnet_body = adb_service.route_request("/probe/telnet?target=192.168.1.13:23")
+
+    assert telnet_status == 200
+    assert telnet_body == {"status": "DEG", "details": "connected-no-telnet-data", "latency_ms": 15.0}
+
+
 def test_route_request_handles_namespaced_adb_route(monkeypatch):
     monkeypatch.setattr(
         adb_service,

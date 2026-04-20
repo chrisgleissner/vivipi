@@ -1,3 +1,6 @@
+from types import SimpleNamespace
+
+import vivipi.core.execution as execution_module
 from vivipi.core.execution import HttpResponseResult, PingProbeResult, execute_check
 from vivipi.core.models import CheckDefinition, CheckType, Status
 
@@ -56,6 +59,14 @@ def test_execute_check_maps_http_status_codes_to_observations():
     assert result.observations[0].status == Status.FAIL
     assert result.observations[0].latency_ms == 45.0
     assert result.probe_latency_ms == 45.0
+
+
+def test_probe_helpers_normalize_enum_like_status_and_ignore_non_mapping_metadata():
+    enum_like_status = SimpleNamespace(value="DEG")
+    result = SimpleNamespace(ok=False, status=enum_like_status, metadata="not-a-dict")
+
+    assert execution_module._status_for_probe_result(result) == Status.DEG
+    assert execution_module._probe_metadata(result) == {}
 
 
 def test_execute_check_replaces_service_children_on_success():
@@ -186,6 +197,47 @@ def test_execute_check_maps_ftp_and_telnet_probe_results():
     assert telnet_result.observations[0].status == Status.FAIL
     assert telnet_result.observations[0].details == "login failed"
     assert telnet_result.probe_latency_ms == 8.0
+
+
+def test_execute_check_preserves_explicit_telnet_degraded_status():
+    telnet_definition = CheckDefinition(
+        identifier="switch-console",
+        name="Switch Console",
+        check_type=CheckType.TELNET,
+        target="telnet://switch.example.local",
+        interval_s=15,
+        timeout_s=10,
+    )
+
+    result = execute_check(
+        telnet_definition,
+        observed_at_s=11.0,
+        ping_runner=None,
+        http_runner=None,
+        ftp_runner=None,
+        telnet_runner=lambda target, timeout_s, username, password: PingProbeResult(
+            ok=False,
+            status=Status.DEG,
+            latency_ms=8.0,
+            details="connected-no-telnet-data",
+            metadata={
+                7: "normalized-key",
+                "close_reason": "idle-timeout",
+                "session_duration_ms": 600.0,
+                "handshake_detected": False,
+                "ignored": None,
+            },
+        ),
+    )
+
+    assert result.observations[0].status == Status.DEG
+    assert result.observations[0].details == "connected-no-telnet-data"
+    assert result.probe_metadata == {
+        "7": "normalized-key",
+        "close_reason": "idle-timeout",
+        "session_duration_ms": 600.0,
+        "handshake_detected": False,
+    }
 
 
 def test_execute_check_passes_http_password_to_runner():

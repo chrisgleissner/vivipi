@@ -77,7 +77,7 @@ The bottom scanline shows a 3-pixel health indicator that moves from left to rig
 | `PING` | ICMP ping | Response received; latency measured locally | No response or timeout |
 | `HTTP` | HTTP request | Response status is `2xx` or `3xx`; latency measured locally | Non-`2xx`/`3xx` response or timeout |
 | `FTP` | FTP control session with optional credentials | A valid FTP greeting is received and the control socket stays usable long enough to quit cleanly | Missing or invalid greeting, connection failure, or timeout |
-| `TELNET` | Telnet session with optional credentials | TCP session accepts; optional banner/session output is readable when present; post-connect idle timeout or reset still counts as reachable unless login failure text is seen | Connection failure, explicit login failure text, or timeout before the session is established |
+| `TELNET` | Telnet session with optional credentials | `OK` only after meaningful TELNET interaction such as IAC negotiation or visible session output; a TCP session that stays open for at least `500 ms` without meaningful interaction is reported as `DEG` | Connection failure, explicit login failure text, timeout before establishment, or immediate close/reset before meaningful interaction |
 | `SERVICE` | HTTP request to a `/checks` endpoint | Response returns a valid checks payload; each returned check becomes an independent ViviPi check | Default backend uses `adb` to report Android availability, but any backend can return checks through the same schema |
 
 ## Default Hardware Target
@@ -113,8 +113,6 @@ Requirements:
 - `mpremote` only if you want `./build deploy` to copy files onto a Pico 2W
 
 For day-to-day editor workflows, copy `config/build-deploy.local.example.yaml` to `config/build-deploy.local.yaml` and put your Wi-Fi credentials there. `./build render-config`, `./build build-firmware`, and `./build deploy` automatically prefer that local file when it exists. Pass `--config config/build-deploy.yaml` when you need to bypass a sibling local override.
-
-The checked-in defaults now use a `7s` probe interval with a `5s` timeout. Internal check hysteresis remains `OK -> DEG -> FAIL`, while `check_state.visible_degraded: false` lets the display jump directly between visible `OK` and `FAIL` without losing the internal degraded state. The default button pins remain `GP15` and `GP17`, and button presses render a short on-screen acknowledgement so hardware input is observable during normal use.
 
 1. Set Wi-Fi credentials. Add `VIVIPI_SERVICE_BASE_URL` only if you want `SERVICE` checks.
 
