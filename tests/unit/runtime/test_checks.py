@@ -933,15 +933,15 @@ def test_recv_and_send_socket_helpers_cover_remaining_branches(monkeypatch):
 def test_telnet_chunk_compat_and_output_helpers_cover_remaining_branches(monkeypatch):
     original_recv_telnet_chunk = runtime_checks._recv_telnet_chunk
 
-    monkeypatch.setattr(runtime_checks, "_recv_telnet_chunk", lambda handle, size, deadline=None, trace=None: (_ for _ in ()).throw(TypeError("other")))
+    monkeypatch.setattr(runtime_checks, "_recv_telnet_chunk", lambda handle, size, deadline=None, trace=None, budget=None: (_ for _ in ()).throw(TypeError("other")))
     with pytest.raises(TypeError, match="other"):
         runtime_checks._recv_telnet_chunk_compat(object(), 4096, deadline=("perf", 1.0), trace=object())
 
     calls = []
 
-    def timeout_compat(handle, size, deadline=None, trace=None):
+    def timeout_compat(handle, size, deadline=None, trace=None, budget=None):
         calls.append((deadline, trace))
-        if deadline is not None or trace is not None:
+        if deadline is not None or trace is not None or budget is not None:
             raise TypeError("deadline unsupported")
         raise OSError("timed out")
 
@@ -949,8 +949,8 @@ def test_telnet_chunk_compat_and_output_helpers_cover_remaining_branches(monkeyp
     assert runtime_checks._recv_telnet_chunk_compat(object(), 4096, deadline=("perf", 1.0), trace=object()) == b""
     assert len(calls) == 2
 
-    def broken_compat(handle, size, deadline=None, trace=None):
-        if deadline is not None or trace is not None:
+    def broken_compat(handle, size, deadline=None, trace=None, budget=None):
+        if deadline is not None or trace is not None or budget is not None:
             raise TypeError("trace unsupported")
         raise OSError("broken pipe")
 
@@ -962,10 +962,10 @@ def test_telnet_chunk_compat_and_output_helpers_cover_remaining_branches(monkeyp
         pass
 
     monkeypatch.setattr(runtime_checks, "_recv_telnet_chunk", original_recv_telnet_chunk)
-    monkeypatch.setattr(runtime_checks, "_socket_recv", lambda handle, size, deadline, trace=None, stage="telnet-recv": b"READY")
+    monkeypatch.setattr(runtime_checks, "_socket_recv", lambda handle, size, deadline, trace=None, stage="telnet-recv", budget=None: b"READY")
     assert runtime_checks._recv_telnet_chunk(DeadlineRecvSocket(), deadline=("perf", 1.0)) == b"READY"
 
-    monkeypatch.setattr(runtime_checks, "_socket_recv", lambda handle, size, deadline, trace=None, stage="telnet-recv": (_ for _ in ()).throw(TimeoutError("timed out")))
+    monkeypatch.setattr(runtime_checks, "_socket_recv", lambda handle, size, deadline, trace=None, stage="telnet-recv", budget=None: (_ for _ in ()).throw(TimeoutError("timed out")))
     assert runtime_checks._recv_telnet_chunk(DeadlineRecvSocket(), deadline=("perf", 1.0)) == b""
 
     assert runtime_checks._looks_like_telnet_output("   ") is False
@@ -2064,3 +2064,404 @@ def test_read_telnet_until_idle_detects_failure_markers_across_chunk_boundaries(
 
     with pytest.raises(RuntimeError, match="telnet failure marker present"):
         runtime_checks._read_telnet_until_idle(handle)
+
+
+def test_probe_budget_exhaustion_raises_timeout():
+    budget = runtime_checks._ProbeBudget(max_ops=2, pacing_ms=0)
+    budget.charge()
+    budget.charge()
+    with pytest.raises(TimeoutError, match="probe io budget exhausted"):
+        budget.charge()
+
+
+def test_bounded_operation_returns_none_for_empty_or_whitespace():
+    assert runtime_checks._bounded_operation(None) is None
+    assert runtime_checks._bounded_operation("") is None
+    assert runtime_checks._bounded_operation("   ") is None
+
+
+def test_bounded_operation_truncates_to_limit():
+    long = "X" * (runtime_checks.PROBE_OPERATION_LIMIT + 20)
+    truncated = runtime_checks._bounded_operation(long)
+    assert truncated is not None
+    assert len(truncated) == runtime_checks.PROBE_OPERATION_LIMIT
+    assert truncated.endswith("…")
+
+
+def test_bounded_operation_collapses_internal_whitespace():
+    assert runtime_checks._bounded_operation("GET\r\n  /v1/checks\t now") == "GET /v1/checks now"
+
+
+def test_ftp_operation_descriptor_redacts_password():
+    assert runtime_checks._ftp_operation_descriptor("PASS hunter2") == "PASS ***"
+    assert runtime_checks._ftp_operation_descriptor("pass anything") == "PASS ***"
+    assert runtime_checks._ftp_operation_descriptor("USER anonymous") == "USER anonymous"
+    assert runtime_checks._ftp_operation_descriptor("PWD") == "PWD"
+
+
+def test_socket_sendall_includes_operation_when_provided(monkeypatch):
+    monkeypatch.setattr(runtime_checks, "_socket_wait", lambda handle, deadline, writable, trace=None, stage="send": None)
+
+    class SendallSocket:
+        def sendall(self, payload):
+            return None
+
+    events = []
+    runtime_checks._socket_sendall(
+        SendallSocket(),
+        b"GET /v1/checks HTTP/1.1\r\n",
+        ("perf", 1.0),
+        trace=lambda event, **fields: events.append((event, fields)),
+        stage="http-send",
+        operation="GET /v1/checks",
+    )
+    assert events == [
+        (
+            "socket-send",
+            {"stage": "http-send", "operation": "GET /v1/checks", "bytes_sent": 25},
+        ),
+    ]
+
+
+def test_socket_sendall_omits_operation_when_absent(monkeypatch):
+    monkeypatch.setattr(runtime_checks, "_socket_wait", lambda handle, deadline, writable, trace=None, stage="send": None)
+
+    class SendallSocket:
+        def sendall(self, payload):
+            return None
+
+    events = []
+    runtime_checks._socket_sendall(
+        SendallSocket(),
+        b"hello",
+        ("perf", 1.0),
+        trace=lambda event, **fields: events.append((event, fields)),
+        stage="send",
+    )
+    assert events == [("socket-send", {"stage": "send", "bytes_sent": 5})]
+
+
+def test_socket_sendall_charges_budget_on_successful_send(monkeypatch):
+    monkeypatch.setattr(runtime_checks, "_socket_wait", lambda handle, deadline, writable, trace=None, stage="send": None)
+    monkeypatch.setattr(runtime_checks, "_sleep_ms", lambda value_ms: None)
+
+    class SendallSocket:
+        def sendall(self, payload):
+            return None
+
+    budget = runtime_checks._ProbeBudget(max_ops=1, pacing_ms=0)
+    runtime_checks._socket_sendall(SendallSocket(), b"x", ("perf", 1.0), stage="send", budget=budget)
+    assert budget.remaining == 0
+    with pytest.raises(TimeoutError, match="probe io budget exhausted"):
+        runtime_checks._socket_sendall(SendallSocket(), b"x", ("perf", 1.0), stage="send", budget=budget)
+
+
+def test_socket_sendall_exhausts_budget_mid_loop_on_partial_sends(monkeypatch):
+    monkeypatch.setattr(runtime_checks, "_socket_wait", lambda handle, deadline, writable, trace=None, stage="send": None)
+    monkeypatch.setattr(runtime_checks, "_sleep_ms", lambda value_ms: None)
+
+    class PartialSender:
+        def __init__(self):
+            self.calls = 0
+
+        def send(self, payload):
+            self.calls += 1
+            return 1
+
+    handle = PartialSender()
+    budget = runtime_checks._ProbeBudget(max_ops=2, pacing_ms=0)
+    with pytest.raises(TimeoutError, match="probe io budget exhausted"):
+        runtime_checks._socket_sendall(handle, b"abc", ("perf", 1.0), stage="send", budget=budget)
+    assert handle.calls == 2
+
+
+def test_socket_sendall_exhausts_budget_on_would_block_storm(monkeypatch):
+    monkeypatch.setattr(runtime_checks, "_socket_wait", lambda handle, deadline, writable, trace=None, stage="send": None)
+    monkeypatch.setattr(runtime_checks, "_sleep_ms", lambda value_ms: None)
+
+    class WouldBlockSender:
+        def __init__(self):
+            self.calls = 0
+
+        def send(self, payload):
+            self.calls += 1
+            raise OSError("would block")
+
+    handle = WouldBlockSender()
+    budget = runtime_checks._ProbeBudget(max_ops=2, pacing_ms=0)
+    with pytest.raises(TimeoutError, match="probe io budget exhausted"):
+        runtime_checks._socket_sendall(handle, b"abc", ("perf", 1.0), stage="send", budget=budget)
+    assert handle.calls == 2
+
+
+def test_socket_recv_charges_budget(monkeypatch):
+    monkeypatch.setattr(runtime_checks, "_socket_wait", lambda handle, deadline, writable, trace=None, stage="recv": None)
+    monkeypatch.setattr(runtime_checks, "_sleep_ms", lambda value_ms: None)
+
+    class RecvSocket:
+        def recv(self, size):
+            return b"ok"
+
+    budget = runtime_checks._ProbeBudget(max_ops=1, pacing_ms=0)
+    runtime_checks._socket_recv(RecvSocket(), 4096, ("perf", 1.0), stage="recv", budget=budget)
+    assert budget.remaining == 0
+    with pytest.raises(TimeoutError, match="probe io budget exhausted"):
+        runtime_checks._socket_recv(RecvSocket(), 4096, ("perf", 1.0), stage="recv", budget=budget)
+
+
+def test_socket_recv_exhausts_budget_on_would_block_storm(monkeypatch):
+    monkeypatch.setattr(runtime_checks, "_socket_wait", lambda handle, deadline, writable, trace=None, stage="recv": None)
+    monkeypatch.setattr(runtime_checks, "_sleep_ms", lambda value_ms: None)
+
+    class WouldBlockRecvSocket:
+        def __init__(self):
+            self.calls = 0
+
+        def recv(self, size):
+            self.calls += 1
+            raise OSError("would block")
+
+    handle = WouldBlockRecvSocket()
+    budget = runtime_checks._ProbeBudget(max_ops=2, pacing_ms=0)
+    with pytest.raises(TimeoutError, match="probe io budget exhausted"):
+        runtime_checks._socket_recv(handle, 4096, ("perf", 1.0), stage="recv", budget=budget)
+    assert handle.calls == 2
+
+
+def test_recv_until_closed_exhausts_budget_on_slow_drip_peer(monkeypatch):
+    monkeypatch.setattr(runtime_checks, "_socket_wait", lambda handle, deadline, writable, trace=None, stage="recv": None)
+    monkeypatch.setattr(runtime_checks, "_sleep_ms", lambda value_ms: None)
+
+    class SlowDripSocket:
+        def __init__(self):
+            self.calls = 0
+
+        def recv(self, size):
+            self.calls += 1
+            return b"x"
+
+    handle = SlowDripSocket()
+    budget = runtime_checks._ProbeBudget(max_ops=3, pacing_ms=0)
+    with pytest.raises(TimeoutError, match="probe io budget exhausted"):
+        runtime_checks._recv_until_closed(handle, ("perf", 1.0), stage="http-recv", budget=budget)
+    assert handle.calls == 3
+
+
+def test_read_telnet_until_idle_terminates_at_max_recv_chunks(monkeypatch):
+    class ChattyPeer:
+        def __init__(self):
+            self.calls = 0
+
+        def settimeout(self, value):
+            return None
+
+        def recv(self, _size):
+            self.calls += 1
+            return b"." * 64
+
+        def sendall(self, payload):
+            return None
+
+    handle = ChattyPeer()
+    visible_bytes, has_visible_text = runtime_checks._read_telnet_until_idle(handle, max_chunks=4)
+    assert handle.calls == 4
+    assert visible_bytes <= 4 * 64
+    assert has_visible_text is True
+
+
+def test_read_telnet_until_idle_respects_deadline(monkeypatch):
+    class ChattyPeer:
+        def settimeout(self, value):
+            return None
+
+        def recv(self, _size):
+            return b"banner"
+
+        def sendall(self, payload):
+            return None
+
+    handle = ChattyPeer()
+    visible_bytes, has_visible_text = runtime_checks._read_telnet_until_idle(
+        handle,
+        deadline=("perf", -1.0),
+    )
+    assert visible_bytes == 0
+    assert has_visible_text is False
+
+
+def test_read_telnet_until_idle_stops_when_deadline_expires_mid_loop(monkeypatch):
+    remaining_ms = iter((5, 0))
+    monkeypatch.setattr(runtime_checks, "_deadline_remaining_ms", lambda deadline: next(remaining_ms, 0))
+
+    class ChattyPeer:
+        def __init__(self):
+            self.calls = 0
+
+        def settimeout(self, value):
+            return None
+
+        def recv(self, _size):
+            self.calls += 1
+            return b"banner"
+
+        def sendall(self, payload):
+            return None
+
+    handle = ChattyPeer()
+    visible_bytes, has_visible_text = runtime_checks._read_telnet_until_idle(handle, deadline=("perf", 1.0), max_chunks=16)
+    assert handle.calls == 1
+    assert visible_bytes == 6
+    assert has_visible_text is True
+
+
+def test_read_telnet_until_idle_charges_budget_per_chunk(monkeypatch):
+    monkeypatch.setattr(runtime_checks, "_sleep_ms", lambda value_ms: None)
+
+    class ChattyPeer:
+        def __init__(self):
+            self.calls = 0
+
+        def settimeout(self, value):
+            return None
+
+        def recv(self, _size):
+            self.calls += 1
+            return b"banner"
+
+        def sendall(self, payload):
+            return None
+
+    handle = ChattyPeer()
+    budget = runtime_checks._ProbeBudget(max_ops=2, pacing_ms=0)
+    with pytest.raises(TimeoutError, match="probe io budget exhausted"):
+        runtime_checks._read_telnet_until_idle(handle, budget=budget, max_chunks=16)
+
+
+def test_read_telnet_until_idle_exhausts_budget_during_iac_storm(monkeypatch):
+    monkeypatch.setattr(runtime_checks, "_sleep_ms", lambda value_ms: None)
+
+    class IacStormPeer:
+        def __init__(self):
+            self.recv_calls = 0
+            self.send_calls = 0
+
+        def settimeout(self, value):
+            return None
+
+        def recv(self, _size):
+            self.recv_calls += 1
+            return bytes((255, 253, 1, 255, 253, 3, 255, 253, 5))
+
+        def sendall(self, payload):
+            self.send_calls += 1
+            raise OSError(110, "ETIMEDOUT")
+
+    handle = IacStormPeer()
+    budget = runtime_checks._ProbeBudget(max_ops=2, pacing_ms=0)
+    with pytest.raises(TimeoutError, match="probe io budget exhausted"):
+        runtime_checks._read_telnet_until_idle(handle, budget=budget, max_chunks=16)
+    assert handle.recv_calls == 1
+    assert handle.send_calls == 1
+
+
+def test_telnet_strip_negotiation_uses_budgeted_telnet_send_path(monkeypatch):
+    monkeypatch.setattr(runtime_checks, "_sleep_ms", lambda value_ms: None)
+
+    class Sink:
+        def __init__(self):
+            self.sent = []
+
+        def sendall(self, data):
+            self.sent.append(bytes(data))
+
+    handle = Sink()
+    events = []
+    budget = runtime_checks._ProbeBudget(max_ops=1, pacing_ms=0)
+    cleaned = runtime_checks._telnet_strip_negotiation(
+        handle,
+        bytes((255, 253, 1)) + b"login: ",
+        trace=lambda event, **fields: events.append((event, fields)),
+        budget=budget,
+    )
+    assert cleaned == b"login: "
+    assert handle.sent == [bytes((255, 252, 1))]
+    assert budget.remaining == 0
+    assert events == [("socket-send", {"stage": "telnet-send", "operation": "telnet-iac", "bytes_sent": 3})]
+
+
+def test_portable_http_runner_emits_method_and_path_operation(monkeypatch):
+    handle = FakeSocket([b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\nOK", b""])
+
+    monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s, **kwargs: handle)
+
+    send_events: list[dict[str, object]] = []
+
+    def trace(event, **fields):
+        if event == "socket-send":
+            send_events.append(fields)
+
+    result = runtime_checks._portable_http_runner_socket(
+        "GET",
+        "http://service.example.local/v1/checks",
+        5,
+        trace=trace,
+    )
+    assert result.status_code == 200
+    assert send_events, "expected a socket-send event"
+    assert send_events[0].get("operation") == "GET /v1/checks"
+    assert send_events[0].get("stage") == "http-send"
+
+
+def test_portable_ftp_runner_emits_redacted_pass_operation(monkeypatch):
+    def scripted(responses):
+        return FakeSocket(responses)
+
+    responses = [
+        b"220 welcome\r\n",
+        b"331 need password\r\n",
+        b"230 ok\r\n",
+        b"257 \"/home/user\"\r\n",
+        b"221 bye\r\n",
+    ]
+    handle = scripted(responses)
+    monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s, **kwargs: handle)
+    monkeypatch.setattr(runtime_checks, "_is_micropython_runtime", lambda: True)
+
+    send_events: list[dict[str, object]] = []
+
+    def trace(event, **fields):
+        if event == "socket-send":
+            send_events.append(fields)
+
+    result = portable_ftp_runner("ftp://service.example.local", 5, username="alice", password="hunter2", trace=trace)
+    assert result.ok is True
+    operations = [fields.get("operation") for fields in send_events]
+    assert "USER alice" in operations
+    assert "PASS ***" in operations
+    assert "PWD" in operations
+    assert "QUIT" in operations
+    for fields in send_events:
+        assert fields.get("stage") == "ftp-send"
+        assert "hunter2" not in str(fields.get("operation", ""))
+
+
+def test_telnet_send_best_effort_emits_telnet_iac_operation():
+    class Sink:
+        def __init__(self):
+            self.sent = []
+
+        def sendall(self, data):
+            self.sent.append(bytes(data))
+
+    handle = Sink()
+    events: list[tuple[str, dict[str, object]]] = []
+    sent_ok = runtime_checks._telnet_send_best_effort(
+        handle,
+        bytes((255, 252, 1)),
+        trace=lambda event, **fields: events.append((event, fields)),
+        operation="telnet-iac",
+    )
+    assert sent_ok is True
+    assert events == [
+        ("socket-send", {"stage": "telnet-send", "operation": "telnet-iac", "bytes_sent": 3}),
+    ]

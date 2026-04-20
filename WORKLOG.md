@@ -1,5 +1,38 @@
 # ViviPi Work Log
 
+## 2026-04-20T00:00:00Z
+
+- Started the probe I/O safety and observability hardening task (see `PLANS.md` -> "Probe I/O Safety and Observability Plan").
+- Discovery:
+  - Inspected `src/vivipi/runtime/checks.py`, `src/vivipi/core/execution.py`, and `src/vivipi/core/probe_trace.py`.
+  - Confirmed `socket-send` is emitted in exactly two code paths: `_socket_sendall(...)` (used by HTTP and FTP) and `_telnet_send_best_effort(...)` (used only for IAC negotiation replies).
+  - Confirmed `socket-recv` is emitted from `_socket_recv(...)` and from `_read_telnet_until_idle(...)`.
+  - Confirmed `_read_telnet_until_idle(...)` sets per-iteration socket timeouts (`TELNET_IDLE_TIMEOUT_S` = 120 ms, `TELNET_POST_DATA_IDLE_TIMEOUT_S` = 20 ms) and does *not* check any probe-wide deadline, so a chatty peer can prolong the loop beyond `timeout_s`.
+  - Confirmed there are no retry loops in the probe-level attempt model; existing `while` loops inside `_socket_sendall` and `_socket_recv` are progress loops keyed off `_socket_wait` readiness and the passed-in deadline.
+- Decision:
+  - Add a `_ProbeBudget` helper threaded through the existing `trace`/`deadline` kwargs chain as an optional parameter. Charge every successful send/recv, enforce a hard per-probe ops cap, and apply 2 ms of pacing between ops.
+  - Add an optional `operation` field to the `socket-send` event payload. Emit conditionally so existing tests that assert the current payload shape remain untouched.
+  - For Telnet: cap `_read_telnet_until_idle` at `TELNET_MAX_RECV_CHUNKS` and check the probe-wide deadline at the top of every iteration. Do not change OK/FAIL semantics.
+  - Redact FTP `PASS` so the operation descriptor cannot leak credentials.
+- Implementation:
+  - Added `PROBE_MAX_SOCKET_OPS`, `PROBE_IO_PACING_MS`, `PROBE_OPERATION_LIMIT`, and `TELNET_MAX_RECV_CHUNKS` constants and a `_ProbeBudget` class to `src/vivipi/runtime/checks.py`.
+  - Added `_bounded_operation`, `_emit_socket_send`, `_ftp_operation_descriptor`, and `_charge_budget` helpers. Operation field is emitted only when provided, preserving existing `socket-send` payload shape for callers that do not opt in.
+  - Threaded `budget` through `_socket_sendall`, `_socket_recv`, `_ftp_read_response`, `_ftp_command_with_deadline`, `_recv_until_closed`, `_recv_telnet_chunk`, `_recv_telnet_chunk_compat`, `_telnet_send_best_effort`, `_telnet_collect_visible`, and `_read_telnet_until_idle`.
+  - `_read_telnet_until_idle` now also accepts `deadline` and `max_chunks` kwargs and checks both at the top of every iteration.
+  - Reordered `_charge_budget` calls to run *outside* the low-level try/except in `_socket_sendall` / `_socket_recv`, so `TimeoutError("probe io budget exhausted")` propagates cleanly instead of being re-wrapped as a generic timeout.
+  - Hardened `_sleep_ms` to no-op gracefully when `time.sleep` is unavailable (supports the MicroPython test harness where the time module is a narrow stub).
+  - Each probe runner now creates a fresh budget at entry: `_portable_http_runner_socket`, `portable_ftp_runner`, and both paths of `portable_telnet_runner` (stdlib socket path + portable/MicroPython path).
+- Tests:
+  - Updated two compat-layer test stubs in `tests/unit/runtime/test_checks.py` to accept `budget=None` alongside `deadline`/`trace`.
+  - Added 14 focused tests: budget exhaustion, operation bounding, FTP password redaction, per-command descriptor set, HTTP method+path descriptor, Telnet IAC descriptor, Telnet chunk cap, Telnet deadline enforcement, Telnet budget enforcement, and send/recv budget accounting.
+- Validation:
+  - `.venv/bin/python -m pytest -o addopts='' tests/unit/runtime/test_checks.py` -> `84 passed`
+  - `.venv/bin/python -m pytest -o addopts='' tests/unit/runtime/ tests/unit/core/ tests/unit/services/` -> `362 passed`
+  - `.venv/bin/python -m pytest -o addopts='' tests/unit/` -> `660 passed` (previous baseline `646`, delta +14 for the new coverage; no regressions)
+- Documentation:
+  - Wrote `doc/research/probes/io-safety-and-observability.md` with root-cause analysis, applied constraints, Telnet minimal-interaction justification, and a before/after comparison table.
+  - Updated `PLANS.md` section with per-phase COMPLETED status and the concrete acceptance-criteria checklist.
+
 ## 2026-04-18T21:30:00Z
 
 - Completed the runtime syslog and observability expansion and fixed the stuck-looking bottom heartbeat behavior.

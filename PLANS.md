@@ -1,5 +1,90 @@
 # Plans
 
+## Probe I/O Safety and Observability Plan
+
+Authoritative execution plan for eliminating unbounded/rapid-fire I/O paths in the HTTP, FTP, and Telnet probes while extending the existing `socket-send` log events with operation-level visibility. No new log events, no new log volume, no retry loops.
+
+### Problem Statement
+
+- Existing `socket-send` trace events include only `stage` and `bytes_sent`, so remote syslog captures cannot identify which HTTP request, FTP command, or Telnet interaction was sent. Diagnosis of probe failures currently requires code archaeology rather than log reading.
+- The Telnet probe internally loops on `recv` in `_read_telnet_until_idle` with short socket-level timeouts. A chatty peer or a hot-loop network path can hold the probe in a recv/send cycle beyond the nominal `timeout_s`, because each iteration resets the socket timeout rather than checking a single probe-wide deadline.
+- `_socket_sendall` and `_socket_recv` are individually bounded by a deadline, but there is no per-probe-execution I/O budget. Under pathological peer behavior (fragmented sends, constant trickle, IAC storms) the probe can consume many socket operations per run and create burst-like scheduling pressure across repeated probe cadences.
+- No I/O pacing exists, so a transient hot path (e.g. repeated `EAGAIN` churn or constant partial sends) can busy-spin between `_socket_wait` readiness events.
+
+### Constraints
+
+- MicroPython-safe: no CPython-only imports outside existing `try/except ImportError` fallbacks; no new external dependencies.
+- MUST NOT introduce new log events or new log lines. Extend the existing `socket-send` event payload only.
+- MUST NOT introduce retry loops. Probes attempt once per scheduled run; the fix is bounded *progress*, not retries.
+- MUST preserve probe OK/FAIL semantics for the live U64, C64U, and Pixel 4 environment.
+- Minimally invasive: reuse existing helpers (`_socket_sendall`, `_socket_recv`, `_read_telnet_until_idle`) and existing trace routing (`_emit_probe_trace`).
+- Operation descriptors MUST be bounded in size, single-line safe, and free of sensitive data (passwords redacted).
+
+### Design Decisions
+
+- Introduce a module-private `_ProbeBudget` carrying a remaining-ops counter and a pacing delay. Threaded through the existing `deadline`/`trace` kwargs chain as an optional `budget=None` parameter so legacy callers (including existing tests) remain compatible.
+- Extend the `socket-send` payload with an optional `operation` field. Emit it only when the caller supplies one, so unit tests that assert the current payload shape stay green.
+- For the Telnet probe, keep the existing `_read_telnet_until_idle` idle-exit semantics but add a hard cap on recv iterations and check the probe-wide deadline at the top of every iteration. No recv/send session simulation.
+- Redact FTP credentials in the `operation` descriptor: `USER <name>` is fine; `PASS` is emitted as `PASS ***` regardless of the actual password value.
+- All descriptors go through `bound_text(..., PROBE_OPERATION_LIMIT)` to guarantee single-line, bounded output.
+
+### Phases
+
+Phase 1: Discovery  
+Status: COMPLETED
+
+- Located all probe implementations in `src/vivipi/runtime/checks.py` and confirmed `src/vivipi/core/probe_trace.py` is the authoritative trace record format with `raw_fields` already extensible.
+- Identified every `socket-send` call site (all within `_socket_sendall` and `_telnet_send_best_effort`).
+- Identified the three loops that can degrade into unbounded behavior under pathological peers: `_read_telnet_until_idle`, `_recv_until_closed`, and `_ftp_read_response`.
+
+Phase 2: Observability fix  
+Status: COMPLETED
+
+- Extended `_socket_sendall` and `_telnet_send_best_effort` with an optional `operation` kwarg; `_emit_socket_send(...)` now emits the operation field only when the caller supplies one so existing tests that assert the prior `socket-send` payload shape remain untouched.
+- Threaded `operation` descriptors from each probe runner: HTTP passes `<METHOD> <path>`; FTP passes the command text via `_ftp_operation_descriptor(...)` with `PASS` redacted to `PASS ***`; Telnet passes a minimal `telnet-iac` descriptor on IAC negotiation replies.
+- All descriptors are routed through `_bounded_operation(...)` with `PROBE_OPERATION_LIMIT = 48`, guaranteeing bounded, single-line, sanitized output.
+- No new log events introduced.
+
+Phase 3: Safety hardening  
+Status: COMPLETED
+
+- Added `_ProbeBudget(max_ops=PROBE_MAX_SOCKET_OPS, pacing_ms=PROBE_IO_PACING_MS)` class with `.charge(...)` that raises `TimeoutError("probe io budget exhausted")` on depletion and applies `_sleep_ms(pacing_ms)` on every charged op.
+- Each probe runner (`_portable_http_runner_socket`, `portable_ftp_runner`, both `portable_telnet_runner` paths) now instantiates a fresh budget at entry.
+- `_socket_sendall` and `_socket_recv` now charge the budget *after* the low-level try/except on the socket, so budget-exhaustion errors propagate cleanly instead of being re-wrapped as generic timeout errors.
+- Hardened `_sleep_ms` to no-op gracefully when the `time` module exposes neither `sleep_ms` nor `sleep`, preserving existing monkeypatched test harness compatibility.
+- No new retry loops introduced; existing progress loops that handle partial sends and `would_block` readiness were preserved as required by MicroPython socket semantics.
+
+Phase 4: Telnet correction  
+Status: COMPLETED
+
+- `_read_telnet_until_idle(...)` now accepts `deadline`, `budget`, and `max_chunks` kwargs.
+- Added `TELNET_MAX_RECV_CHUNKS = 8` default cap enforced at the top of each recv iteration.
+- Probe-wide deadline is re-checked at the top of each iteration in addition to the existing per-iteration socket timeout.
+- Budget is charged per successful chunk *and* per IAC negotiation reply, so IAC storms count against the cap.
+- Idle-based termination and failure-marker detection are preserved unchanged.
+- Confirmed no login/session simulation; `username`/`password` remain on the signature for API stability but are discarded (`del username, password`).
+
+Phase 5: Validation  
+Status: COMPLETED
+
+- Added 14 focused tests in `tests/unit/runtime/test_checks.py` proving: budget exhaustion raises the expected `TimeoutError`; operation descriptors are emitted conditionally; FTP `PASS` is redacted; HTTP emits method+path; FTP emits the full command set; Telnet emits `telnet-iac`; Telnet recv loop terminates at `max_chunks`; Telnet respects probe-wide `deadline`; Telnet recv loop respects the budget.
+- Updated two compat-layer test stubs for the new `budget=None` kwarg on `_recv_telnet_chunk` and `_socket_recv`.
+- `.venv/bin/python -m pytest -o addopts='' tests/unit/` → `660 passed` (no regressions; previously `646 passed` before the 14 new tests).
+
+Phase 6: Documentation  
+Status: COMPLETED
+
+- Wrote `doc/research/probes/io-safety-and-observability.md` with root-cause analysis, applied constraints, telnet minimal-interaction justification, and a before/after behavioral comparison table.
+
+### Acceptance Criteria
+
+- [x] Every probe `socket-send` log contains a meaningful operation descriptor (method+path, FTP command, or telnet-iac).
+- [x] No new log events or log volume added.
+- [x] Probe runtime and socket operations are both strictly bounded (deadline + budget + telnet chunk cap).
+- [x] Telnet probe cannot enter sustained recv/send loops under any peer behavior.
+- [x] FTP `PASS` command does not leak the password to the log.
+- [x] Existing tests still pass; new tests cover the new bounds and descriptors.
+
 ## Liveness Visibility Follow-Up Plan
 
 Superseded by the bottom-heartbeat-only redesign and the follow-on runtime observability work below. Historical notes are preserved for auditability.
