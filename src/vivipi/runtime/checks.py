@@ -1097,6 +1097,9 @@ def _telnet_collect_visible(handle, chunk: bytes, trace=None, target=None, budge
             _telnet_send_best_effort(handle, reply, trace=trace, operation="telnet-iac", target=target, budget=budget)
             index += 3
             continue
+        if byte == 27:
+            index = _skip_terminal_escape_sequence(chunk, index)
+            continue
         visible.append(byte)
         index += 1
     return visible, handshake_detected
@@ -1111,6 +1114,10 @@ def _update_telnet_text_state(
     failure_window: bytearray,
 ) -> tuple[int, bool, int, bytearray, bool]:
     for byte in visible:
+        if byte < 32 and not _is_ascii_whitespace(byte):
+            continue
+        if byte > 126:
+            continue
         failure_window.append(_ascii_lower(byte))
         if len(failure_window) > TELNET_FAILURE_SCAN_TAIL_BYTES:
             failure_window = bytearray(failure_window[-TELNET_FAILURE_SCAN_TAIL_BYTES:])
@@ -1155,7 +1162,7 @@ def _telnet_failure_detail(session: dict[str, object]) -> str:
     if close_reason in {"remote-close", "reset", "idle-timeout", "stable-open"}:
         return "no telnet response"
     if close_reason in {"chunk-limit", "deadline"}:
-        return "response not fully consumed"
+        return "response not fully consumed" if bool(session.get("has_visible_text", False)) else "no telnet response"
     return close_reason
 
 
@@ -1168,7 +1175,7 @@ def _classify_telnet_session(session: dict[str, object]) -> tuple[Status, str]:
 
     if bool(session["failure_detected"]):
         return Status.FAIL, "telnet failure marker present"
-    if has_visible_text and close_reason not in {"chunk-limit", "deadline"}:
+    if has_visible_text:
         return Status.OK, "response-received"
     if early_close:
         return Status.FAIL, "closed immediately"

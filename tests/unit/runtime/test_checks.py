@@ -268,7 +268,8 @@ def test_telnet_session_helpers_cover_negotiated_and_fallback_failure_paths():
 
 def test_telnet_failure_detail_covers_immediate_close_and_incomplete_response_paths():
     assert runtime_checks._telnet_failure_detail({"close_reason": "remote-close", "session_duration_ms": 10.0}) == "closed immediately"
-    assert runtime_checks._telnet_failure_detail({"close_reason": "chunk-limit", "session_duration_ms": 500.0}) == "response not fully consumed"
+    assert runtime_checks._telnet_failure_detail({"close_reason": "chunk-limit", "session_duration_ms": 500.0, "has_visible_text": True}) == "response not fully consumed"
+    assert runtime_checks._telnet_failure_detail({"close_reason": "chunk-limit", "session_duration_ms": 500.0, "has_visible_text": False}) == "no telnet response"
 
 
 def test_build_runtime_definitions_accepts_legacy_rest_alias_and_normalizes_to_http():
@@ -2463,6 +2464,46 @@ def test_portable_telnet_runner_waits_for_response_drain_before_success(monkeypa
     assert handle.timeout_values == [runtime_checks.TELNET_IDLE_TIMEOUT_S, runtime_checks.TELNET_POST_DATA_IDLE_TIMEOUT_S, runtime_checks.TELNET_POST_DATA_IDLE_TIMEOUT_S]
 
 
+def test_portable_telnet_runner_accepts_chunk_limited_banner_response(monkeypatch):
+    banner = (
+        b'\xff\xfe"\xff\xfb\x01\x1bc\x1b[0;37;2m\x1b[1;1H\x1bc\x1b[0;37;2m\x1b[1;1H'
+        b'\x1b[1;6H\x1b[0;37;1m*** C64 Ultimate (V1.49) 1.1.0 *** Remote ***\x1b[24;53H\x1b(BF7=HELP'
+        b'\r\nREADY\r\n' * 32
+    )
+
+    class ChunkLimitedBannerSocket(FakeSocket):
+        def __init__(self):
+            chunks = [banner[index : index + 96] for index in range(0, len(banner), 96)]
+            super().__init__(chunks)
+
+        def recv(self, _size):
+            return super().recv(_size)
+
+    handle = ChunkLimitedBannerSocket()
+    monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: handle)
+
+    result = portable_telnet_runner("telnet://switch.example.local", 10, trace=lambda event, **fields: None)
+
+    assert result.ok is True
+    assert result.status == Status.OK
+    assert result.details == "response-received"
+    assert result.metadata["close_reason"] == "chunk-limit"
+    assert result.metadata["response_received"] is True
+    assert result.metadata["handshake_detected"] is True
+
+
+def test_portable_telnet_runner_rejects_escape_only_terminal_control(monkeypatch):
+    handle = FakeSocket([b'\xff\xfe"\xff\xfb\x01\x1bc\x1b[0;37;2m\x1b[1;1H', b""])
+    monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: handle)
+
+    result = portable_telnet_runner("telnet://switch.example.local", 10, trace=lambda event, **fields: None)
+
+    assert result.ok is False
+    assert result.status == Status.FAIL
+    assert result.details == "closed immediately"
+    assert result.metadata["response_received"] is False
+
+
 def test_portable_telnet_runner_rejects_explicit_failure_text_and_reports_socket_error(monkeypatch):
     handle = FakeSocket([b"Access denied\r\n", b""])
     monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: handle)
@@ -2544,6 +2585,17 @@ def test_read_telnet_until_idle_tracks_visible_text_for_banners_with_telnet_nego
     assert session["handshake_detected"] is True
     assert session["has_visible_text"] is True
     assert session["visible_bytes"] > 0
+    assert session["close_reason"] == "remote-close"
+
+
+def test_read_telnet_until_idle_ignores_escape_only_terminal_control():
+    session = runtime_checks._read_telnet_until_idle(
+        FakeSocket([b'\xff\xfe"\xff\xfb\x01\x1bc\x1b[0;37;2m\x1b[1;1H', b""])
+    )
+
+    assert session["handshake_detected"] is True
+    assert session["has_visible_text"] is False
+    assert session["visible_bytes"] == 0
     assert session["close_reason"] == "remote-close"
 
 

@@ -231,9 +231,9 @@ Checks are evaluated periodically.
 
 - Telnet session
 - Must accept a TCP session
-- `OK` requires a non-empty post-connect response after Telnet negotiation that does not contain clear failure markers
-- The probe should continue reading until that response is fully consumed, then close the session and report success
-- Failure = connection failure, explicit failure-marker text such as denied/incorrect/failed/invalid, no non-empty response before idle/close, incomplete response consumption before timeout or chunk limit, or remote close/reset within `100 ms` before any non-empty response is received
+- `OK` requires printable post-connect response content after Telnet negotiation that does not contain clear failure markers
+- The probe should continue draining until the session closes, goes idle, or reaches a bounded safety cap after printable response content has already been observed
+- Failure = connection failure, explicit failure-marker text such as denied/incorrect/failed/invalid, no printable response before idle/close, or remote close/reset within `100 ms` before any printable response is received
 
 ### SERVICE
 
