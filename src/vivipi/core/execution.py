@@ -11,6 +11,8 @@ class PingProbeResult:
     ok: bool
     latency_ms: float | None = None
     details: str = ""
+    status: Status | None = None
+    metadata: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -28,6 +30,7 @@ class CheckExecutionResult:
     diagnostics: tuple[DiagnosticEvent, ...] = field(default_factory=tuple)
     replace_source: bool = False
     probe_latency_ms: float | None = None
+    probe_metadata: dict[str, object] = field(default_factory=dict)
 
 
 def _direct_observation(
@@ -81,6 +84,23 @@ def _status_for_http(status_code: int | None) -> Status:
     return Status.FAIL
 
 
+def _status_for_probe_result(result) -> Status:
+    status = getattr(result, "status", None)
+    if status is None:
+        return Status.OK if result.ok else Status.FAIL
+    if isinstance(status, Status):
+        return status
+    candidate = getattr(status, "value", status)
+    return Status(candidate)
+
+
+def _probe_metadata(result) -> dict[str, object]:
+    metadata = getattr(result, "metadata", None)
+    if not isinstance(metadata, dict):
+        return {}
+    return {str(key): value for key, value in metadata.items() if value is not None}
+
+
 def _probe_execution_result(
     definition: CheckDefinition,
     observed_at_s: float,
@@ -88,7 +108,7 @@ def _probe_execution_result(
     ok_detail: str,
     failure_detail: str,
 ) -> CheckExecutionResult:
-    status = Status.OK if result.ok else Status.FAIL
+    status = _status_for_probe_result(result)
     details = result.details.strip() or (ok_detail if status == Status.OK else failure_detail)
     return CheckExecutionResult(
         source_identifier=definition.identifier,
@@ -102,6 +122,7 @@ def _probe_execution_result(
             ),
         ),
         probe_latency_ms=result.latency_ms,
+        probe_metadata=_probe_metadata(result),
     )
 
 

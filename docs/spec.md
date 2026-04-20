@@ -231,9 +231,9 @@ Checks are evaluated periodically.
 
 - Telnet session
 - Must accept a TCP session
-- May report banner/session output when available
-- A post-connect idle timeout or reset still counts as reachable unless explicit login failure text is seen
-- Failure = connection failure, explicit login failure text, or timeout
+- `OK` requires meaningful TELNET interaction: either IAC negotiation bytes, visible non-whitespace session output, or another successful post-connect read path that proves the session is usable
+- `DEG` applies when the TCP session stays open for at least `500 ms` after connect but no TELNET negotiation or visible session output is observed
+- Failure = connection failure, explicit login failure text, timeout before establishment, or remote close/reset within `100 ms` before meaningful TELNET interaction
 
 ### SERVICE
 

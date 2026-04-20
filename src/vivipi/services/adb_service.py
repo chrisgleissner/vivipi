@@ -9,12 +9,20 @@ from vivipi.services.adb import collect_adb_device_status, collect_adb_service_p
 from vivipi.runtime.checks import portable_http_runner, portable_ping_runner, portable_telnet_runner
 
 
-def _probe_response(ok: bool, details: str, latency_ms: float | None = None) -> tuple[int, dict[str, object]]:
-    return (200 if ok else 503), {
-        "status": "OK" if ok else "FAIL",
+def _probe_response(status: str, details: str, latency_ms: float | None = None) -> tuple[int, dict[str, object]]:
+    normalized = str(status).strip().upper() or "FAIL"
+    return (200 if normalized in {"OK", "DEG"} else 503), {
+        "status": normalized,
         "details": details,
         "latency_ms": 0 if latency_ms is None else latency_ms,
     }
+
+
+def _probe_status(result) -> str:
+    status = getattr(result, "status", None)
+    if status is None:
+        return "OK" if result.ok else "FAIL"
+    return str(getattr(status, "value", status)).strip().upper() or "FAIL"
 
 
 def _query_value(query: dict[str, list[str]], key: str, default: str = "") -> str:
@@ -42,19 +50,19 @@ def route_request(path: str, payload_factory=collect_adb_service_payload) -> tup
         target = _query_value(query, "target")
         timeout_s = int(_query_value(query, "timeout_s", "10") or "10")
         result = portable_ping_runner(target, timeout_s)
-        return _probe_response(result.ok, result.details, result.latency_ms)
+        return _probe_response(_probe_status(result), result.details, result.latency_ms)
     if route in {"/probe/http", f"{probe_prefix}/http"}:
         target = _query_value(query, "target")
         method = _query_value(query, "method", "GET") or "GET"
         timeout_s = int(_query_value(query, "timeout_s", "10") or "10")
         result = portable_http_runner(method, target, timeout_s)
-        ok = result.status_code is not None and 200 <= int(result.status_code) < 400
-        return _probe_response(ok, result.details, result.latency_ms)
+        status = "OK" if result.status_code is not None and 200 <= int(result.status_code) < 400 else "FAIL"
+        return _probe_response(status, result.details, result.latency_ms)
     if route in {"/probe/telnet", f"{probe_prefix}/telnet"}:
         target = _query_value(query, "target")
         timeout_s = int(_query_value(query, "timeout_s", "10") or "10")
         result = portable_telnet_runner(target, timeout_s)
-        return _probe_response(result.ok, result.details, result.latency_ms)
+        return _probe_response(_probe_status(result), result.details, result.latency_ms)
     return 404, {"error": "not_found"}
 
 
