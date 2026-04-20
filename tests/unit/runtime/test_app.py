@@ -685,6 +685,7 @@ def test_runtime_app_record_result_falls_back_to_first_observation_and_warns_for
 def test_runtime_app_record_result_logs_probe_metadata_fields():
     definition = make_definition("router")
     app = RuntimeApp(definitions=(definition,), executor=lambda definition, now_s: None, display=FakeDisplay(), page_interval_s=0)
+    app.logger.line_limit = 256
 
     app._record_result(
         definition,
@@ -704,6 +705,7 @@ def test_runtime_app_record_result_logs_probe_metadata_fields():
                 "close_reason": "remote-close",
                 "session_duration_ms": 12.0,
                 "handshake_detected": False,
+                "response_received": True,
             },
         ),
         duration_ms=20.0,
@@ -714,9 +716,16 @@ def test_runtime_app_record_result_logs_probe_metadata_fields():
         line.startswith("[vivipi] [INFO][CHECK] run")
         and "manual=False" in line
         and "detail=closed immediately" in line
+        and "resp=True" in line
         for line in logs
     )
-    assert any(line.startswith("[vivipi] [ERROR][CHECK] failure") and "close=remote-close" in line and "hs=False" in line for line in logs)
+    assert any(
+        line.startswith("[vivipi] [ERROR][CHECK] failure")
+        and "close=remote-close" in line
+        and "hs=False" in line
+        and "resp=True" in line
+        for line in logs
+    )
 
 
 def test_runtime_app_network_operation_helpers_cover_sync_async_and_guard_paths(monkeypatch):
@@ -1158,6 +1167,7 @@ def test_runtime_app_probe_end_logs_counters_and_probe_metadata():
         executor=lambda definition, now_s: None,
         display=FakeDisplay(),
     )
+    app.logger.line_limit = 256
 
     app._log_probe_trace(
         app.definitions[0],
@@ -1169,6 +1179,7 @@ def test_runtime_app_probe_end_logs_counters_and_probe_metadata():
             "session_duration_ms": 650.0,
             "close_reason": "idle-timeout",
             "handshake_detected": False,
+            "response_received": True,
             "issued": 3,
             "succeeded": 2,
             "failed": 1,
@@ -1186,6 +1197,7 @@ def test_runtime_app_probe_end_logs_counters_and_probe_metadata():
     assert "ses_ms=650.0" in log_line
     assert "close=idle-timeout" in log_line
     assert "hs=False" in log_line
+    assert "resp=True" in log_line
 
 
 def test_runtime_app_probe_trace_overlay_and_button_edge_paths_cover_remaining_branches():

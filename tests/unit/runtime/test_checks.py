@@ -243,7 +243,6 @@ def test_telnet_session_helpers_cover_negotiated_and_fallback_failure_paths():
             "session_duration_ms": runtime_checks.TELNET_EARLY_CLOSE_THRESHOLD_MS,
             "close_reason": "idle-timeout",
             "handshake_detected": True,
-            "menu_detected": False,
             "has_visible_text": False,
             "visible_bytes": 0,
             "failure_detected": False,
@@ -254,7 +253,6 @@ def test_telnet_session_helpers_cover_negotiated_and_fallback_failure_paths():
             "session_duration_ms": 50.0,
             "close_reason": "refused",
             "handshake_detected": False,
-            "menu_detected": False,
             "has_visible_text": False,
             "visible_bytes": 0,
             "failure_detected": False,
@@ -262,15 +260,33 @@ def test_telnet_session_helpers_cover_negotiated_and_fallback_failure_paths():
     )
 
     assert negotiated_status == Status.FAIL
-    assert negotiated_detail == "menu not detected"
+    assert negotiated_detail == "no telnet response"
     assert fallback_status == Status.FAIL
     assert fallback_detail == "refused"
-    assert runtime_checks._telnet_failure_detail({"close_reason": "idle-timeout", "session_duration_ms": 250.0}) == "menu not detected"
+    assert runtime_checks._telnet_failure_detail({"close_reason": "idle-timeout", "session_duration_ms": 250.0}) == "no telnet response"
 
 
-def test_telnet_failure_detail_covers_immediate_close_and_failure_marker_paths():
+def test_telnet_failure_detail_covers_immediate_close_and_incomplete_response_paths():
     assert runtime_checks._telnet_failure_detail({"close_reason": "remote-close", "session_duration_ms": 10.0}) == "closed immediately"
     assert runtime_checks._telnet_failure_detail({"close_reason": "failure-marker", "session_duration_ms": 500.0}) == "telnet failure marker present"
+    assert runtime_checks._telnet_failure_detail({"close_reason": "chunk-limit", "session_duration_ms": 500.0, "has_visible_text": True}) == "response not fully consumed"
+    assert runtime_checks._telnet_failure_detail({"close_reason": "chunk-limit", "session_duration_ms": 500.0, "has_visible_text": False}) == "no telnet response"
+
+
+def test_update_telnet_text_state_ignores_control_and_non_ascii_bytes():
+    visible_bytes, has_visible_text, pending_trailing_whitespace, failure_window, failure_detected = runtime_checks._update_telnet_text_state(
+        bytes((1, ord("A"), 200, ord(" "), ord("B"))),
+        visible_bytes=0,
+        has_visible_text=False,
+        pending_trailing_whitespace=0,
+        failure_window=bytearray(),
+    )
+
+    assert visible_bytes == 3
+    assert has_visible_text is True
+    assert pending_trailing_whitespace == 0
+    assert bytes(failure_window) == b"a b"
+    assert failure_detected is False
 
 
 def test_build_runtime_definitions_accepts_legacy_rest_alias_and_normalizes_to_http():
@@ -1218,7 +1234,7 @@ def test_portable_telnet_runner_treats_micropython_etimedout_after_connect_as_de
 
     assert result.ok is False
     assert result.status == Status.FAIL
-    assert result.details == "menu not detected"
+    assert result.details == "no telnet response"
     assert handle.timeout_values == [runtime_checks.TELNET_IDLE_TIMEOUT_S] * 5
     assert handle.closed is True
 
@@ -1415,7 +1431,7 @@ def test_portable_telnet_runner_stdlib_and_raw_error_paths(monkeypatch):
     success = portable_telnet_runner("telnet://switch.example.local", 10)
     assert success.ok is True
     assert success.status == Status.OK
-    assert success.details == "menu-detected"
+    assert success.details == "response-received"
     assert success_handle.sent == [bytes((255, 252, 34)), bytes((255, 254, 1))]
     assert success_handle.closed is True
 
@@ -1425,7 +1441,7 @@ def test_portable_telnet_runner_stdlib_and_raw_error_paths(monkeypatch):
     empty = portable_telnet_runner("telnet://switch.example.local", 10)
     assert empty.ok is False
     assert empty.status == Status.FAIL
-    assert empty.details == "menu not detected"
+    assert empty.details == "no telnet response"
 
     class TimeoutSocket(FakeSocket):
         def __init__(self):
@@ -1441,7 +1457,7 @@ def test_portable_telnet_runner_stdlib_and_raw_error_paths(monkeypatch):
     timeout_result = portable_telnet_runner("telnet://switch.example.local", 10, trace=lambda event, **fields: None)
     assert timeout_result.ok is False
     assert timeout_result.status == Status.FAIL
-    assert timeout_result.details == "menu not detected"
+    assert timeout_result.details == "no telnet response"
     assert timeout_handle.calls == 5
 
     class BrokenSocket(FakeSocket):
@@ -1495,7 +1511,7 @@ def test_portable_telnet_runner_stdlib_reports_connection_failure_metadata(monke
         "close_reason": "refused",
         "session_duration_ms": 0.0,
         "handshake_detected": False,
-        "menu_detected": False,
+        "response_received": False,
     }
 
 
@@ -2281,7 +2297,7 @@ def test_portable_ftp_runner_reports_socket_errors(monkeypatch):
     assert result.details == "refused"
 
 
-def test_portable_telnet_runner_accepts_ultimate_remote_menu(monkeypatch):
+def test_portable_telnet_runner_accepts_non_empty_response(monkeypatch):
     class BannerSocket(FakeSocket):
         def __init__(self):
             super().__init__([
@@ -2311,14 +2327,14 @@ def test_portable_telnet_runner_accepts_ultimate_remote_menu(monkeypatch):
     )
 
     assert result.ok is True
-    assert result.details == "menu-detected"
-    assert result.metadata["close_reason"] == "menu-detected"
-    assert result.metadata["menu_detected"] is True
+    assert result.details == "response-received"
+    assert result.metadata["close_reason"] == "idle-timeout"
+    assert result.metadata["response_received"] is True
     assert handle.sent == [bytes((255, 252, 34)), bytes((255, 254, 1))]
     assert handle.closed is True
 
 
-def test_portable_telnet_runner_rejects_login_failure(monkeypatch):
+def test_portable_telnet_runner_rejects_login_failure_text(monkeypatch):
     handle = FakeSocket([b"Login incorrect\r\n", b""])
     monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: handle)
 
@@ -2341,7 +2357,7 @@ def test_portable_telnet_runner_rejects_blank_sessions(monkeypatch):
     assert handle.sent == []
 
 
-def test_portable_telnet_runner_rejects_stable_idle_open_without_menu(monkeypatch):
+def test_portable_telnet_runner_rejects_stable_idle_open_without_response(monkeypatch):
     class TimeoutThenResponseSocket(FakeSocket):
         def __init__(self):
             super().__init__([])
@@ -2362,17 +2378,17 @@ def test_portable_telnet_runner_rejects_stable_idle_open_without_menu(monkeypatc
 
     assert result.ok is False
     assert result.status == Status.FAIL
-    assert result.details == "menu not detected"
+    assert result.details == "no telnet response"
     assert result.metadata["close_reason"] == "idle-timeout"
     assert result.metadata["handshake_detected"] is False
-    assert result.metadata["menu_detected"] is False
+    assert result.metadata["response_received"] is False
     assert result.metadata["session_duration_ms"] >= runtime_checks.TELNET_STABLE_OPEN_THRESHOLD_MS
     assert handle.recv_calls == 5
     assert handle.timeout_values == [runtime_checks.TELNET_IDLE_TIMEOUT_S] * 5
     assert handle.sent == []
 
 
-def test_portable_telnet_runner_rejects_password_prompt_without_menu(monkeypatch):
+def test_portable_telnet_runner_accepts_password_prompt_response(monkeypatch):
     class PasswordPromptSocket(FakeSocket):
         def __init__(self):
             super().__init__([b"Password: \xff\xfb\x01", b"\r\nREADY\r\n"])
@@ -2393,12 +2409,12 @@ def test_portable_telnet_runner_rejects_password_prompt_without_menu(monkeypatch
 
     result = portable_telnet_runner("switch.example.local:23", 10, password="secret", trace=lambda event, **fields: None)
 
-    assert result.ok is False
-    assert result.status == Status.FAIL
-    assert result.details == "menu not detected"
+    assert result.ok is True
+    assert result.status == Status.OK
+    assert result.details == "response-received"
     assert result.metadata["close_reason"] == "idle-timeout"
     assert result.metadata["handshake_detected"] is True
-    assert result.metadata["menu_detected"] is False
+    assert result.metadata["response_received"] is True
     assert handle.sent == [bytes((255, 254, 1))]
 
 
@@ -2426,14 +2442,14 @@ def test_portable_telnet_runner_tolerates_negotiation_reply_timeout(monkeypatch)
 
     result = portable_telnet_runner("switch.example.local:23", 10, trace=lambda event, **fields: None)
 
-    assert result.ok is False
-    assert result.status == Status.FAIL
-    assert result.details == "menu not detected"
+    assert result.ok is True
+    assert result.status == Status.OK
+    assert result.details == "response-received"
     assert handle.sent == []
     assert handle.reply_attempts == 1
 
 
-def test_portable_telnet_runner_returns_as_soon_as_menu_is_detected(monkeypatch):
+def test_portable_telnet_runner_waits_for_response_drain_before_success(monkeypatch):
     class DrainingBannerSocket(FakeSocket):
         def __init__(self):
             super().__init__([
@@ -2457,15 +2473,55 @@ def test_portable_telnet_runner_returns_as_soon_as_menu_is_detected(monkeypatch)
 
     assert result.ok is True
     assert result.status == Status.OK
-    assert result.details == "menu-detected"
-    assert result.metadata["close_reason"] == "menu-detected"
-    assert result.metadata["menu_detected"] is True
+    assert result.details == "response-received"
+    assert result.metadata["close_reason"] == "remote-close"
+    assert result.metadata["response_received"] is True
     assert result.metadata["handshake_detected"] is True
-    assert handle.recv_calls == 1
-    assert handle.timeout_values == [runtime_checks.TELNET_IDLE_TIMEOUT_S]
+    assert handle.recv_calls == 3
+    assert handle.timeout_values == [runtime_checks.TELNET_IDLE_TIMEOUT_S, runtime_checks.TELNET_POST_DATA_IDLE_TIMEOUT_S, runtime_checks.TELNET_POST_DATA_IDLE_TIMEOUT_S]
 
 
-def test_portable_telnet_runner_handles_explicit_failure_text_and_socket_error(monkeypatch):
+def test_portable_telnet_runner_accepts_chunk_limited_banner_response(monkeypatch):
+    banner = (
+        b'\xff\xfe"\xff\xfb\x01\x1bc\x1b[0;37;2m\x1b[1;1H\x1bc\x1b[0;37;2m\x1b[1;1H'
+        b'\x1b[1;6H\x1b[0;37;1m*** C64 Ultimate (V1.49) 1.1.0 *** Remote ***\x1b[24;53H\x1b(BF7=HELP'
+        b'\r\nREADY\r\n' * 32
+    )
+
+    class ChunkLimitedBannerSocket(FakeSocket):
+        def __init__(self):
+            chunks = [banner[index : index + 96] for index in range(0, len(banner), 96)]
+            super().__init__(chunks)
+
+        def recv(self, _size):
+            return super().recv(_size)
+
+    handle = ChunkLimitedBannerSocket()
+    monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: handle)
+
+    result = portable_telnet_runner("telnet://switch.example.local", 10, trace=lambda event, **fields: None)
+
+    assert result.ok is True
+    assert result.status == Status.OK
+    assert result.details == "response-received"
+    assert result.metadata["close_reason"] == "chunk-limit"
+    assert result.metadata["response_received"] is True
+    assert result.metadata["handshake_detected"] is True
+
+
+def test_portable_telnet_runner_rejects_escape_only_terminal_control(monkeypatch):
+    handle = FakeSocket([b'\xff\xfe"\xff\xfb\x01\x1bc\x1b[0;37;2m\x1b[1;1H', b""])
+    monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: handle)
+
+    result = portable_telnet_runner("telnet://switch.example.local", 10, trace=lambda event, **fields: None)
+
+    assert result.ok is False
+    assert result.status == Status.FAIL
+    assert result.details == "closed immediately"
+    assert result.metadata["response_received"] is False
+
+
+def test_portable_telnet_runner_rejects_explicit_failure_text_and_reports_socket_error(monkeypatch):
     handle = FakeSocket([b"Access denied\r\n", b""])
     monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: handle)
 
@@ -2533,18 +2589,31 @@ def test_read_telnet_until_idle_detects_failure_markers_across_chunk_boundaries(
     assert session["close_reason"] == "failure-marker"
 
 
-def test_telnet_menu_detection_matches_live_c64u_and_u64_banners():
-    c64u_sample = runtime_checks._append_telnet_menu_sample(
-        "",
-        b'\xff\xfe"\xff\xfb\x01\x1bc\x1b[0;37;2m\x1b[1;1H\x1bc\x1b[0;37;2m\x1b[1;1H\x1b[1;6H\x1b[0;37;1m*** C64 Ultimate (V1.49) 1.1.0 *** Remote ***\x1b[24;53H\x1b(BF7=HELP',
-    )
-    u64_sample = runtime_checks._append_telnet_menu_sample(
-        "",
-        b'\xff\xfe"\xff\xfb\x01\x1bc\x1b[0;37;2m\x1b[1;1H\x1bc\x1b[0;37;2m\x1b[1;1H\x1b[1;4H\x1b[0;37;1m*** Ultimate 64 Elite (V1.4B) 3.14e *** Remote ***\x1b[24;53H\x1b(BF3=HELP',
+def test_read_telnet_until_idle_tracks_visible_text_for_banners_with_telnet_negotiation():
+    handle = FakeSocket(
+        [
+            b'\xff\xfe"\xff\xfb\x01\x1bc\x1b[0;37;2m\x1b[1;1H\x1bc\x1b[0;37;2m\x1b[1;1H\x1b[1;6H\x1b[0;37;1m*** C64 Ultimate (V1.49) 1.1.0 *** Remote ***\x1b[24;53H\x1b(BF7=HELP',
+            b"",
+        ]
     )
 
-    assert runtime_checks._looks_like_ultimate_remote_menu(c64u_sample) is True
-    assert runtime_checks._looks_like_ultimate_remote_menu(u64_sample) is True
+    session = runtime_checks._read_telnet_until_idle(handle)
+
+    assert session["handshake_detected"] is True
+    assert session["has_visible_text"] is True
+    assert session["visible_bytes"] > 0
+    assert session["close_reason"] == "remote-close"
+
+
+def test_read_telnet_until_idle_ignores_escape_only_terminal_control():
+    session = runtime_checks._read_telnet_until_idle(
+        FakeSocket([b'\xff\xfe"\xff\xfb\x01\x1bc\x1b[0;37;2m\x1b[1;1H', b""])
+    )
+
+    assert session["handshake_detected"] is True
+    assert session["has_visible_text"] is False
+    assert session["visible_bytes"] == 0
+    assert session["close_reason"] == "remote-close"
 
 
 def test_probe_budget_exhaustion_raises_timeout():
@@ -2792,7 +2861,7 @@ def test_read_telnet_until_idle_terminates_at_max_recv_chunks(monkeypatch):
     assert handle.calls == 4
     assert session["visible_bytes"] <= 4 * 64
     assert session["has_visible_text"] is True
-    assert session["close_reason"] == "idle-timeout"
+    assert session["close_reason"] == "chunk-limit"
 
 
 def test_read_telnet_until_idle_respects_deadline(monkeypatch):
@@ -2813,7 +2882,7 @@ def test_read_telnet_until_idle_respects_deadline(monkeypatch):
     )
     assert session["visible_bytes"] == 0
     assert session["has_visible_text"] is False
-    assert session["close_reason"] == "idle-timeout"
+    assert session["close_reason"] == "deadline"
 
 
 def test_read_telnet_until_idle_stops_when_deadline_expires_mid_loop(monkeypatch):
@@ -2839,7 +2908,7 @@ def test_read_telnet_until_idle_stops_when_deadline_expires_mid_loop(monkeypatch
     assert handle.calls == 1
     assert session["visible_bytes"] == 6
     assert session["has_visible_text"] is True
-    assert session["close_reason"] == "idle-timeout"
+    assert session["close_reason"] == "deadline"
 
 
 def test_read_telnet_until_idle_charges_budget_per_chunk(monkeypatch):
@@ -3102,7 +3171,6 @@ def test_read_telnet_until_idle_reports_stable_open_before_first_read(monkeypatc
         "visible_bytes": 0,
         "has_visible_text": False,
         "handshake_detected": False,
-        "menu_detected": False,
         "failure_detected": False,
         "close_reason": "stable-open",
         "session_duration_ms": runtime_checks.TELNET_STABLE_OPEN_THRESHOLD_MS,

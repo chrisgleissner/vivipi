@@ -231,9 +231,9 @@ Checks are evaluated periodically.
 
 - Telnet session
 - Must accept a TCP session
-- `OK` requires the post-connect response to show the Ultimate remote menu, proved by the banner text plus menu/help markers in the returned screen payload
-- The probe should close the session as soon as the menu is confirmed instead of waiting for additional TELNET repaint traffic
-- Failure = connection failure, explicit login failure text, timeout before menu detection, or remote close/reset within `100 ms` before the menu is confirmed
+- `OK` requires printable post-connect response content after Telnet negotiation that does not contain clear failure markers
+- The probe should continue draining until the session closes, goes idle, or reaches a bounded safety cap after printable response content has already been observed
+- Failure = connection failure, explicit failure-marker text such as denied/incorrect/failed/invalid, no printable response before idle/close, or remote close/reset within `100 ms` before any printable response is received
 
 ### SERVICE
 
