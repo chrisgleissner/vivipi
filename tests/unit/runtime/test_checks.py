@@ -56,6 +56,15 @@ class CloseErrorSocket(FakeSocket):
         raise OSError("close failed")
 
 
+class ShutdownRecordingSocket(FakeSocket):
+    def __init__(self, responses):
+        super().__init__(responses)
+        self.shutdown_calls = []
+
+    def shutdown(self, how):
+        self.shutdown_calls.append(how)
+
+
 def test_build_runtime_definitions_reads_runtime_config_shape():
     definitions = build_runtime_definitions(
         {
@@ -1832,8 +1841,13 @@ def test_socket_helpers_cover_open_close_and_response_errors(monkeypatch):
     assert opened.timeout == 10
     assert opened.address == ("nas.example.local", 21)
 
+    shutdown_socket = ShutdownRecordingSocket([])
     _close_socket(None)
+    _close_socket(shutdown_socket)
     _close_socket(CloseErrorSocket([]))
+
+    assert shutdown_socket.shutdown_calls == [runtime_checks.socket.SHUT_RDWR]
+    assert shutdown_socket.closed is True
 
     with pytest.raises(ValueError, match="invalid FTP response"):
         _ftp_read_response(FakeSocket([b"oops\r\n"]))
@@ -1943,7 +1957,16 @@ def test_portable_http_runner_uses_manual_socket_deadline_path_on_micropython(mo
         def perf_counter(self):
             return self.now_ms / 1000.0
 
-    handle = FakeSocket([b"HTTP/1.0 200 OK\r\nContent-Length: 12\r\n\r\n{\"ok\": true}", b""])
+    class RecordingSocket(FakeSocket):
+        def __init__(self, responses):
+            super().__init__(responses)
+            self.recv_sizes = []
+
+        def recv(self, size):
+            self.recv_sizes.append(size)
+            return super().recv(size)
+
+    handle = RecordingSocket([b"HTTP/1.0 200 OK\r\nContent-Length: 12\r\n\r\n{\"ok\": true}", b""])
     fake_time = FakeMicroPythonTime()
 
     monkeypatch.setattr(runtime_checks, "time", fake_time)
@@ -1955,6 +1978,60 @@ def test_portable_http_runner_uses_manual_socket_deadline_path_on_micropython(mo
     assert result.status_code == 200
     assert result.body == {"ok": True}
     assert handle.sent[0].startswith(b"GET /health?view=1 HTTP/1.1\r\n")
+    assert max(handle.recv_sizes) == runtime_checks.DEVICE_SOCKET_RECV_CHUNK_SIZE
+
+
+def test_portable_ftp_runner_caps_manual_socket_read_size_on_micropython(monkeypatch):
+    class FakeMicroPythonTime:
+        def __init__(self):
+            self.now_ms = 0
+
+        def ticks_ms(self):
+            return self.now_ms
+
+        def ticks_add(self, value, delta):
+            return value + delta
+
+        def ticks_diff(self, left, right):
+            return left - right
+
+        def perf_counter(self):
+            return self.now_ms / 1000.0
+
+    class RecordingSocket(FakeSocket):
+        def __init__(self, responses):
+            super().__init__(responses)
+            self.recv_sizes = []
+
+        def recv(self, size):
+            self.recv_sizes.append(size)
+            return super().recv(size)
+
+    control_socket = RecordingSocket(
+        [
+            b"220 Ready\r\n",
+            b"331 Password required\r\n",
+            b"230 Logged in\r\n",
+            b'257 "/" is current directory\r\n',
+            b"221 Goodbye\r\n",
+        ]
+    )
+    fake_time = FakeMicroPythonTime()
+
+    monkeypatch.setattr(runtime_checks, "time", fake_time)
+    monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s, **kwargs: control_socket)
+
+    result = portable_ftp_runner(
+        "ftp://nas.example.local",
+        10,
+        username="admin",
+        password="secret",
+        trace=lambda event, **fields: None,
+    )
+
+    assert result.ok is True
+    assert result.details == "pwd=/"
+    assert max(control_socket.recv_sizes) == runtime_checks.DEVICE_SOCKET_RECV_CHUNK_SIZE
 
 
 def test_portable_ftp_runner_rejects_invalid_greeting(monkeypatch):
@@ -2195,13 +2272,9 @@ def test_portable_telnet_runner_drains_until_quiet_timeout_before_close(monkeypa
     assert result.details == "visible_bytes=16"
     assert result.metadata["close_reason"] == "idle-timeout"
     assert result.metadata["handshake_detected"] is False
-    assert handle.recv_calls == 7
+    assert handle.recv_calls == 3
     assert handle.timeout_values == [
         runtime_checks.TELNET_IDLE_TIMEOUT_S,
-        runtime_checks.TELNET_POST_DATA_IDLE_TIMEOUT_S,
-        runtime_checks.TELNET_POST_DATA_IDLE_TIMEOUT_S,
-        runtime_checks.TELNET_POST_DATA_IDLE_TIMEOUT_S,
-        runtime_checks.TELNET_POST_DATA_IDLE_TIMEOUT_S,
         runtime_checks.TELNET_POST_DATA_IDLE_TIMEOUT_S,
         runtime_checks.TELNET_POST_DATA_IDLE_TIMEOUT_S,
     ]
@@ -2235,9 +2308,25 @@ def test_read_telnet_until_idle_counts_visible_bytes_without_buffering_full_tran
         def settimeout(self, value):
             self.timeout_values.append(value)
 
-    handle = LargeBannerSocket()
+        def recv(self, _size):
+            raise AssertionError("recv should not be used when recv_into is available")
 
-    session = runtime_checks._read_telnet_until_idle(handle)
+        def recv_into(self, buffer):
+            if not self._responses:
+                return 0
+            chunk = self._responses.pop(0)
+            size = len(chunk)
+            buffer[:size] = chunk
+            return size
+
+    handle = LargeBannerSocket()
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(runtime_checks, "_is_micropython_runtime", lambda: True)
+
+    try:
+        session = runtime_checks._read_telnet_until_idle(handle)
+    finally:
+        monkeypatch.undo()
 
     assert session["visible_bytes"] == 3072
     assert session["has_visible_text"] is True

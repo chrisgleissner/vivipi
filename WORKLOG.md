@@ -1,5 +1,24 @@
 # ViviPi Work Log
 
+## 2026-04-20T11:16:18Z
+
+- Investigated the reported sporadic `C64U TELNET` failures after the recent TELNET classifier changes.
+- Root-cause evidence from real Pico and host checks:
+  - isolated direct Pico TELNET probes against `192.168.1.167:23` were initially stable, which ruled out the basic TELNET classifier as the first-order fault
+  - synthetic back-to-back same-host probe bursts on the Pico could still drive the C64U into transient `FTP` resets followed by `TELNET` `DEG` / immediate-reset failures and then `HTTP` resets, confirming a broader service-pressure pattern rather than a TELNET-only classifier bug
+  - the real production Pico `tick()` loop and a focused per-host cadence run showed the runtime uses the normal `c64u-rest -> c64u-telnet -> c64u-ftp` order and did not reproduce the same immediate burst-collapse in the short safe-profile window
+  - repeated real-device evidence showed C64U TELNET session output arrives in bursts and can continue well past the old `20 ms` post-data quiet window, so the Pico probe could close the socket while unread TELNET output was still pending
+- Implemented the smallest justified TELNET teardown fix in `src/vivipi/runtime/checks.py`:
+  - increased `TELNET_POST_DATA_IDLE_TIMEOUT_S` from `0.02` to `0.1` so the probe drains bursty C64U TELNET output before concluding the session is quiet
+  - changed `_close_socket(...)` to perform a best-effort `shutdown(SHUT_RDWR)` before `close()` so the Pico stops ending TELNET sessions with the most abrupt possible teardown when the platform supports shutdown
+- Added regression coverage in `tests/unit/runtime/test_checks.py` for best-effort shutdown-before-close and updated the TELNET quiet-drain expectations for the longer post-data idle window.
+- Validation:
+  - focused runtime check slice passed: `pytest --no-cov tests/unit/runtime/test_checks.py -q` -> `74 passed`
+  - full repository validation passed: `./build` -> `667 passed`, total coverage `97.56%`
+  - redeployed the Pico and confirmed the live device now reports `TELNET_POST_DATA_IDLE_TIMEOUT_S = 0.1`
+  - real Pico post-fix cadence proof saved in `artifacts/hardware-proof/pico-c64u-hostgroup-70s-postfix.log` showed `7` consecutive `c64u-rest -> c64u-telnet -> c64u-ftp` cycles at the real `10 s` cadence with all `C64U` probes `OK`; `c64u-telnet` stayed on the visible-payload path with `visible_bytes=3770`, `handshake_detected=true`, and `session_duration_ms` about `329-416 ms`
+  - baseline real-runtime capture in `artifacts/hardware-proof/pico-normal-loop-c64u.log` confirmed the production Pico loop order and showed no short-window `C64U` failures under the normal runtime path
+
 ## 2026-04-19T21:03:39Z
 
 - Started the TELNET false-positive correction task.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import gc
 try:
     import importlib
 except ImportError:  # pragma: no cover - MicroPython fallback
@@ -34,9 +35,11 @@ TELNET_DO = 253
 TELNET_WONT = 252
 TELNET_WILL = 251
 TELNET_IDLE_TIMEOUT_S = 0.12
-TELNET_POST_DATA_IDLE_TIMEOUT_S = 0.02
+TELNET_POST_DATA_IDLE_TIMEOUT_S = 0.1
 TELNET_STABLE_OPEN_THRESHOLD_MS = 500
 TELNET_EARLY_CLOSE_THRESHOLD_MS = 100
+DEVICE_SOCKET_RECV_CHUNK_SIZE = 512
+TELNET_RECV_CHUNK_SIZE = 512
 TELNET_SB = 250
 TELNET_SE = 240
 TELNET_FAILURE_SCAN_TAIL_BYTES = max(len(marker) for marker in TELNET_FAILURE_MARKERS)
@@ -83,6 +86,20 @@ def _sleep_ms(value_ms: int):
 
 def _is_micropython_runtime() -> bool:
     return hasattr(time, "ticks_ms")
+
+
+def _maybe_collect_gc(min_free_bytes: int = TELNET_RECV_CHUNK_SIZE * 4):
+    if not _is_micropython_runtime() or not hasattr(gc, "collect"):
+        return
+    free_bytes = None
+    if hasattr(gc, "mem_free"):
+        try:
+            free_bytes = int(gc.mem_free())
+        except Exception:
+            free_bytes = None
+    if free_bytes is not None and free_bytes >= min_free_bytes:
+        return
+    gc.collect()
 
 
 def _deadline_after_s(timeout_s: int | float):
@@ -564,6 +581,13 @@ def _close_socket(handle, trace=None, *, target=None):
     if handle is None:
         return
     try:
+        shutdown = getattr(handle, "shutdown", None)
+        shutdown_flag = getattr(socket, "SHUT_RDWR", None)
+        if callable(shutdown) and shutdown_flag is not None:
+            try:
+                shutdown(shutdown_flag)
+            except OSError:
+                pass
         handle.close()
     except OSError:
         return
@@ -605,6 +629,8 @@ def _socket_sendall(handle, payload: bytes, deadline, trace=None, stage: str = "
 
 
 def _socket_recv(handle, size: int, deadline, trace=None, stage: str = "recv") -> bytes:
+    if _is_micropython_runtime():
+        size = min(int(size), DEVICE_SOCKET_RECV_CHUNK_SIZE)
     while True:
         _socket_wait(handle, deadline, writable=False, trace=trace, stage=stage)
         try:
@@ -731,6 +757,7 @@ def portable_ftp_runner(target: str, timeout_s: int, username: str | None = None
 
     control_socket = None
     try:
+        _maybe_collect_gc()
         control_socket = _open_socket_compat(host, port, timeout_s, deadline, trace=trace)
         code, response = _ftp_read_response(control_socket, deadline=deadline, trace=trace)
         if code != 220:
@@ -766,6 +793,7 @@ def portable_ftp_runner(target: str, timeout_s: int, username: str | None = None
         return PingProbeResult(ok=False, latency_ms=_elapsed_ms(started_at, uses_ticks_ms), details=_probe_error_detail(error))
     finally:
         _close_socket(control_socket, trace=trace, target=f"{host}:{port}")
+        _maybe_collect_gc()
 
 
 def _telnet_strip_negotiation(handle, chunk: bytes) -> bytes:
@@ -841,6 +869,19 @@ def _recv_telnet_chunk(handle, size: int = 4096, deadline=None, trace=None) -> b
         raise
 
 
+def _recv_telnet_chunk_into(handle, buffer, trace=None):
+    receiver = getattr(handle, "recv_into", None)
+    if callable(receiver):
+        size = receiver(buffer)
+        if trace is not None:
+            _emit_probe_trace(trace, "socket-recv", stage="telnet-recv", bytes_received=size)
+        return memoryview(buffer)[:size]
+    chunk = handle.recv(len(buffer))
+    if trace is not None:
+        _emit_probe_trace(trace, "socket-recv", stage="telnet-recv", bytes_received=len(chunk))
+    return chunk
+
+
 def _telnet_send_best_effort(handle, payload: bytes, trace=None) -> bool:
     try:
         handle.sendall(payload)
@@ -860,6 +901,18 @@ def _looks_like_telnet_output(value: str) -> bool:
     if any(marker.decode("utf-8") in lowered for marker in TELNET_FAILURE_MARKERS):
         return False
     return _has_alnum_ascii(stripped) or stripped[-1:] in ">#$%"
+
+
+def _ascii_lower(byte: int) -> int:
+    if 65 <= byte <= 90:
+        return byte + 32
+    return byte
+
+
+def _is_ascii_whitespace(byte: int) -> bool:
+    return byte in (9, 10, 11, 12, 13, 32)
+
+
 def _telnet_collect_visible(handle, chunk: bytes, trace=None) -> tuple[bytes, bool]:
     visible = bytearray()
     handshake_detected = False
@@ -876,7 +929,37 @@ def _telnet_collect_visible(handle, chunk: bytes, trace=None) -> tuple[bytes, bo
             continue
         visible.append(byte)
         index += 1
-    return bytes(visible), handshake_detected
+    return visible, handshake_detected
+
+
+def _update_telnet_text_state(
+    visible,
+    *,
+    visible_bytes: int,
+    has_visible_text: bool,
+    pending_trailing_whitespace: int,
+    failure_window: bytearray,
+) -> tuple[int, bool, int, bytearray, bool]:
+    for byte in visible:
+        failure_window.append(_ascii_lower(byte))
+        if len(failure_window) > TELNET_FAILURE_SCAN_TAIL_BYTES:
+            failure_window = bytearray(failure_window[-TELNET_FAILURE_SCAN_TAIL_BYTES:])
+        if any(marker in failure_window for marker in TELNET_FAILURE_MARKERS):
+            return visible_bytes, has_visible_text, pending_trailing_whitespace, failure_window, True
+
+        if not has_visible_text and _is_ascii_whitespace(byte):
+            continue
+        if not has_visible_text:
+            has_visible_text = True
+
+        if _is_ascii_whitespace(byte):
+            pending_trailing_whitespace += 1
+            continue
+
+        visible_bytes += pending_trailing_whitespace + 1
+        pending_trailing_whitespace = 0
+
+    return visible_bytes, has_visible_text, pending_trailing_whitespace, failure_window, False
 
 
 def _telnet_result_metadata(close_reason: str, session_duration_ms: float, handshake_detected: bool) -> dict[str, object]:
@@ -941,6 +1024,7 @@ def _read_telnet_until_idle(
     pending_trailing_whitespace = 0
     failure_window = bytearray()
     saw_data = False
+    read_buffer = bytearray(TELNET_RECV_CHUNK_SIZE) if _is_micropython_runtime() else None
     while True:
         current_timeout_s = quiet_timeout_s if saw_data else initial_timeout_s
         current_duration_ms = session_duration_ms()
@@ -957,7 +1041,12 @@ def _read_telnet_until_idle(
             }
         _set_socket_timeout(handle, current_timeout_s)
         try:
-            chunk = handle.recv(4096)
+            if read_buffer is not None:
+                chunk = _recv_telnet_chunk_into(handle, read_buffer, trace=trace)
+            else:
+                chunk = handle.recv(TELNET_RECV_CHUNK_SIZE)
+                if trace is not None:
+                    _emit_probe_trace(trace, "socket-recv", stage="telnet-recv", bytes_received=len(chunk))
         except TimeoutError:
             waited_timeout_ms += current_timeout_s * 1000.0
             current_duration_ms = session_duration_ms()
@@ -1001,8 +1090,6 @@ def _read_telnet_until_idle(
                 "close_reason": category,
                 "session_duration_ms": current_duration_ms,
             }
-        if trace is not None:
-            _emit_probe_trace(trace, "socket-recv", stage="telnet-recv", bytes_received=len(chunk))
         if not chunk:
             return {
                 "visible_bytes": visible_bytes,
@@ -1027,8 +1114,14 @@ def _read_telnet_until_idle(
         handshake_detected = handshake_detected or chunk_handshake
         if not visible:
             continue
-        failure_window.extend(visible.lower())
-        if any(marker in failure_window for marker in TELNET_FAILURE_MARKERS):
+        visible_bytes, has_visible_text, pending_trailing_whitespace, failure_window, failure_detected = _update_telnet_text_state(
+            visible,
+            visible_bytes=visible_bytes,
+            has_visible_text=has_visible_text,
+            pending_trailing_whitespace=pending_trailing_whitespace,
+            failure_window=failure_window,
+        )
+        if failure_detected:
             return {
                 "visible_bytes": visible_bytes,
                 "has_visible_text": has_visible_text,
@@ -1037,20 +1130,6 @@ def _read_telnet_until_idle(
                 "close_reason": "failure-marker",
                 "session_duration_ms": session_duration_ms(),
             }
-        if len(failure_window) > TELNET_FAILURE_SCAN_TAIL_BYTES:
-            failure_window = bytearray(failure_window[-TELNET_FAILURE_SCAN_TAIL_BYTES:])
-        if not has_visible_text:
-            visible = visible.lstrip()
-            if not visible:
-                continue
-            has_visible_text = True
-        trailing_whitespace = len(visible) - len(visible.rstrip())
-        body_length = len(visible) - trailing_whitespace
-        if body_length:
-            visible_bytes += pending_trailing_whitespace + body_length
-            pending_trailing_whitespace = trailing_whitespace
-        else:
-            pending_trailing_whitespace += len(visible)
     return {
         "visible_bytes": visible_bytes,
         "has_visible_text": has_visible_text,
@@ -1100,6 +1179,7 @@ def portable_telnet_runner(target: str, timeout_s: int, username: str | None = N
     started_at, uses_ticks_ms = _start_timer()
     handle = None
     try:
+        _maybe_collect_gc()
         deadline = _deadline_after_s(timeout_s)
         handle = _open_socket_compat(host, port, timeout_s, deadline, trace=trace)
         session = _read_telnet_until_idle(handle, trace=trace)
@@ -1114,6 +1194,7 @@ def portable_telnet_runner(target: str, timeout_s: int, username: str | None = N
         )
     finally:
         _close_socket(handle, trace=trace, target=f"{host}:{port}")
+        _maybe_collect_gc()
 
 
 def _parse_http_target(target: str) -> tuple[str, str, int, str]:
@@ -1178,6 +1259,7 @@ def _portable_http_runner_socket(method: str, target: str, timeout_s: int, trace
 
     handle = None
     try:
+        _maybe_collect_gc()
         handle = _open_socket_compat(host, port, timeout_s, deadline, trace=trace)
         _socket_sendall(handle, request_payload, deadline, trace=trace, stage="http-send")
         payload = _recv_until_closed(handle, deadline, trace=trace, stage="http-recv")
@@ -1197,6 +1279,7 @@ def _portable_http_runner_socket(method: str, target: str, timeout_s: int, trace
         )
     finally:
         _close_socket(handle, trace=trace, target=f"{host}:{port}")
+        _maybe_collect_gc()
 
 
 def build_executor(ping_runner=None, http_runner=None, ftp_runner=None, telnet_runner=None, trace_sink=None):
