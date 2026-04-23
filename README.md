@@ -13,7 +13,8 @@ ViviPi (pronounced "VEE-vee-pie", from the Latin *viv-* in *vivere*, "to live") 
 ## Features
 
 - Display support includes Pico OLED, LCD, and e-paper modules; verified on the Waveshare Pico OLED 1.3.
-- Supports `PING`, `IDENT`, `DMA`, `TELNET`, `FTP`, `HTTP`, and `SERVICE` health checks.
+- Supports `PING`, `TELNET`, `FTP`, `HTTP`, and `SERVICE` health checks.
+- Dedicated `IDENT` and `DMA` probes specific for the Ultimate 64 and Commodore 64 Ultimate.
 - Configurable back-off and scheduling policies to avoid overwhelming targets.
 - Easy build and deployment via a one-stop shop `build` command.
 
