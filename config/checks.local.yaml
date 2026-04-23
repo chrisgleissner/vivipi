@@ -3,6 +3,7 @@ checks:
     type: http
     target: http://192.168.1.167/v1/version
     method: GET
+    password: ${VIVIPI_NETWORK_PASSWORD}
     interval_s: 10
     timeout_s: 8
 
@@ -33,6 +34,7 @@ checks:
     type: http
     target: http://192.168.1.13/v1/version
     method: GET
+    password: ${VIVIPI_NETWORK_PASSWORD}
     interval_s: 10
     timeout_s: 8
 

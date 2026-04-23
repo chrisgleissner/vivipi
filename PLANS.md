@@ -57,14 +57,29 @@ Status: COMPLETED
 
 ### Stage 2 Rerun Checklist
 
-1. Enable the shared U64 network password on the device.
-2. Provide the password to the repo paths that use it:
-	- direct tool: `--network-password` or legacy `--ftp-pass`
-	- ViviPi-integrated path: `VIVIPI_NETWORK_PASSWORD`
-3. Re-run the direct all-probe host command against `192.168.1.13` with the password set.
-4. Re-run the targeted direct `ident,raw64` command and confirm `network_password_set=1` while `ident` remains unauthenticated and `raw64` authenticates successfully.
-5. Re-run `scripts/vivipulse --mode local --build-config config/build-deploy.local.yaml --check-id u64-rest --check-id u64-ftp --check-id u64-telnet` with `VIVIPI_NETWORK_PASSWORD` set.
-6. Re-run the focused tooling slice and `./build` if any Stage 2 auth-path fix is required.
+- Enable the shared U64 network password on the device.
+- Provide the password to the direct tool with `--network-password` or legacy `--ftp-pass`.
+- Provide the password to the ViviPi-integrated path with `VIVIPI_NETWORK_PASSWORD`.
+- Re-run the direct all-probe host command against `192.168.1.13` with the password set.
+- Re-run the targeted direct `ident,raw64` command and confirm `network_password_set=1` while `ident` remains unauthenticated and `raw64` authenticates successfully.
+- Re-run `scripts/vivipulse --mode local --build-config config/build-deploy.local.yaml --check-id u64-rest --check-id u64-ftp --check-id u64-telnet` with `VIVIPI_NETWORK_PASSWORD` set.
+- Re-run the focused tooling slice and `./build` if any Stage 2 auth-path fix is required.
+
+### Stage 2 Completion Notes
+
+- Stage 2 password-enabled validation is now completed.
+- Direct authenticated host-tool validation passed for `ping`, `http`, `ftp`, `telnet`, `ident`, and `raw64` against `192.168.1.13` with `network_password_set=1`.
+- The targeted direct `ident,raw64` rerun also passed with `streams=off`; `ident` remained healthy and `raw64` completed authenticated read operations successfully.
+- One Stage 2 defect was found in the repo-integrated path: `scripts/vivipulse` local-mode `u64-rest` failed with `HTTP 403` while `u64-ftp` and `u64-telnet` succeeded.
+- Root cause: `src/vivipi/runtime/checks.py` accepted HTTP check `password` values in the model but the runtime HTTP executor discarded them instead of sending `X-Password`; `config/checks.local.yaml` also did not pass `${VIVIPI_NETWORK_PASSWORD}` through the local REST checks.
+- Fix applied:
+  - `portable_http_runner(...)` now forwards `password` as `X-Password` in both the standard `http.client` branch and the socket fallback branch.
+  - `config/checks.local.yaml` now sets `password: ${VIVIPI_NETWORK_PASSWORD}` for `C64U REST` and `U64 REST`.
+  - focused runtime regression coverage was added for both HTTP execution branches.
+- Post-fix validation passed:
+  - `python -m pytest -o addopts='' tests/unit/runtime/test_checks.py`
+  - `scripts/vivipulse --mode local --build-config config/build-deploy.local.yaml --check-id u64-rest --check-id u64-ftp --check-id u64-telnet` with `VIVIPI_NETWORK_PASSWORD` set -> `Successes: 3`
+  - `./build` passed.
 
 ## Probe I/O Safety and Observability Plan
 

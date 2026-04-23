@@ -62,6 +62,36 @@
   - optional modem smoke classification: PASS as non-blocking `offline` / `busy`
   - Stage 2 remains deferred until the shared U64 network password is enabled by the user
 
+## 2026-04-23T13:12:14Z
+
+- Completed Stage 2 password-enabled validation after the user enabled the shared U64 network password on the live device.
+- Direct authenticated host-tool validation:
+  - `./.venv/bin/python scripts/u64_connection_test.py --host 192.168.1.13 --network-password pwd --profile stress --probes ping,http,ftp,telnet,ident,raw64 --schedule sequential --runners 1 --duration-s 3 --log-every 1 -v`
+  - observed clean authenticated success across `ping`, `http`, `ftp`, `telnet`, `ident`, and `raw64`; startup line confirmed `network_password_set=1`
+  - authenticated HTTP readwrite operations returned `200`, FTP authenticated and completed readwrite operations, Telnet authenticated and completed menu-abort probes, `ident` remained healthy without device-state mutation, and `raw64` completed authenticated read operations successfully
+- Targeted authenticated direct validation:
+  - `./.venv/bin/python scripts/u64_connection_test.py --host 192.168.1.13 --network-password pwd --probes ident,raw64 --duration-s 5 --log-every 1 -v`
+  - observed `streams=off` with repeated `ident` success and repeated authenticated `raw64` identify/debug-register/flash-metadata operations
+  - noted occasional `ident` iterations around `~1116ms` latency but still `result=OK`; no auth failure or functional regression was observed
+- Repo-integrated password-enabled validation initially failed:
+  - `VIVIPI_NETWORK_PASSWORD='pwd' VIVIPI_NETWORK_USERNAME='' scripts/vivipulse --mode local --build-config config/build-deploy.local.yaml --check-id u64-rest --check-id u64-ftp --check-id u64-telnet` -> `Successes: 2`
+  - artifact trace in `artifacts/vivipulse/20260423T130553.128035Z-local/trace.jsonl` showed the single failing check was `u64-rest` with `HTTP 403`; `u64-ftp` and `u64-telnet` were already `OK`
+- Root cause and fix:
+  - inspected `src/vivipi/runtime/checks.py` and confirmed `portable_http_runner(...)` accepted `password` but discarded it, always sending only `Connection: close`
+  - inspected `config/checks.local.yaml` and confirmed the local `C64U REST` and `U64 REST` checks did not pass `${VIVIPI_NETWORK_PASSWORD}` through at all
+  - updated `src/vivipi/runtime/checks.py` so both the normal `http.client` branch and `_portable_http_runner_socket(...)` send `X-Password` when `password` is configured
+  - updated `config/checks.local.yaml` so `C64U REST` and `U64 REST` include `password: ${VIVIPI_NETWORK_PASSWORD}`
+  - added focused runtime regressions in `tests/unit/runtime/test_checks.py` covering `X-Password` forwarding in both HTTP execution branches
+- Post-fix validation:
+  - `python -m pytest -o addopts='' tests/unit/runtime/test_checks.py` -> `119 passed`
+  - re-ran `VIVIPI_NETWORK_PASSWORD='pwd' VIVIPI_NETWORK_USERNAME='' scripts/vivipulse --mode local --build-config config/build-deploy.local.yaml --check-id u64-rest --check-id u64-ftp --check-id u64-telnet` -> `Successes: 3`
+- Final repository validation:
+  - `./build` -> `732 passed`, total coverage `97.90%`
+- Stage 2 outcome:
+  - direct password-enabled host-tool path: PASS
+  - repo-integrated password-enabled local path: PASS
+  - the Stage 1 and Stage 2 validation/hardening work for the extended U64 network-surface tooling is complete
+
 ## 2026-04-20T16:35:00Z
 
 - Investigated the report that the attached Pico appeared stuck on the boot screen with a non-moving liveness pixel.

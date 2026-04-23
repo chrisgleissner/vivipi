@@ -476,9 +476,8 @@ def portable_http_runner(
     password: str | None = None,
     trace=None,
 ) -> HttpResponseResult:
-    del username, password
     if trace is not None or _is_micropython_runtime():
-        return _portable_http_runner_socket(method, target, timeout_s, trace=trace)
+        return _portable_http_runner_socket(method, target, timeout_s, password=password, trace=trace)
 
     try:
         http_client = _import_module("http.client")
@@ -489,8 +488,11 @@ def portable_http_runner(
     connection_class = http_client.HTTPSConnection if scheme == "https" else http_client.HTTPConnection
     connection = connection_class(host, port, timeout=timeout_s)
     started_at, uses_ticks_ms = _start_timer()
+    headers = {"Connection": "close"}
+    if password:
+        headers["X-Password"] = password
     try:
-        connection.request(method, path, headers={"Connection": "close"})
+        connection.request(method, path, headers=headers)
         response = connection.getresponse()
         body_bytes = response.read()
         return HttpResponseResult(
@@ -1397,7 +1399,7 @@ def _parse_http_response(payload: bytes) -> tuple[int, object]:
     return int(parts[1]), _decode_http_body(payload[header_end + 4 :])
 
 
-def _portable_http_runner_socket(method: str, target: str, timeout_s: int, trace=None) -> HttpResponseResult:
+def _portable_http_runner_socket(method: str, target: str, timeout_s: int, password: str | None = None, trace=None) -> HttpResponseResult:
     scheme, host, port, path = _parse_http_target(target)
     if scheme == "https":
         raise OSError("https unsupported on device")
@@ -1411,6 +1413,8 @@ def _portable_http_runner_socket(method: str, target: str, timeout_s: int, trace
         f"Host: {host_header}",
         "Connection: close",
     ]
+    if password:
+        request_lines.append(f"X-Password: {password}")
     request_lines.extend(("", ""))
     request_payload = "\r\n".join(request_lines).encode("utf-8")
     http_operation = f"{method} {path}"

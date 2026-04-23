@@ -681,13 +681,13 @@ def test_portable_http_runner_prefers_urequests_when_available(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "http.client", SimpleNamespace(HTTPConnection=FakeConnection, HTTPSConnection=FakeConnection))
 
-    result = portable_http_runner("GET", "http://192.0.2.10:8080/checks", 10, password="ignored")
+    result = portable_http_runner("GET", "http://192.0.2.10:8080/checks", 10, password="secret")
 
     assert result.status_code == 200
     assert result.body == {"checks": []}
     assert calls == [
         ("init", "192.0.2.10", 8080, 10),
-        ("request", "GET", "/checks", {"Connection": "close"}),
+        ("request", "GET", "/checks", {"Connection": "close", "X-Password": "secret"}),
         ("close",),
     ]
 
@@ -789,7 +789,11 @@ def test_http_helpers_cover_import_fallback_and_invalid_payloads(monkeypatch):
     fallback_result = runtime_checks.HttpResponseResult(status_code=204, body="ok", latency_ms=1.0, details="HTTP 204")
 
     monkeypatch.setattr(runtime_checks.importlib, "import_module", lambda name: (_ for _ in ()).throw(ImportError("missing")))
-    monkeypatch.setattr(runtime_checks, "_portable_http_runner_socket", lambda method, target, timeout_s, trace=None: fallback_result)
+    monkeypatch.setattr(
+        runtime_checks,
+        "_portable_http_runner_socket",
+        lambda method, target, timeout_s, password=None, trace=None: fallback_result,
+    )
 
     result = portable_http_runner("GET", "http://192.0.2.10:8080/checks", 10)
 
@@ -807,6 +811,36 @@ def test_http_helpers_cover_import_fallback_and_invalid_payloads(monkeypatch):
 
     with pytest.raises(ValueError, match="invalid HTTP status"):
         runtime_checks._parse_http_response(b"HTTP/1.1 OK\r\n\r\nbody")
+
+
+def test_portable_http_runner_socket_adds_x_password_header(monkeypatch):
+    captured = {}
+
+    class FakeSocket:
+        def close(self):
+            return None
+
+    monkeypatch.setattr(runtime_checks, "_open_socket_compat", lambda host, port, timeout_s, deadline, trace=None: FakeSocket())
+    monkeypatch.setattr(
+        runtime_checks,
+        "_socket_sendall",
+        lambda handle, payload, deadline, trace=None, stage=None, operation=None, target=None, budget=None: captured.setdefault("payload", payload),
+    )
+    monkeypatch.setattr(
+        runtime_checks,
+        "_recv_until_closed",
+        lambda handle, deadline, trace=None, stage=None, operation=None, target=None, budget=None: b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+    )
+
+    result = runtime_checks._portable_http_runner_socket(
+        "GET",
+        "http://192.0.2.10:8080/checks",
+        10,
+        password="secret",
+    )
+
+    assert result.status_code == 200
+    assert b"X-Password: secret\r\n" in captured["payload"]
 
 
 def test_import_module_falls_back_without_importlib(monkeypatch):
