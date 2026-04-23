@@ -267,7 +267,8 @@ def authenticate_if_needed(sock: TelnetSocket, settings: RuntimeSettings) -> byt
         response = _merge_post_login_text(response, chunk)
         lowered = response.lower()
         if any(marker.decode("utf-8") in lowered for marker in TELNET_FAILURE_MARKERS) or TELNET_PASSWORD_PROMPT in lowered:
-            raise RuntimeError("login failed")
+            snippet = response[:120].replace("\r", " ").replace("\n", " ").strip()
+            raise RuntimeError(f"login failed for {settings.host}: password prompt persisted or failure marker seen; last response: {snippet!r}")
         if response and not _looks_like_password_echo(response):
             return response.encode("utf-8")
     return b""
@@ -708,7 +709,8 @@ def initial_read_classify(settings: RuntimeSettings) -> str:
             initial_raw = b""
         transcript = collect_visible(sock, initial_raw) if initial_raw else b""
         if contains_any(transcript, TELNET_FAILURE_MARKERS):
-            raise RuntimeError("login failed")
+            snippet = transcript.decode("utf-8", "replace")[:120].replace("\r", " ").replace("\n", " ").strip()
+            raise RuntimeError(f"login failed for {settings.host}: failure marker in banner; transcript: {snippet!r}")
         if transcript:
             cleaned = transcript.decode("utf-8", "replace")
             if looks_like_output(cleaned):

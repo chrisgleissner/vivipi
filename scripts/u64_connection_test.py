@@ -654,7 +654,7 @@ def ordered_probe_reports(
     protocol_rank = {protocol: index for index, protocol in enumerate(PROBE_CHOICES)}
     ordered = sorted(
         results,
-        key=lambda item: (protocol_rank.get(item[1], len(DEFAULT_PROBES)), item[0]),
+        key=lambda item: (protocol_rank.get(item[1], len(PROBE_CHOICES)), item[0]),
     )
     return tuple((protocol, outcome) for _index, protocol, outcome in ordered)
 
@@ -740,7 +740,7 @@ def run_extended(config: ExecutionConfig, settings: RuntimeSettings) -> int:
         ProbeSurface.READ,
         ProbeSurface.READWRITE,
     )
-    state = ExecutionState(settings=settings, include_runner_context=True, runner_count=config.runners)
+    state = ExecutionState(settings=settings, include_runner_context=True, runner_count=config.runners, summary_protocols=tuple(dict.fromkeys(config.probes)))
     stop_event = threading.Event()
     deadline_s = None if config.duration_s is None else time.monotonic() + config.duration_s
 

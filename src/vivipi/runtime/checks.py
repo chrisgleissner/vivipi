@@ -917,7 +917,7 @@ def portable_http_runner(
     try:
         http_client = _import_module("http.client")
     except ImportError:
-        return _portable_http_runner_socket(method, target, timeout_s, trace=trace)
+        return _portable_http_runner_socket(method, target, timeout_s, password=password, trace=trace)
 
     scheme, host, port, path = _parse_http_target(target)
     connection_class = (

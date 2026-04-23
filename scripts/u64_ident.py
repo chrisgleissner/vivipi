@@ -4,6 +4,7 @@ import json
 import os
 import socket
 import time
+from typing import Callable
 
 from u64_connection_runtime import (
     ProbeExecutionContext,
@@ -18,21 +19,53 @@ from u64_connection_runtime import (
 
 IDENT_PORT = 64
 IDENT_TIMEOUT_S = 1.0
+IDENT_RETRY_COUNT = 3
 
 
 def ident_nonce() -> str:
     return f"vivipi-{os.getpid()}-{time.monotonic_ns()}"
 
 
+def _expected_ident_addresses(host: str) -> set[str]:
+    try:
+        return {
+            sockaddr[0]
+            for _family, _socktype, _proto, _canonname, sockaddr in socket.getaddrinfo(
+                host, IDENT_PORT, socket.AF_INET, socket.SOCK_DGRAM
+            )
+        }
+    except socket.gaierror as error:
+        raise RuntimeError(f"unable to resolve ident host {host!r}: {error}") from error
+
+
 def identify_json(settings: RuntimeSettings) -> str:
     nonce = ident_nonce()
+    expected_addresses = _expected_ident_addresses(settings.host)
+    payload: bytes | None = None
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        sock.settimeout(IDENT_TIMEOUT_S)
-        sock.sendto(f"json{nonce}".encode("utf-8"), (settings.host, IDENT_PORT))
-        payload, _address = sock.recvfrom(4096)
+        for _attempt in range(IDENT_RETRY_COUNT):
+            sock.sendto(f"json{nonce}".encode("utf-8"), (settings.host, IDENT_PORT))
+            deadline = time.monotonic() + IDENT_TIMEOUT_S
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                sock.settimeout(remaining)
+                try:
+                    candidate_payload, address = sock.recvfrom(4096)
+                except socket.timeout:
+                    break
+                if address[0] not in expected_addresses:
+                    continue
+                payload = candidate_payload
+                break
+            if payload is not None:
+                break
     finally:
         sock.close()
+    if payload is None:
+        raise RuntimeError("ident request timed out")
     try:
         response = json.loads(payload.decode("utf-8"))
     except Exception as error:
@@ -48,7 +81,7 @@ def identify_json(settings: RuntimeSettings) -> str:
     return f"product={response['product']} hostname={response['hostname']}"
 
 
-def surface_operations(surface: ProbeSurface) -> tuple[tuple[str, callable], ...]:
+def surface_operations(surface: ProbeSurface) -> tuple[tuple[str, Callable[[RuntimeSettings], str]], ...]:
     del surface
     return (("ident_json", identify_json),)
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import socket
 import time
+from typing import Callable
 
 from u64_connection_runtime import (
     ProbeExecutionContext,
@@ -41,12 +42,12 @@ def read_banner(settings: RuntimeSettings) -> str:
             status = "offline"
         else:
             status = "connected"
-        return f"status={status} port={settings.modem_port} banner_bytes={len(text.encode())}"
+        return f"status={status} port={settings.modem_port} banner_bytes={len(chunks)}"
     finally:
         sock.close()
 
 
-def surface_operations(surface: ProbeSurface) -> tuple[tuple[str, callable], ...]:
+def surface_operations(surface: ProbeSurface) -> tuple[tuple[str, Callable[[RuntimeSettings], str]], ...]:
     del surface
     return (("modem_banner", read_banner),)
 

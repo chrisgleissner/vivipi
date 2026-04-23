@@ -197,6 +197,7 @@ def test_ident_probe_requires_json_reply_with_echo(monkeypatch):
             calls.append("close")
 
     monkeypatch.setattr(module, "ident_nonce", lambda: "nonce-1")
+    monkeypatch.setattr(module, "_expected_ident_addresses", lambda host: {"host"})
     monkeypatch.setattr(module.socket, "socket", lambda *args, **kwargs: FakeSocket())
 
     outcome = module.run_probe(make_settings(runtime), runtime.ProbeCorrectness.COMPLETE)
@@ -360,7 +361,7 @@ def test_modem_probe_classifies_offline_banner(monkeypatch):
     outcome = module.run_probe(settings, runtime.ProbeCorrectness.COMPLETE)
 
     assert outcome.result == "OK"
-    assert outcome.detail == "status=offline port=3456 banner_bytes=42"
+    assert outcome.detail == "status=offline port=3456 banner_bytes=43"
     assert calls[-1] == "close"
 
 

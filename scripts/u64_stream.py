@@ -151,7 +151,7 @@ def _build_disable_command(kind: StreamKind) -> bytes:
     return struct.pack("<HH", 0xFF30 + STREAM_IDS[kind], 0)
 
 
-def _is_retryable_stream_control_error(error: BaseException) -> bool:
+def _is_retryable_stream_control_error(error: Exception) -> bool:
     if isinstance(error, (ConnectionResetError, BrokenPipeError, TimeoutError)):
         return True
     if isinstance(error, OSError):
@@ -160,14 +160,14 @@ def _is_retryable_stream_control_error(error: BaseException) -> bool:
 
 
 def _send_command(settings: StreamRuntimeSettings, payload: bytes) -> None:
-    last_error: BaseException | None = None
+    last_error: Exception | None = None
     for delay_s in (*STREAM_CONTROL_RETRY_DELAYS_S, None):
         command_sock = socket.create_connection((settings.host, settings.control_port), timeout=2)
         try:
             u64_raw64.authenticate_socket(command_sock, settings.network_password)
             command_sock.sendall(payload)
             return
-        except BaseException as error:
+        except Exception as error:
             last_error = error
             if delay_s is None or not _is_retryable_stream_control_error(error):
                 raise
