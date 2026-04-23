@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import enum
+import errno
 import socket
 import struct
 import threading
@@ -15,6 +16,7 @@ DEFAULT_CONTROL_PORT = 64
 DEFAULT_PACKET_TIMEOUT_S = 1.0
 DEFAULT_STARTUP_GRACE_S = 2.0
 DEFAULT_RECEIVE_BUFFER_BYTES = 2 * 1024 * 1024
+STREAM_CONTROL_RETRY_DELAYS_S = (0.05, 0.1)
 MAX_ERROR_LOGS = 20
 ERROR_LOG_INTERVAL = 100
 VIDEO_PACKET_SIZE = 780
@@ -148,13 +150,31 @@ def _build_disable_command(kind: StreamKind) -> bytes:
     return struct.pack("<HH", 0xFF30 + STREAM_IDS[kind], 0)
 
 
+def _is_retryable_stream_control_error(error: BaseException) -> bool:
+    if isinstance(error, (ConnectionResetError, BrokenPipeError, TimeoutError)):
+        return True
+    if isinstance(error, OSError):
+        return error.errno in {errno.ECONNRESET, errno.EPIPE, errno.ECONNABORTED, errno.ETIMEDOUT}
+    return False
+
+
 def _send_command(settings: StreamRuntimeSettings, payload: bytes) -> None:
-    command_sock = socket.create_connection((settings.host, settings.control_port), timeout=2)
-    try:
-        u64_raw64.authenticate_socket(command_sock, settings.network_password)
-        command_sock.sendall(payload)
-    finally:
-        command_sock.close()
+    last_error: BaseException | None = None
+    for delay_s in (*STREAM_CONTROL_RETRY_DELAYS_S, None):
+        command_sock = socket.create_connection((settings.host, settings.control_port), timeout=2)
+        try:
+            u64_raw64.authenticate_socket(command_sock, settings.network_password)
+            command_sock.sendall(payload)
+            return
+        except BaseException as error:
+            last_error = error
+            if delay_s is None or not _is_retryable_stream_control_error(error):
+                raise
+        finally:
+            command_sock.close()
+        time.sleep(delay_s)
+    if last_error is not None:
+        raise last_error
 
 
 def _sequence_gap(expected: int, actual: int) -> tuple[int, bool]:

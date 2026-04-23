@@ -92,6 +92,24 @@
   - repo-integrated password-enabled local path: PASS
   - the Stage 1 and Stage 2 validation/hardening work for the extended U64 network-surface tooling is complete
 
+## 2026-04-23T13:43:29Z
+
+- Investigated the follow-up user report that the default authenticated direct-tool command could crash during stream startup with `ConnectionResetError` inside `u64_raw64.authenticate_socket(...)` while enabling audio/video streams.
+- Root-cause hypothesis and discriminating checks:
+  - isolated authenticated stream startup was healthy for `--stream audio`, `--stream video`, and `--stream audio video`, which ruled out a basic password/auth incompatibility in the stream-control path
+  - the exact default command no longer reproduced the startup crash consistently, which pointed to a transient TCP/64 control-socket reset rather than a deterministic protocol bug
+- Minimal hardening applied:
+  - updated `scripts/u64_stream.py` so `_send_command(...)` retries transient control-channel transport failures (`ConnectionResetError`, timeout, broken pipe, equivalent retryable `OSError`s) with short backoff before failing
+  - kept non-transient failures, including genuine authentication rejection, as immediate failures
+  - added focused regression coverage in `tests/unit/tooling/test_u64_stream.py` proving a first auth-reset attempt is retried and the second successful attempt completes the command
+- Validation:
+  - `python -m pytest -o addopts='' tests/unit/tooling/test_u64_stream.py` -> `8 passed`
+  - `cd /home/chris/dev/vivipi/scripts && /home/chris/dev/vivipi/.venv/bin/python u64_connection_test.py --network-password pwd --duration-s 5` -> both streams enabled successfully; no startup auth-reset crash
+  - `cd /home/chris/dev/vivipi && python -m pytest -o addopts='' tests/unit/tooling/test_u64_stream.py tests/unit/tooling/test_u64_connection_test.py` -> `36 passed`
+  - `./build` -> `733 passed`, total coverage `97.90%`
+- Residual observation:
+  - the longer default authenticated soak run still showed later telnet/stream degradation under sustained load, but that is separate from the reported startup crash and was not changed by this fix
+
 ## 2026-04-20T16:35:00Z
 
 - Investigated the report that the attached Pico appeared stuck on the boot screen with a non-moving liveness pixel.

@@ -111,3 +111,43 @@ def test_send_command_authenticates_with_shared_network_password(monkeypatch):
         ("sendall", b"payload"),
         "close",
     ]
+
+
+def test_send_command_retries_transient_auth_reset(monkeypatch):
+    module = load_module()
+    calls = []
+
+    class FakeSocket:
+        def __init__(self, label):
+            self.label = label
+
+        def sendall(self, payload):
+            calls.append((self.label, "sendall", payload))
+
+        def close(self):
+            calls.append((self.label, "close"))
+
+    sockets = iter((FakeSocket("first"), FakeSocket("second")))
+    monkeypatch.setattr(module.socket, "create_connection", lambda address, timeout: next(sockets))
+    monkeypatch.setattr(module.time, "sleep", lambda delay_s: calls.append(("sleep", delay_s)))
+
+    def authenticate(sock, password):
+        calls.append((sock.label, "auth", password))
+        if sock.label == "first":
+            raise ConnectionResetError(104, "Connection reset by peer")
+
+    monkeypatch.setattr(module.u64_raw64, "authenticate_socket", authenticate)
+
+    module._send_command(
+        module.StreamRuntimeSettings(host="host", control_port=64, network_password="secret"),
+        b"payload",
+    )
+
+    assert calls == [
+        ("first", "auth", "secret"),
+        ("first", "close"),
+        ("sleep", module.STREAM_CONTROL_RETRY_DELAYS_S[0]),
+        ("second", "auth", "secret"),
+        ("second", "sendall", b"payload"),
+        ("second", "close"),
+    ]

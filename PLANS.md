@@ -80,6 +80,10 @@ Status: COMPLETED
   - `python -m pytest -o addopts='' tests/unit/runtime/test_checks.py`
   - `scripts/vivipulse --mode local --build-config config/build-deploy.local.yaml --check-id u64-rest --check-id u64-ftp --check-id u64-telnet` with `VIVIPI_NETWORK_PASSWORD` set -> `Successes: 3`
   - `./build` passed.
+- Follow-up hardening after Stage 2:
+	- a later real-device repro showed an intermittent authenticated stream-control startup failure in the default soak command, with `ConnectionResetError` during raw64 authentication while enabling streams
+	- `scripts/u64_stream.py` now retries transient TCP/64 transport failures during `_send_command(...)` with short backoff, while preserving immediate failure for non-transient errors such as real authentication rejection
+	- focused regression coverage was added for the retry path, the authenticated startup path was re-run successfully against the live device, and `./build` remained green
 
 ## Probe I/O Safety and Observability Plan
 
