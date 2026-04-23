@@ -27,6 +27,10 @@ TELNET_IDLE_TIMEOUT_S = 0.12
 TELNET_POST_DATA_IDLE_TIMEOUT_S = 0.02
 TELNET_COMMAND_RESPONSE_TIMEOUT_S = 0.12
 TELNET_MAX_EMPTY_READS = 1
+TELNET_LOGIN_INITIAL_TIMEOUT_S = 1.0
+TELNET_LOGIN_QUIET_TIMEOUT_S = 0.2
+TELNET_LOGIN_MAX_EMPTY_READS = 4
+TELNET_AUTH_ENTER = b"\r\n"
 IAC = 255
 DONT = 254
 DO = 253
@@ -43,6 +47,7 @@ TELNET_KEY_ESC = b"\x1b"
 TELNET_KEY_ENTER = b"\r"
 TELNET_FAILURE_MARKERS = (b"incorrect", b"failed", b"denied", b"invalid")
 TELNET_SAVE_FLASH_MARKERS = ("save changes to flash", "yes", "no")
+TELNET_PASSWORD_PROMPT = "password:"
 AUDIO_MIXER_WRITE_VALUE_PATTERN = re.compile(r"Vol UltiSid 1\s+(OFF|[+-]?\d+ dB|\d+ dB)")
 
 
@@ -52,6 +57,28 @@ class TelnetSocket(Protocol):
     def recv(self, bufsize: int) -> bytes: ...
 
     def close(self) -> None: ...
+
+
+class PrefetchedTelnetSocket:
+    def __init__(self, sock: TelnetSocket, prefetched: bytes):
+        self._sock = sock
+        self._prefetched = prefetched
+
+    def sendall(self, data: bytes) -> None:
+        self._sock.sendall(data)
+
+    def recv(self, bufsize: int) -> bytes:
+        if self._prefetched:
+            chunk = self._prefetched[:bufsize]
+            self._prefetched = self._prefetched[bufsize:]
+            return chunk
+        return self._sock.recv(bufsize)
+
+    def close(self) -> None:
+        self._sock.close()
+
+    def __getattr__(self, name: str):
+        return getattr(self._sock, name)
 
 
 @dataclass
@@ -197,7 +224,54 @@ def strip_vt_text(value: bytes) -> str:
 def connect(settings: RuntimeSettings) -> TelnetSocket:
     sock = socket.create_connection((settings.host, settings.telnet_port), timeout=2)
     sock.settimeout(TELNET_IDLE_TIMEOUT_S)
+    prefetched = authenticate_if_needed(sock, settings)
+    if prefetched:
+        return PrefetchedTelnetSocket(sock, prefetched)
     return sock
+
+
+def _looks_like_password_echo(text: str) -> bool:
+    stripped = text.strip()
+    return bool(stripped) and set(stripped) <= {"*"}
+
+
+def _merge_post_login_text(existing: str, chunk: str) -> str:
+    chunk = chunk.strip()
+    if not chunk:
+        return existing
+    if _looks_like_password_echo(chunk):
+        return existing
+    if not existing or _looks_like_password_echo(existing):
+        return chunk
+    return f"{existing} {chunk}".strip()
+
+
+def authenticate_if_needed(sock: TelnetSocket, settings: RuntimeSettings) -> bytes:
+    if not settings.network_password:
+        return b""
+    prompt = read_until_idle(sock, max_empty_reads=2)
+    if TELNET_PASSWORD_PROMPT not in prompt.lower():
+        sock.sendall(TELNET_KEY_ENTER)
+        prompt = read_until_idle(sock, max_empty_reads=2)
+        if TELNET_PASSWORD_PROMPT not in prompt.lower():
+            return b""
+    sock.sendall(settings.network_password.encode("utf-8") + TELNET_AUTH_ENTER)
+    response = ""
+    for _ in range(2):
+        chunk = read_until_idle(
+            sock,
+            max_empty_reads=TELNET_LOGIN_MAX_EMPTY_READS,
+            initial_timeout_s=TELNET_LOGIN_INITIAL_TIMEOUT_S,
+            quiet_timeout_s=TELNET_LOGIN_QUIET_TIMEOUT_S,
+        )
+        response = _merge_post_login_text(response, chunk)
+        lowered = response.lower()
+        if any(marker.decode("utf-8") in lowered for marker in TELNET_FAILURE_MARKERS) or TELNET_PASSWORD_PROMPT in lowered:
+            snippet = response[:120].replace("\r", " ").replace("\n", " ").strip()
+            raise RuntimeError(f"login failed for {settings.host}: password prompt persisted or failure marker seen; last response: {snippet!r}")
+        if response and not _looks_like_password_echo(response):
+            return response.encode("utf-8")
+    return b""
 
 
 def _wait_for_readable(sock: TelnetSocket, timeout_s: float) -> bool:
@@ -635,7 +709,8 @@ def initial_read_classify(settings: RuntimeSettings) -> str:
             initial_raw = b""
         transcript = collect_visible(sock, initial_raw) if initial_raw else b""
         if contains_any(transcript, TELNET_FAILURE_MARKERS):
-            raise RuntimeError("login failed")
+            snippet = transcript.decode("utf-8", "replace")[:120].replace("\r", " ").replace("\n", " ").strip()
+            raise RuntimeError(f"login failed for {settings.host}: failure marker in banner; transcript: {snippet!r}")
         if transcript:
             cleaned = transcript.decode("utf-8", "replace")
             if looks_like_output(cleaned):
@@ -876,8 +951,7 @@ def run_probe(
     sock = None
     started_at = time.perf_counter_ns()
     try:
-        sock = socket.create_connection((settings.host, settings.telnet_port), timeout=2)
-        sock.settimeout(TELNET_IDLE_TIMEOUT_S)
+        sock = connect(settings)
         sock.sendall(b"\r\n")
         visible = bytearray()
         while True:

@@ -244,7 +244,7 @@ def test_ordered_definitions_for_pass_supports_heavy_first():
         VivipulseProfile(check_order="network-heavy-first"),
     )
 
-    assert [definition.identifier for definition in ordered] == ["beta", "gamma", "alpha"]
+    assert [definition.identifier for definition in ordered] == ["gamma", "beta", "alpha"]
 
 
 def test_ordered_definitions_for_pass_supports_identifier_order_and_empty_runner_pass_index():
@@ -452,9 +452,9 @@ def test_host_probe_runner_stops_same_host_traffic_after_first_transport_failure
     def executor(definition: CheckDefinition, observed_at_s: float):
         if definition.identifier == "alpha":
             return success_result(definition, observed_at_s)
-        if definition.identifier == "beta":
+        if definition.identifier == "gamma":
             return failure_result(definition, observed_at_s, detail="timeout")
-        raise AssertionError("gamma should not execute after the host is blocked")
+        raise AssertionError("beta should not execute after the host is blocked")
 
     runner = HostProbeRunner(
         definitions,
@@ -468,14 +468,14 @@ def test_host_probe_runner_stops_same_host_traffic_after_first_transport_failure
 
     outcome = runner.run_passes(1)
 
-    assert [event.check_id for event in outcome.trace_events] == ["alpha", "beta"]
+    assert [event.check_id for event in outcome.trace_events] == ["alpha", "gamma"]
     assert outcome.transport_failure_count == 1
     assert outcome.blocked_host_keys == ("shared.local",)
     assert len(outcome.failure_boundaries) == 1
     boundary = outcome.failure_boundaries[0]
     assert boundary.last_success is not None
     assert boundary.last_success.check_id == "alpha"
-    assert boundary.first_failure.check_id == "beta"
+    assert boundary.first_failure.check_id == "gamma"
 
 
 def test_host_probe_runner_records_executor_exception_and_stop_on_failure():
@@ -506,7 +506,7 @@ def test_host_probe_runner_can_resume_after_interactive_recovery():
         make_definition("beta", check_type=CheckType.HTTP, target="http://shared.local/health"),
         make_definition("gamma", check_type=CheckType.FTP, target="ftp://shared.local"),
     )
-    failures = {"beta": 1}
+    failures = {"gamma": 1}
 
     def executor(definition: CheckDefinition, observed_at_s: float):
         if failures.get(definition.identifier):
@@ -524,12 +524,12 @@ def test_host_probe_runner_can_resume_after_interactive_recovery():
         sleep=clock.sleep,
         interactive_recovery=True,
         resume_after_recovery=True,
-        recovery_callback=lambda boundary: boundary.first_failure.check_id == "beta",
+        recovery_callback=lambda boundary: boundary.first_failure.check_id == "gamma",
     )
 
     outcome = runner.run_passes(1)
 
-    assert [event.check_id for event in outcome.trace_events] == ["alpha", "beta", "gamma"]
+    assert [event.check_id for event in outcome.trace_events] == ["alpha", "gamma", "beta"]
     assert outcome.recovery_count == 1
     assert outcome.blocked_host_keys == ()
 

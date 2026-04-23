@@ -6,6 +6,8 @@ from enum import Enum
 
 class CheckType(str, Enum):
     PING = "PING"
+    IDENT = "IDENT"
+    DMA = "DMA"
     HTTP = "HTTP"
     FTP = "FTP"
     TELNET = "TELNET"

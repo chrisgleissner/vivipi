@@ -1,5 +1,6 @@
 import sys
 import builtins
+import struct
 from types import SimpleNamespace
 
 import pytest
@@ -26,8 +27,10 @@ from vivipi.runtime.checks import (
     build_executor,
     build_runtime_definitions,
     load_runtime_checks,
+    portable_dma_runner,
     portable_ftp_runner,
     portable_http_runner,
+    portable_ident_runner,
     portable_ping_runner,
     portable_telnet_runner,
 )
@@ -35,7 +38,10 @@ from vivipi.runtime.checks import (
 
 class FakeSocket:
     def __init__(self, responses):
-        self._responses = [response if isinstance(response, bytes) else response.encode("utf-8") for response in responses]
+        self._responses = [
+            response if isinstance(response, bytes) else response.encode("utf-8")
+            for response in responses
+        ]
         self.sent = []
         self.closed = False
 
@@ -154,9 +160,24 @@ def test_probe_end_helper_normalization_covers_enum_name_and_service_fallback_pa
 
     assert runtime_checks._check_type_name(SimpleNamespace(check_type=FakeEnumLike())) == "HTTP"
     assert runtime_checks._status_text(FakeEnumLike()) == "http"
-    assert runtime_checks._probe_end_status(definition, SimpleNamespace(observations=(), replace_source=True)) == "OK"
-    assert runtime_checks._probe_end_detail(definition, SimpleNamespace(observations=(), replace_source=True)) == ""
-    assert runtime_checks._probe_end_latency_ms(definition, SimpleNamespace(observations=(), probe_latency_ms=None)) is None
+    assert (
+        runtime_checks._probe_end_status(
+            definition, SimpleNamespace(observations=(), replace_source=True)
+        )
+        == "OK"
+    )
+    assert (
+        runtime_checks._probe_end_detail(
+            definition, SimpleNamespace(observations=(), replace_source=True)
+        )
+        == ""
+    )
+    assert (
+        runtime_checks._probe_end_latency_ms(
+            definition, SimpleNamespace(observations=(), probe_latency_ms=None)
+        )
+        is None
+    )
 
     fallback_definition = build_runtime_definitions(
         {
@@ -171,14 +192,23 @@ def test_probe_end_helper_normalization_covers_enum_name_and_service_fallback_pa
         }
     )[0]
     fallback_result = SimpleNamespace(
-        observations=(SimpleNamespace(identifier="other", status=Status.FAIL, details="timeout", latency_ms=9.0),),
+        observations=(
+            SimpleNamespace(
+                identifier="other", status=Status.FAIL, details="timeout", latency_ms=9.0
+            ),
+        ),
         probe_latency_ms=None,
     )
 
     assert runtime_checks._probe_end_status(fallback_definition, fallback_result) == "FAIL"
     assert runtime_checks._probe_end_detail(fallback_definition, fallback_result) == "timeout"
     assert runtime_checks._probe_end_latency_ms(fallback_definition, fallback_result) == 9.0
-    assert runtime_checks._probe_end_status(fallback_definition, SimpleNamespace(observations=(), probe_latency_ms=None)) == "?"
+    assert (
+        runtime_checks._probe_end_status(
+            fallback_definition, SimpleNamespace(observations=(), probe_latency_ms=None)
+        )
+        == "?"
+    )
     assert fallback_definition.method == "GET"
 
 
@@ -263,18 +293,49 @@ def test_telnet_session_helpers_cover_negotiated_and_fallback_failure_paths():
     assert negotiated_detail == "no telnet response"
     assert fallback_status == Status.FAIL
     assert fallback_detail == "refused"
-    assert runtime_checks._telnet_failure_detail({"close_reason": "idle-timeout", "session_duration_ms": 250.0}) == "no telnet response"
+    assert (
+        runtime_checks._telnet_failure_detail(
+            {"close_reason": "idle-timeout", "session_duration_ms": 250.0}
+        )
+        == "no telnet response"
+    )
 
 
 def test_telnet_failure_detail_covers_immediate_close_and_incomplete_response_paths():
-    assert runtime_checks._telnet_failure_detail({"close_reason": "remote-close", "session_duration_ms": 10.0}) == "closed immediately"
-    assert runtime_checks._telnet_failure_detail({"close_reason": "failure-marker", "session_duration_ms": 500.0}) == "telnet failure marker present"
-    assert runtime_checks._telnet_failure_detail({"close_reason": "chunk-limit", "session_duration_ms": 500.0, "has_visible_text": True}) == "response not fully consumed"
-    assert runtime_checks._telnet_failure_detail({"close_reason": "chunk-limit", "session_duration_ms": 500.0, "has_visible_text": False}) == "no telnet response"
+    assert (
+        runtime_checks._telnet_failure_detail(
+            {"close_reason": "remote-close", "session_duration_ms": 10.0}
+        )
+        == "closed immediately"
+    )
+    assert (
+        runtime_checks._telnet_failure_detail(
+            {"close_reason": "failure-marker", "session_duration_ms": 500.0}
+        )
+        == "telnet failure marker present"
+    )
+    assert (
+        runtime_checks._telnet_failure_detail(
+            {"close_reason": "chunk-limit", "session_duration_ms": 500.0, "has_visible_text": True}
+        )
+        == "response not fully consumed"
+    )
+    assert (
+        runtime_checks._telnet_failure_detail(
+            {"close_reason": "chunk-limit", "session_duration_ms": 500.0, "has_visible_text": False}
+        )
+        == "no telnet response"
+    )
 
 
 def test_update_telnet_text_state_ignores_control_and_non_ascii_bytes():
-    visible_bytes, has_visible_text, pending_trailing_whitespace, failure_window, failure_detected = runtime_checks._update_telnet_text_state(
+    (
+        visible_bytes,
+        has_visible_text,
+        pending_trailing_whitespace,
+        failure_window,
+        failure_detected,
+    ) = runtime_checks._update_telnet_text_state(
         bytes((1, ord("A"), 200, ord(" "), ord("B"))),
         visible_bytes=0,
         has_visible_text=False,
@@ -338,6 +399,32 @@ def test_build_runtime_definitions_reads_ftp_telnet_credentials_and_blank_auth()
     assert definitions[1].password is None
 
 
+def test_build_runtime_definitions_reads_ident_and_dma_checks():
+    definitions = build_runtime_definitions(
+        {
+            "checks": [
+                {
+                    "id": "u64-ident",
+                    "name": "U64 Ident",
+                    "type": "IDENT",
+                    "target": "ident://u64.example.local:64",
+                },
+                {
+                    "id": "u64-dma",
+                    "name": "U64 DMA",
+                    "type": "DMA",
+                    "target": "dma://u64.example.local:64",
+                    "password": "secret",
+                },
+            ]
+        }
+    )
+
+    assert definitions[0].check_type == CheckType.IDENT
+    assert definitions[1].check_type == CheckType.DMA
+    assert definitions[1].password == "secret"
+
+
 def test_build_executor_uses_supplied_runners():
     definition = build_runtime_definitions(
         {
@@ -355,7 +442,9 @@ def test_build_executor_uses_supplied_runners():
     )[0]
 
     executor = build_executor(
-        ping_runner=lambda target, timeout_s: PingProbeResult(ok=True, latency_ms=12.0, details="reachable"),
+        ping_runner=lambda target, timeout_s: PingProbeResult(
+            ok=True, latency_ms=12.0, details="reachable"
+        ),
         http_runner=None,
     )
 
@@ -382,8 +471,12 @@ def test_build_executor_trace_sink_emits_probe_lifecycle_events():
     captured = []
 
     executor = build_executor(
-        ping_runner=lambda target, timeout_s: PingProbeResult(ok=True, latency_ms=12.0, details="reachable"),
-        trace_sink=lambda definition, event, fields: captured.append((definition.identifier, event, dict(fields))),
+        ping_runner=lambda target, timeout_s: PingProbeResult(
+            ok=True, latency_ms=12.0, details="reachable"
+        ),
+        trace_sink=lambda definition, event, fields: captured.append(
+            (definition.identifier, event, dict(fields))
+        ),
     )
 
     executor(definition, 10.0)
@@ -399,7 +492,9 @@ def test_build_executor_trace_sink_emits_probe_lifecycle_events():
     assert captured[-1][2]["failed"] == 0
 
 
-def test_build_executor_tracks_probe_type_counters_across_issued_succeeded_and_failed_attempts(monkeypatch):
+def test_build_executor_tracks_probe_type_counters_across_issued_succeeded_and_failed_attempts(
+    monkeypatch,
+):
     definitions = build_runtime_definitions(
         {
             "checks": [
@@ -438,13 +533,19 @@ def test_build_executor_tracks_probe_type_counters_across_issued_succeeded_and_f
 
     executor = build_executor(
         ping_runner=ping_runner,
-        trace_sink=lambda definition, event, fields: captured.append((definition.identifier, event, dict(fields))),
+        trace_sink=lambda definition, event, fields: captured.append(
+            (definition.identifier, event, dict(fields))
+        ),
     )
 
     executor(definitions[0], 10.0)
     executor(definitions[1], 11.0)
 
-    monkeypatch.setattr(runtime_checks, "execute_check", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(
+        runtime_checks,
+        "execute_check",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
     with pytest.raises(RuntimeError, match="boom"):
         executor(definitions[0], 12.0)
 
@@ -534,7 +635,11 @@ def test_build_executor_probe_end_adds_only_non_null_probe_metadata(monkeypatch)
         ),
     )
 
-    executor = build_executor(trace_sink=lambda definition, event, fields: captured.append((definition.identifier, event, dict(fields))))
+    executor = build_executor(
+        trace_sink=lambda definition, event, fields: captured.append(
+            (definition.identifier, event, dict(fields))
+        )
+    )
     executor(definition, 10.0)
 
     assert captured[-1] == (
@@ -576,7 +681,11 @@ def test_build_executor_probe_end_uses_probe_level_latency_for_service_checks():
     captured = []
 
     executor = build_executor(
-        http_runner=lambda method, target, timeout_s, username=None, password=None: runtime_checks.HttpResponseResult(
+        http_runner=lambda method,
+        target,
+        timeout_s,
+        username=None,
+        password=None: runtime_checks.HttpResponseResult(
             status_code=200,
             body={
                 "checks": [
@@ -591,7 +700,9 @@ def test_build_executor_probe_end_uses_probe_level_latency_for_service_checks():
             latency_ms=7.5,
             details="HTTP 200",
         ),
-        trace_sink=lambda definition, event, fields: captured.append((definition.identifier, event, dict(fields))),
+        trace_sink=lambda definition, event, fields: captured.append(
+            (definition.identifier, event, dict(fields))
+        ),
     )
 
     executor(definition, 10.0)
@@ -634,7 +745,9 @@ def test_build_executor_uses_supplied_ftp_and_telnet_runners():
     )[0]
     calls = []
     executor = build_executor(
-        ping_runner=lambda target, timeout_s: PingProbeResult(ok=True, latency_ms=1.0, details="reachable"),
+        ping_runner=lambda target, timeout_s: PingProbeResult(
+            ok=True, latency_ms=1.0, details="reachable"
+        ),
         http_runner=None,
         ftp_runner=lambda target, timeout_s, username, password: (
             calls.append(("ftp", target, timeout_s, username, password))
@@ -655,6 +768,227 @@ def test_build_executor_uses_supplied_ftp_and_telnet_runners():
         ("ftp", "ftp://nas.example.local", 10, "admin", "secret"),
         ("telnet", "telnet://switch.example.local", 10, None, None),
     ]
+
+
+def test_build_executor_uses_builtin_ident_and_dma_runners(monkeypatch):
+    ident_definition = build_runtime_definitions(
+        {
+            "checks": [
+                {
+                    "id": "u64-ident",
+                    "name": "U64 Ident",
+                    "type": "IDENT",
+                    "target": "ident://u64.example.local:64",
+                }
+            ]
+        }
+    )[0]
+    dma_definition = build_runtime_definitions(
+        {
+            "checks": [
+                {
+                    "id": "u64-dma",
+                    "name": "U64 DMA",
+                    "type": "DMA",
+                    "target": "dma://u64.example.local:64",
+                    "password": "secret",
+                }
+            ]
+        }
+    )[0]
+    calls = []
+
+    monkeypatch.setattr(
+        runtime_checks,
+        "portable_ident_runner",
+        lambda target, timeout_s, trace=None: (
+            calls.append(("ident", target, timeout_s, trace is not None))
+            or PingProbeResult(ok=True, latency_ms=5.0, details="product=U64 hostname=u64")
+        ),
+    )
+    monkeypatch.setattr(
+        runtime_checks,
+        "portable_dma_runner",
+        lambda target, timeout_s, password=None, trace=None: (
+            calls.append(("dma", target, timeout_s, password, trace is not None))
+            or PingProbeResult(ok=True, latency_ms=7.0, details="title=U64 debug_reg=0x5A")
+        ),
+    )
+
+    executor = build_executor(http_runner=None)
+
+    ident_result = executor(ident_definition, 10.0)
+    dma_result = executor(dma_definition, 11.0)
+
+    assert ident_result.observations[0].status == Status.OK
+    assert dma_result.observations[0].status == Status.OK
+    assert calls == [
+        ("ident", "ident://u64.example.local:64", 10, False),
+        ("dma", "dma://u64.example.local:64", 10, "secret", False),
+    ]
+
+
+def test_portable_ident_runner_accepts_valid_json_echo(monkeypatch):
+    calls = []
+
+    class FakeIdentSocket:
+        def settimeout(self, timeout):
+            calls.append(("settimeout", timeout))
+
+        def sendto(self, payload, address):
+            calls.append(("sendto", payload, address))
+
+        def recvfrom(self, size):
+            del size
+            return (
+                b'{"product":"U64","firmware_version":"3.11","hostname":"u64","your_string":"nonce-1"}',
+                ("u64.example.local", 64),
+            )
+
+        def close(self):
+            calls.append("close")
+
+    monkeypatch.setattr(runtime_checks, "_probe_nonce", lambda: "nonce-1")
+    monkeypatch.setattr(runtime_checks.socket, "socket", lambda *args, **kwargs: FakeIdentSocket())
+
+    result = portable_ident_runner("ident://u64.example.local:64", 10)
+
+    assert result.ok is True
+    assert result.details == "product=U64 hostname=u64"
+    assert ("sendto", b"jsonnonce-1", ("u64.example.local", 64)) in calls
+    assert calls[-1] == "close"
+
+
+def test_portable_ident_runner_retries_on_timeout_then_succeeds(monkeypatch):
+    attempts = []
+    recvfrom_call_count = {"count": 0}
+
+    class TimeoutThenSuccessSocket:
+        def settimeout(self, timeout):
+            attempts.append(("settimeout", timeout))
+
+        def sendto(self, payload, address):
+            attempts.append(("sendto", payload, address))
+
+        def recvfrom(self, size):
+            del size
+            recvfrom_call_count["count"] += 1
+            if recvfrom_call_count["count"] == 1:
+                raise OSError(110, "timed out")
+            return (
+                b'{"product":"U64","firmware_version":"3.11","hostname":"u64","your_string":"nonce-1"}',
+                ("u64.example.local", 64),
+            )
+
+        def close(self):
+            attempts.append("close")
+
+    monkeypatch.setattr(runtime_checks, "_probe_nonce", lambda: "nonce-1")
+    monkeypatch.setattr(
+        runtime_checks.socket, "socket", lambda *args, **kwargs: TimeoutThenSuccessSocket()
+    )
+
+    result = portable_ident_runner("ident://u64.example.local:64", 10)
+
+    assert result.ok is True
+    assert result.details == "product=U64 hostname=u64"
+    sendto_calls = [a for a in attempts if isinstance(a, tuple) and a[0] == "sendto"]
+    assert len(sendto_calls) == 2
+
+
+def test_portable_ident_runner_fails_after_retries_exhausted(monkeypatch):
+    attempts = []
+
+    class AlwaysTimeoutSocket:
+        def settimeout(self, timeout):
+            attempts.append(("settimeout", timeout))
+
+        def sendto(self, payload, address):
+            attempts.append(("sendto", payload, address))
+
+        def recvfrom(self, size):
+            del size
+            raise OSError(110, "timed out")
+
+        def close(self):
+            attempts.append("close")
+
+    monkeypatch.setattr(runtime_checks, "_probe_nonce", lambda: "nonce-1")
+    monkeypatch.setattr(
+        runtime_checks.socket, "socket", lambda *args, **kwargs: AlwaysTimeoutSocket()
+    )
+
+    result = portable_ident_runner("ident://u64.example.local:64", 10)
+
+    assert result.ok is False
+    sendto_calls = [a for a in attempts if isinstance(a, tuple) and a[0] == "sendto"]
+    assert len(sendto_calls) == runtime_checks.IDENT_MAX_ATTEMPTS
+
+
+def test_portable_dma_runner_authenticates_and_reads_metadata(monkeypatch):
+    calls = []
+
+    class FakeDmaSocket:
+        def __init__(self):
+            self.responses = [
+                b"\x01",
+                b"\x03",
+                b"U64",
+                b"\x5a",
+                (256).to_bytes(4, "little"),
+                (4096).to_bytes(4, "little"),
+            ]
+
+        def settimeout(self, timeout):
+            calls.append(("settimeout", timeout))
+
+        def sendall(self, payload):
+            calls.append(("sendall", payload))
+
+        def recv(self, size):
+            response = self.responses.pop(0)
+            assert len(response) == size
+            return response
+
+        def close(self):
+            calls.append("close")
+
+    monkeypatch.setattr(
+        runtime_checks,
+        "_maybe_collect_gc",
+        lambda min_free_bytes=runtime_checks.TELNET_RECV_CHUNK_SIZE * 4: None,
+    )
+    monkeypatch.setattr(
+        runtime_checks,
+        "_open_socket_compat",
+        lambda host, port, timeout_s, deadline, trace=None: FakeDmaSocket(),
+    )
+
+    result = portable_dma_runner("dma://u64.example.local:64", 10, password="secret")
+
+    assert result.ok is True
+    assert result.details == "title=U64 debug_reg=0x5A flash_page_size=256 flash_pages=4096"
+    send_calls = [entry for entry in calls if isinstance(entry, tuple) and entry[0] == "sendall"]
+
+    assert send_calls == [
+        (
+            "sendall",
+            runtime_checks._dma_command_frame(
+                runtime_checks.DMA_SOCKET_CMD_AUTHENTICATE, b"secret"
+            ),
+        ),
+        ("sendall", runtime_checks._dma_command_frame(runtime_checks.DMA_SOCKET_CMD_IDENTIFY)),
+        ("sendall", runtime_checks._dma_command_frame(runtime_checks.DMA_SOCKET_CMD_DEBUG_REG)),
+        (
+            "sendall",
+            runtime_checks._dma_command_frame(runtime_checks.DMA_SOCKET_CMD_READFLASH, b"\x00"),
+        ),
+        (
+            "sendall",
+            runtime_checks._dma_command_frame(runtime_checks.DMA_SOCKET_CMD_READFLASH, b"\x01"),
+        ),
+    ]
+    assert "close" in calls
 
 
 def test_portable_http_runner_prefers_urequests_when_available(monkeypatch):
@@ -679,15 +1013,19 @@ def test_portable_http_runner_prefers_urequests_when_available(monkeypatch):
         def close(self):
             calls.append(("close",))
 
-    monkeypatch.setitem(sys.modules, "http.client", SimpleNamespace(HTTPConnection=FakeConnection, HTTPSConnection=FakeConnection))
+    monkeypatch.setitem(
+        sys.modules,
+        "http.client",
+        SimpleNamespace(HTTPConnection=FakeConnection, HTTPSConnection=FakeConnection),
+    )
 
-    result = portable_http_runner("GET", "http://192.0.2.10:8080/checks", 10, password="ignored")
+    result = portable_http_runner("GET", "http://192.0.2.10:8080/checks", 10, password="secret")
 
     assert result.status_code == 200
     assert result.body == {"checks": []}
     assert calls == [
         ("init", "192.0.2.10", 8080, 10),
-        ("request", "GET", "/checks", {"Connection": "close"}),
+        ("request", "GET", "/checks", {"Connection": "close", "X-Password": "secret"}),
         ("close",),
     ]
 
@@ -703,7 +1041,11 @@ def test_portable_http_runner_reports_transient_transport_error_without_retry(mo
         def close(self):
             return None
 
-    monkeypatch.setitem(sys.modules, "http.client", SimpleNamespace(HTTPConnection=BrokenConnection, HTTPSConnection=BrokenConnection))
+    monkeypatch.setitem(
+        sys.modules,
+        "http.client",
+        SimpleNamespace(HTTPConnection=BrokenConnection, HTTPSConnection=BrokenConnection),
+    )
 
     result = portable_http_runner("GET", "http://192.0.2.10:8080/checks", 10)
 
@@ -731,7 +1073,11 @@ def test_portable_http_runner_falls_back_to_response_text_when_json_parsing_fail
         def close(self):
             return None
 
-    monkeypatch.setitem(sys.modules, "http.client", SimpleNamespace(HTTPConnection=FakeConnection, HTTPSConnection=FakeConnection))
+    monkeypatch.setitem(
+        sys.modules,
+        "http.client",
+        SimpleNamespace(HTTPConnection=FakeConnection, HTTPSConnection=FakeConnection),
+    )
 
     result = portable_http_runner("GET", "http://192.0.2.10:8080/checks", 10)
 
@@ -758,7 +1104,11 @@ def test_portable_http_runner_uses_urllib_fallback_for_success_and_http_error(mo
         def close(self):
             return None
 
-    monkeypatch.setitem(sys.modules, "http.client", SimpleNamespace(HTTPConnection=FakeConnection, HTTPSConnection=FakeConnection))
+    monkeypatch.setitem(
+        sys.modules,
+        "http.client",
+        SimpleNamespace(HTTPConnection=FakeConnection, HTTPSConnection=FakeConnection),
+    )
 
     failure = portable_http_runner("GET", "http://192.0.2.10:8080/checks", 10)
 
@@ -777,7 +1127,11 @@ def test_portable_http_runner_returns_classified_transport_error_after_retries(m
         def close(self):
             return None
 
-    monkeypatch.setitem(sys.modules, "http.client", SimpleNamespace(HTTPConnection=BrokenConnection, HTTPSConnection=BrokenConnection))
+    monkeypatch.setitem(
+        sys.modules,
+        "http.client",
+        SimpleNamespace(HTTPConnection=BrokenConnection, HTTPSConnection=BrokenConnection),
+    )
 
     result = portable_http_runner("GET", "http://192.0.2.10:8080/checks", 10)
 
@@ -786,15 +1140,30 @@ def test_portable_http_runner_returns_classified_transport_error_after_retries(m
 
 
 def test_http_helpers_cover_import_fallback_and_invalid_payloads(monkeypatch):
-    fallback_result = runtime_checks.HttpResponseResult(status_code=204, body="ok", latency_ms=1.0, details="HTTP 204")
+    fallback_result = runtime_checks.HttpResponseResult(
+        status_code=204, body="ok", latency_ms=1.0, details="HTTP 204"
+    )
 
-    monkeypatch.setattr(runtime_checks.importlib, "import_module", lambda name: (_ for _ in ()).throw(ImportError("missing")))
-    monkeypatch.setattr(runtime_checks, "_portable_http_runner_socket", lambda method, target, timeout_s, trace=None: fallback_result)
+    monkeypatch.setattr(
+        runtime_checks.importlib,
+        "import_module",
+        lambda name: (_ for _ in ()).throw(ImportError("missing")),
+    )
+    monkeypatch.setattr(
+        runtime_checks,
+        "_portable_http_runner_socket",
+        lambda method, target, timeout_s, password=None, trace=None: fallback_result,
+    )
 
     result = portable_http_runner("GET", "http://192.0.2.10:8080/checks", 10)
 
     assert result is fallback_result
-    assert runtime_checks._parse_http_target("http://example.local?view=1") == ("http", "example.local", 80, "/?view=1")
+    assert runtime_checks._parse_http_target("http://example.local?view=1") == (
+        "http",
+        "example.local",
+        80,
+        "/?view=1",
+    )
 
     with pytest.raises(ValueError, match="expected http target"):
         runtime_checks._parse_http_target("ftp://example.local")
@@ -807,6 +1176,53 @@ def test_http_helpers_cover_import_fallback_and_invalid_payloads(monkeypatch):
 
     with pytest.raises(ValueError, match="invalid HTTP status"):
         runtime_checks._parse_http_response(b"HTTP/1.1 OK\r\n\r\nbody")
+
+
+def test_portable_http_runner_socket_adds_x_password_header(monkeypatch):
+    captured = {}
+
+    class FakeSocket:
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        runtime_checks,
+        "_open_socket_compat",
+        lambda host, port, timeout_s, deadline, trace=None: FakeSocket(),
+    )
+    monkeypatch.setattr(
+        runtime_checks,
+        "_socket_sendall",
+        lambda handle,
+        payload,
+        deadline,
+        trace=None,
+        stage=None,
+        operation=None,
+        target=None,
+        budget=None: captured.setdefault("payload", payload),
+    )
+    monkeypatch.setattr(
+        runtime_checks,
+        "_recv_until_closed",
+        lambda handle,
+        deadline,
+        trace=None,
+        stage=None,
+        operation=None,
+        target=None,
+        budget=None: b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+    )
+
+    result = runtime_checks._portable_http_runner_socket(
+        "GET",
+        "http://192.0.2.10:8080/checks",
+        10,
+        password="secret",
+    )
+
+    assert result.status_code == 200
+    assert b"X-Password: secret\r\n" in captured["payload"]
 
 
 def test_import_module_falls_back_without_importlib(monkeypatch):
@@ -962,17 +1378,25 @@ def test_connect_and_socket_compat_helpers_cover_remaining_branches(monkeypatch)
             return self.sock_error
 
     monkeypatch.setattr(runtime_checks, "_set_nonblocking_socket", lambda handle, enabled: True)
-    monkeypatch.setattr(runtime_checks, "_socket_wait", lambda handle, deadline, writable, trace=None, stage="connect": None)
+    monkeypatch.setattr(
+        runtime_checks,
+        "_socket_wait",
+        lambda handle, deadline, writable, trace=None, stage="connect": None,
+    )
 
     already_connected = AsyncSocket(second_error=OSError("already connected"))
     runtime_checks._connect_socket(already_connected, ("nas.example.local", 21), 10, ("perf", 10.0))
     assert already_connected.timeouts == [10]
 
     with pytest.raises(OSError, match="connect failed"):
-        runtime_checks._connect_socket(AsyncSocket(sock_error=111), ("nas.example.local", 21), 10, ("perf", 10.0))
+        runtime_checks._connect_socket(
+            AsyncSocket(sock_error=111), ("nas.example.local", 21), 10, ("perf", 10.0)
+        )
 
     with pytest.raises(OSError, match="boom"):
-        runtime_checks._connect_socket(AsyncSocket(second_error=OSError("boom")), ("nas.example.local", 21), 10, ("perf", 10.0))
+        runtime_checks._connect_socket(
+            AsyncSocket(second_error=OSError("boom")), ("nas.example.local", 21), 10, ("perf", 10.0)
+        )
 
     retrying = AsyncSocket()
 
@@ -985,7 +1409,11 @@ def test_connect_and_socket_compat_helpers_cover_remaining_branches(monkeypatch)
     runtime_checks._connect_socket(retrying, ("nas.example.local", 21), 10, ("perf", 10.0))
     assert retrying.timeouts == [10]
 
-    monkeypatch.setattr(runtime_checks, "_open_socket", lambda host, port, timeout_s, **kwargs: (_ for _ in ()).throw(TypeError("other")))
+    monkeypatch.setattr(
+        runtime_checks,
+        "_open_socket",
+        lambda host, port, timeout_s, **kwargs: (_ for _ in ()).throw(TypeError("other")),
+    )
     with pytest.raises(TypeError, match="other"):
         runtime_checks._open_socket_compat("nas.example.local", 21, 10, ("perf", 1.0))
 
@@ -999,12 +1427,21 @@ def test_connect_and_socket_compat_helpers_cover_remaining_branches(monkeypatch)
         return "opened"
 
     monkeypatch.setattr(runtime_checks, "_open_socket", compat_open_socket)
-    assert runtime_checks._open_socket_compat("nas.example.local", 21, 10, ("perf", 1.0), trace=trace_marker) == "opened"
+    assert (
+        runtime_checks._open_socket_compat(
+            "nas.example.local", 21, 10, ("perf", 1.0), trace=trace_marker
+        )
+        == "opened"
+    )
     assert call_log == [{"deadline": ("perf", 1.0), "trace": trace_marker}, {}]
 
 
 def test_recv_and_send_socket_helpers_cover_remaining_branches(monkeypatch):
-    monkeypatch.setattr(runtime_checks, "_socket_wait", lambda handle, deadline, writable, trace=None, stage="send": None)
+    monkeypatch.setattr(
+        runtime_checks,
+        "_socket_wait",
+        lambda handle, deadline, writable, trace=None, stage="send": None,
+    )
 
     runtime_checks._socket_sendall(object(), b"", ("perf", 1.0))
 
@@ -1098,13 +1535,16 @@ def test_recv_and_send_socket_helpers_cover_remaining_branches(monkeypatch):
             return b"done"
 
     success_trace = []
-    assert runtime_checks._socket_recv(
-        GoodRecvSocket(),
-        4096,
-        ("perf", 1.0),
-        trace=lambda event, **fields: success_trace.append((event, fields)),
-        stage="recv",
-    ) == b"done"
+    assert (
+        runtime_checks._socket_recv(
+            GoodRecvSocket(),
+            4096,
+            ("perf", 1.0),
+            trace=lambda event, **fields: success_trace.append((event, fields)),
+            stage="recv",
+        )
+        == b"done"
+    )
     assert success_trace == [("socket-recv", {"stage": "recv", "bytes_received": 4})]
 
     handle = FakeSocket([])
@@ -1115,9 +1555,17 @@ def test_recv_and_send_socket_helpers_cover_remaining_branches(monkeypatch):
 def test_telnet_chunk_compat_and_output_helpers_cover_remaining_branches(monkeypatch):
     original_recv_telnet_chunk = runtime_checks._recv_telnet_chunk
 
-    monkeypatch.setattr(runtime_checks, "_recv_telnet_chunk", lambda handle, size, deadline=None, trace=None, budget=None: (_ for _ in ()).throw(TypeError("other")))
+    monkeypatch.setattr(
+        runtime_checks,
+        "_recv_telnet_chunk",
+        lambda handle, size, deadline=None, trace=None, budget=None: (_ for _ in ()).throw(
+            TypeError("other")
+        ),
+    )
     with pytest.raises(TypeError, match="other"):
-        runtime_checks._recv_telnet_chunk_compat(object(), 4096, deadline=("perf", 1.0), trace=object())
+        runtime_checks._recv_telnet_chunk_compat(
+            object(), 4096, deadline=("perf", 1.0), trace=object()
+        )
 
     calls = []
 
@@ -1128,7 +1576,12 @@ def test_telnet_chunk_compat_and_output_helpers_cover_remaining_branches(monkeyp
         raise OSError("timed out")
 
     monkeypatch.setattr(runtime_checks, "_recv_telnet_chunk", timeout_compat)
-    assert runtime_checks._recv_telnet_chunk_compat(object(), 4096, deadline=("perf", 1.0), trace=object()) == b""
+    assert (
+        runtime_checks._recv_telnet_chunk_compat(
+            object(), 4096, deadline=("perf", 1.0), trace=object()
+        )
+        == b""
+    )
     assert len(calls) == 2
 
     def broken_compat(handle, size, deadline=None, trace=None, budget=None):
@@ -1138,19 +1591,39 @@ def test_telnet_chunk_compat_and_output_helpers_cover_remaining_branches(monkeyp
 
     monkeypatch.setattr(runtime_checks, "_recv_telnet_chunk", broken_compat)
     with pytest.raises(OSError, match="broken pipe"):
-        runtime_checks._recv_telnet_chunk_compat(object(), 4096, deadline=("perf", 1.0), trace=object())
+        runtime_checks._recv_telnet_chunk_compat(
+            object(), 4096, deadline=("perf", 1.0), trace=object()
+        )
 
     class DeadlineRecvSocket:
         pass
 
     monkeypatch.setattr(runtime_checks, "_recv_telnet_chunk", original_recv_telnet_chunk)
-    monkeypatch.setattr(runtime_checks, "_socket_recv", lambda handle, size, deadline, trace=None, stage="telnet-recv", budget=None: b"READY")
-    assert runtime_checks._recv_telnet_chunk(DeadlineRecvSocket(), deadline=("perf", 1.0)) == b"READY"
+    monkeypatch.setattr(
+        runtime_checks,
+        "_socket_recv",
+        lambda handle, size, deadline, trace=None, stage="telnet-recv", budget=None: b"READY",
+    )
+    assert (
+        runtime_checks._recv_telnet_chunk(DeadlineRecvSocket(), deadline=("perf", 1.0)) == b"READY"
+    )
 
-    monkeypatch.setattr(runtime_checks, "_socket_recv", lambda handle, size, deadline, trace=None, stage="telnet-recv", budget=None: (_ for _ in ()).throw(TimeoutError("timed out")))
+    monkeypatch.setattr(
+        runtime_checks,
+        "_socket_recv",
+        lambda handle, size, deadline, trace=None, stage="telnet-recv", budget=None: (
+            _ for _ in ()
+        ).throw(TimeoutError("timed out")),
+    )
     assert runtime_checks._recv_telnet_chunk(DeadlineRecvSocket(), deadline=("perf", 1.0)) == b""
 
-    monkeypatch.setattr(runtime_checks, "_socket_recv", lambda handle, size, deadline, trace=None, stage="telnet-recv", budget=None: (_ for _ in ()).throw(TimeoutError("probe io budget exhausted")))
+    monkeypatch.setattr(
+        runtime_checks,
+        "_socket_recv",
+        lambda handle, size, deadline, trace=None, stage="telnet-recv", budget=None: (
+            _ for _ in ()
+        ).throw(TimeoutError("probe io budget exhausted")),
+    )
     with pytest.raises(TimeoutError, match="probe io budget exhausted"):
         runtime_checks._recv_telnet_chunk(DeadlineRecvSocket(), deadline=("perf", 1.0))
 
@@ -1173,7 +1646,9 @@ def test_recv_telnet_chunk_into_traces_recv_into_and_recv_fallback_paths():
     )
 
     assert bytes(into_result) == b"abc"
-    assert trace_events == [("socket-recv", {"stage": "telnet-recv", "operation": "read-visible", "bytes_received": 3})]
+    assert trace_events == [
+        ("socket-recv", {"stage": "telnet-recv", "operation": "read-visible", "bytes_received": 3})
+    ]
 
     trace_events.clear()
 
@@ -1189,13 +1664,26 @@ def test_recv_telnet_chunk_into_traces_recv_into_and_recv_fallback_paths():
     )
 
     assert fallback_result == b"xy"
-    assert trace_events == [("socket-recv", {"stage": "telnet-recv", "operation": "read-visible", "bytes_received": 2})]
+    assert trace_events == [
+        ("socket-recv", {"stage": "telnet-recv", "operation": "read-visible", "bytes_received": 2})
+    ]
 
 
-def test_recv_telnet_chunk_retries_without_target_when_socket_recv_has_legacy_signature(monkeypatch):
+def test_recv_telnet_chunk_retries_without_target_when_socket_recv_has_legacy_signature(
+    monkeypatch,
+):
     calls = []
 
-    def fake_socket_recv(handle, size, deadline, trace=None, stage="telnet-recv", operation=None, target=None, budget=None):
+    def fake_socket_recv(
+        handle,
+        size,
+        deadline,
+        trace=None,
+        stage="telnet-recv",
+        operation=None,
+        target=None,
+        budget=None,
+    ):
         calls.append((operation, target, budget))
         if operation is not None or target is not None:
             raise TypeError("target unsupported")
@@ -1203,7 +1691,12 @@ def test_recv_telnet_chunk_retries_without_target_when_socket_recv_has_legacy_si
 
     monkeypatch.setattr(runtime_checks, "_socket_recv", fake_socket_recv)
 
-    assert runtime_checks._recv_telnet_chunk(object(), deadline=("perf", 1.0), target="switch:23", budget="budget-token") == b"READY"
+    assert (
+        runtime_checks._recv_telnet_chunk(
+            object(), deadline=("perf", 1.0), target="switch:23", budget="budget-token"
+        )
+        == b"READY"
+    )
     assert calls == [
         (None, "switch:23", "budget-token"),
         (None, None, "budget-token"),
@@ -1228,7 +1721,11 @@ def test_portable_telnet_runner_treats_micropython_etimedout_after_connect_as_de
     handle = TimeoutSocket()
 
     monkeypatch.setattr(runtime_checks, "_is_micropython_runtime", lambda: True)
-    monkeypatch.setattr(runtime_checks, "_open_socket_compat", lambda host, port, timeout_s, deadline, trace=None: handle)
+    monkeypatch.setattr(
+        runtime_checks,
+        "_open_socket_compat",
+        lambda host, port, timeout_s, deadline, trace=None: handle,
+    )
 
     result = portable_telnet_runner("192.0.2.10:23", 8)
 
@@ -1241,7 +1738,15 @@ def test_portable_telnet_runner_treats_micropython_etimedout_after_connect_as_de
 
 def test_portable_ftp_runner_stdlib_paths_cover_success_and_failures(monkeypatch):
     class FakeFTP:
-        def __init__(self, *, greeting="220 Ready", login="230 Logged in", pwd="/", goodbye="221 Bye", close_error=None):
+        def __init__(
+            self,
+            *,
+            greeting="220 Ready",
+            login="230 Logged in",
+            pwd="/",
+            goodbye="221 Bye",
+            close_error=None,
+        ):
             self.greeting = greeting
             self.login_response = login
             self.pwd_response = pwd
@@ -1273,7 +1778,9 @@ def test_portable_ftp_runner_stdlib_paths_cover_success_and_failures(monkeypatch
     ftp_success = FakeFTP(close_error=OSError("close failed"))
     monkeypatch.setitem(sys.modules, "ftplib", SimpleNamespace(FTP=lambda: ftp_success))
 
-    success = portable_ftp_runner("ftp://nas.example.local", 10, username="admin", password="secret")
+    success = portable_ftp_runner(
+        "ftp://nas.example.local", 10, username="admin", password="secret"
+    )
 
     assert success.ok is True
     assert success.details == "pwd=/"
@@ -1289,17 +1796,23 @@ def test_portable_ftp_runner_stdlib_paths_cover_success_and_failures(monkeypatch
     assert empty.ok is False
     assert empty.details == "empty FTP PWD response"
 
-    monkeypatch.setitem(sys.modules, "ftplib", SimpleNamespace(FTP=lambda: FakeFTP(goodbye="500 Bad quit")))
+    monkeypatch.setitem(
+        sys.modules, "ftplib", SimpleNamespace(FTP=lambda: FakeFTP(goodbye="500 Bad quit"))
+    )
     bad_quit = portable_ftp_runner("ftp://nas.example.local", 10)
     assert bad_quit.ok is False
     assert bad_quit.details == "expected FTP 221, got 500 Bad quit"
 
-    monkeypatch.setitem(sys.modules, "ftplib", SimpleNamespace(FTP=lambda: FakeFTP(greeting="500 Down")))
+    monkeypatch.setitem(
+        sys.modules, "ftplib", SimpleNamespace(FTP=lambda: FakeFTP(greeting="500 Down"))
+    )
     bad_greeting = portable_ftp_runner("ftp://nas.example.local", 10)
     assert bad_greeting.ok is False
     assert bad_greeting.details == "expected FTP 220, got 500 Down"
 
-    monkeypatch.setitem(sys.modules, "ftplib", SimpleNamespace(FTP=lambda: FakeFTP(login="530 Not logged in")))
+    monkeypatch.setitem(
+        sys.modules, "ftplib", SimpleNamespace(FTP=lambda: FakeFTP(login="530 Not logged in"))
+    )
     bad_login = portable_ftp_runner("ftp://nas.example.local", 10)
     assert bad_login.ok is False
     assert bad_login.details == "expected FTP 230, got 530 Not logged in"
@@ -1324,7 +1837,9 @@ def test_portable_ftp_runner_falls_back_to_raw_path_when_ftplib_is_missing(monke
     )
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
-    monkeypatch.setattr(runtime_checks, "_open_socket_compat", lambda *args, **kwargs: control_socket)
+    monkeypatch.setattr(
+        runtime_checks, "_open_socket_compat", lambda *args, **kwargs: control_socket
+    )
     monkeypatch.setattr(runtime_checks, "_is_micropython_runtime", lambda: False)
 
     result = portable_ftp_runner("ftp://nas.example.local", 10)
@@ -1341,19 +1856,31 @@ def test_portable_ftp_runner_raw_path_reports_remaining_failures(monkeypatch):
             return control_socket
 
         monkeypatch.setattr(runtime_checks, "_open_socket", fake_open_socket)
-        return portable_ftp_runner("ftp://nas.example.local", 10, trace=lambda event, **fields: None)
+        return portable_ftp_runner(
+            "ftp://nas.example.local", 10, trace=lambda event, **fields: None
+        )
 
-    assert run_case([
-        b"220 Ready\r\n",
-        b"230 Logged in\r\n",
-        b"500 No pwd\r\n",
-    ]).details == "expected FTP 257, got 500 No pwd"
-    assert run_case([
-        b"220 Ready\r\n",
-        b"230 Logged in\r\n",
-        b"257 /\r\n",
-        b"500 Bad quit\r\n",
-    ]).details == "expected FTP 221, got 500 Bad quit"
+    assert (
+        run_case(
+            [
+                b"220 Ready\r\n",
+                b"230 Logged in\r\n",
+                b"500 No pwd\r\n",
+            ]
+        ).details
+        == "expected FTP 257, got 500 No pwd"
+    )
+    assert (
+        run_case(
+            [
+                b"220 Ready\r\n",
+                b"230 Logged in\r\n",
+                b"257 /\r\n",
+                b"500 Bad quit\r\n",
+            ]
+        ).details
+        == "expected FTP 221, got 500 Bad quit"
+    )
 
 
 def test_ftp_parse_pwd_rejects_invalid_responses():
@@ -1377,7 +1904,9 @@ def test_portable_ftp_runner_raw_path_skips_pass_when_user_is_already_logged_in(
         ]
     )
 
-    monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: control_socket)
+    monkeypatch.setattr(
+        "vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: control_socket
+    )
 
     result = portable_ftp_runner("ftp://nas.example.local", 10, trace=lambda event, **fields: None)
 
@@ -1425,7 +1954,9 @@ def test_portable_telnet_runner_stdlib_and_raw_error_paths(monkeypatch):
             runtime_checks.socket.timeout(),
         ]
     )
-    monkeypatch.setattr(runtime_checks.socket, "create_connection", lambda address, timeout: success_handle)
+    monkeypatch.setattr(
+        runtime_checks.socket, "create_connection", lambda address, timeout: success_handle
+    )
     monkeypatch.setattr(runtime_checks, "_is_micropython_runtime", lambda: False)
 
     success = portable_telnet_runner("telnet://switch.example.local", 10)
@@ -1436,7 +1967,9 @@ def test_portable_telnet_runner_stdlib_and_raw_error_paths(monkeypatch):
     assert success_handle.closed is True
 
     empty_handle = StdlibSocket([runtime_checks.socket.timeout(), b""])
-    monkeypatch.setattr(runtime_checks.socket, "create_connection", lambda address, timeout: empty_handle)
+    monkeypatch.setattr(
+        runtime_checks.socket, "create_connection", lambda address, timeout: empty_handle
+    )
 
     empty = portable_telnet_runner("telnet://switch.example.local", 10)
     assert empty.ok is False
@@ -1453,8 +1986,12 @@ def test_portable_telnet_runner_stdlib_and_raw_error_paths(monkeypatch):
             raise TimeoutError("timed out")
 
     timeout_handle = TimeoutSocket()
-    monkeypatch.setattr(runtime_checks, "_open_socket", lambda host, port, timeout_s: timeout_handle)
-    timeout_result = portable_telnet_runner("telnet://switch.example.local", 10, trace=lambda event, **fields: None)
+    monkeypatch.setattr(
+        runtime_checks, "_open_socket", lambda host, port, timeout_s: timeout_handle
+    )
+    timeout_result = portable_telnet_runner(
+        "telnet://switch.example.local", 10, trace=lambda event, **fields: None
+    )
     assert timeout_result.ok is False
     assert timeout_result.status == Status.FAIL
     assert timeout_result.details == "no telnet response"
@@ -1466,7 +2003,9 @@ def test_portable_telnet_runner_stdlib_and_raw_error_paths(monkeypatch):
 
     broken_handle = BrokenSocket([])
     monkeypatch.setattr(runtime_checks, "_open_socket", lambda host, port, timeout_s: broken_handle)
-    broken_result = portable_telnet_runner("telnet://switch.example.local", 10, trace=lambda event, **fields: None)
+    broken_result = portable_telnet_runner(
+        "telnet://switch.example.local", 10, trace=lambda event, **fields: None
+    )
     assert broken_result.ok is False
     assert broken_result.status == Status.FAIL
     assert broken_result.details == "closed immediately"
@@ -1499,7 +2038,11 @@ def test_portable_telnet_runner_stdlib_rejects_immediate_post_connect_reset(monk
 
 
 def test_portable_telnet_runner_stdlib_reports_connection_failure_metadata(monkeypatch):
-    monkeypatch.setattr(runtime_checks.socket, "create_connection", lambda address, timeout: (_ for _ in ()).throw(OSError("refused")))
+    monkeypatch.setattr(
+        runtime_checks.socket,
+        "create_connection",
+        lambda address, timeout: (_ for _ in ()).throw(OSError("refused")),
+    )
     monkeypatch.setattr(runtime_checks, "_is_micropython_runtime", lambda: False)
 
     result = portable_telnet_runner("telnet://switch.example.local", 10)
@@ -1554,25 +2097,78 @@ def test_manual_http_socket_and_executor_defaults_cover_remaining_paths(monkeypa
     with pytest.raises(OSError, match="https unsupported on device"):
         runtime_checks._portable_http_runner_socket("GET", "https://example.local/health", 10)
 
-    monkeypatch.setattr(runtime_checks, "_open_socket_compat", lambda host, port, timeout_s, deadline, trace=None: (_ for _ in ()).throw(OSError("refused")))
+    monkeypatch.setattr(
+        runtime_checks,
+        "_open_socket_compat",
+        lambda host, port, timeout_s, deadline, trace=None: (_ for _ in ()).throw(
+            OSError("refused")
+        ),
+    )
     failure = runtime_checks._portable_http_runner_socket("GET", "http://example.local/health", 10)
     assert failure.status_code is None
     assert failure.details == "refused"
 
     calls = []
-    monkeypatch.setattr(runtime_checks, "portable_ping_runner", lambda target, timeout_s: calls.append(("ping", target, timeout_s)) or PingProbeResult(ok=True, latency_ms=1.0, details="reachable"))
-    monkeypatch.setattr(runtime_checks, "portable_http_runner", lambda method, target, timeout_s, username=None, password=None, trace=None: calls.append(("http", method, target, timeout_s, username, password, trace)) or runtime_checks.HttpResponseResult(status_code=200, body={}, latency_ms=2.0, details="HTTP 200"))
-    monkeypatch.setattr(runtime_checks, "portable_ftp_runner", lambda target, timeout_s, username=None, password=None, trace=None: calls.append(("ftp", target, timeout_s, username, password, trace)) or PingProbeResult(ok=True, latency_ms=3.0, details="listed"))
-    monkeypatch.setattr(runtime_checks, "portable_telnet_runner", lambda target, timeout_s, username=None, password=None, trace=None: calls.append(("telnet", target, timeout_s, username, password, trace)) or PingProbeResult(ok=True, latency_ms=4.0, details="banner"))
+    monkeypatch.setattr(
+        runtime_checks,
+        "portable_ping_runner",
+        lambda target, timeout_s: calls.append(("ping", target, timeout_s))
+        or PingProbeResult(ok=True, latency_ms=1.0, details="reachable"),
+    )
+    monkeypatch.setattr(
+        runtime_checks,
+        "portable_http_runner",
+        lambda method, target, timeout_s, username=None, password=None, trace=None: calls.append(
+            ("http", method, target, timeout_s, username, password, trace)
+        )
+        or runtime_checks.HttpResponseResult(
+            status_code=200, body={}, latency_ms=2.0, details="HTTP 200"
+        ),
+    )
+    monkeypatch.setattr(
+        runtime_checks,
+        "portable_ftp_runner",
+        lambda target, timeout_s, username=None, password=None, trace=None: calls.append(
+            ("ftp", target, timeout_s, username, password, trace)
+        )
+        or PingProbeResult(ok=True, latency_ms=3.0, details="listed"),
+    )
+    monkeypatch.setattr(
+        runtime_checks,
+        "portable_telnet_runner",
+        lambda target, timeout_s, username=None, password=None, trace=None: calls.append(
+            ("telnet", target, timeout_s, username, password, trace)
+        )
+        or PingProbeResult(ok=True, latency_ms=4.0, details="banner"),
+    )
 
     executor = build_executor()
     definitions = build_runtime_definitions(
         {
             "checks": [
                 {"id": "ping", "name": "Ping", "type": "PING", "target": "device.local"},
-                {"id": "http", "name": "HTTP", "type": "HTTP", "target": "http://device.local/health", "username": "ops", "password": "secret"},
-                {"id": "ftp", "name": "FTP", "type": "FTP", "target": "ftp://device.local", "username": "ops", "password": "secret"},
-                {"id": "telnet", "name": "TELNET", "type": "TELNET", "target": "telnet://device.local"},
+                {
+                    "id": "http",
+                    "name": "HTTP",
+                    "type": "HTTP",
+                    "target": "http://device.local/health",
+                    "username": "ops",
+                    "password": "secret",
+                },
+                {
+                    "id": "ftp",
+                    "name": "FTP",
+                    "type": "FTP",
+                    "target": "ftp://device.local",
+                    "username": "ops",
+                    "password": "secret",
+                },
+                {
+                    "id": "telnet",
+                    "name": "TELNET",
+                    "type": "TELNET",
+                    "target": "telnet://device.local",
+                },
             ]
         }
     )
@@ -1587,13 +2183,32 @@ def test_manual_http_socket_and_executor_defaults_cover_remaining_paths(monkeypa
 
     http_calls = []
     custom_executor = build_executor(
-        http_runner=lambda method, target, timeout_s, username=None, password=None: http_calls.append((method, target, timeout_s, username, password)) or runtime_checks.HttpResponseResult(status_code=200, body={}, latency_ms=1.0, details="HTTP 200")
+        http_runner=lambda method,
+        target,
+        timeout_s,
+        username=None,
+        password=None: http_calls.append((method, target, timeout_s, username, password))
+        or runtime_checks.HttpResponseResult(
+            status_code=200, body={}, latency_ms=1.0, details="HTTP 200"
+        )
     )
     custom_definitions = build_runtime_definitions(
         {
             "checks": [
-                {"id": "with-auth", "name": "With Auth", "type": "HTTP", "target": "http://device.local/auth", "username": "ops", "password": "secret"},
-                {"id": "no-auth", "name": "No Auth", "type": "HTTP", "target": "http://device.local/public"},
+                {
+                    "id": "with-auth",
+                    "name": "With Auth",
+                    "type": "HTTP",
+                    "target": "http://device.local/auth",
+                    "username": "ops",
+                    "password": "secret",
+                },
+                {
+                    "id": "no-auth",
+                    "name": "No Auth",
+                    "type": "HTTP",
+                    "target": "http://device.local/public",
+                },
             ]
         }
     )
@@ -1605,15 +2220,34 @@ def test_manual_http_socket_and_executor_defaults_cover_remaining_paths(monkeypa
     ]
 
     trace_events = []
-    failing_executor = build_executor(trace_sink=lambda definition, event, fields: trace_events.append((definition.identifier, event, fields)))
-    monkeypatch.setattr(runtime_checks, "execute_check", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
+    failing_executor = build_executor(
+        trace_sink=lambda definition, event, fields: trace_events.append(
+            (definition.identifier, event, fields)
+        )
+    )
+    monkeypatch.setattr(
+        runtime_checks,
+        "execute_check",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
 
     with pytest.raises(RuntimeError, match="boom"):
         failing_executor(definitions[0], 10.0)
 
     assert trace_events == [
         ("ping", "probe-start", {"timeout_s": 10, "target": "device.local"}),
-        ("ping", "probe-error", {"detail": "boom", "probe_type": "PING", "issued": 1, "succeeded": 0, "failed": 1, "target": "device.local"}),
+        (
+            "ping",
+            "probe-error",
+            {
+                "detail": "boom",
+                "probe_type": "PING",
+                "issued": 1,
+                "succeeded": 0,
+                "failed": 1,
+                "target": "device.local",
+            },
+        ),
     ]
 
 
@@ -1636,14 +2270,16 @@ def test_build_executor_preserves_explicit_trace_target(monkeypatch):
     def portable_http_runner(method, target, timeout_s, username=None, password=None, trace=None):
         del method, username, password
         trace("socket-open", target="override.local")
-        return runtime_checks.HttpResponseResult(status_code=200, body={}, latency_ms=1.0, details="HTTP 200")
+        return runtime_checks.HttpResponseResult(
+            status_code=200, body={}, latency_ms=1.0, details="HTTP 200"
+        )
 
     monkeypatch.setattr(runtime_checks, "portable_http_runner", portable_http_runner)
 
     monkeypatch.setattr(
         runtime_checks,
         "execute_check",
-        lambda definition, now_s, ping, http, ftp, telnet: (
+        lambda definition, now_s, ping, http, ident, dma, ftp, telnet: (
             http("GET", definition.target, definition.timeout_s),
             CheckExecutionResult(
                 source_identifier=definition.identifier,
@@ -1661,19 +2297,110 @@ def test_build_executor_preserves_explicit_trace_target(monkeypatch):
         )[1],
     )
 
-    executor = build_executor(trace_sink=lambda definition, event, fields: captured.append((event, dict(fields))))
+    executor = build_executor(
+        trace_sink=lambda definition, event, fields: captured.append((event, dict(fields)))
+    )
     executor(definition, 10.0)
 
-    assert any(event == "socket-open" and fields == {"target": "override.local"} for event, fields in captured)
+    assert any(
+        event == "socket-open" and fields == {"target": "override.local"}
+        for event, fields in captured
+    )
 
 
 def test_portable_ping_runner_uses_uping_when_available(monkeypatch):
-    monkeypatch.setitem(sys.modules, "uping", SimpleNamespace(ping=lambda *args, **kwargs: (1, 1, 12.0, 12.0)))
+    monkeypatch.setitem(
+        sys.modules, "uping", SimpleNamespace(ping=lambda *args, **kwargs: (1, 1, 12.0, 12.0))
+    )
 
     result = portable_ping_runner("192.168.1.1", 10)
 
     assert result.ok is True
     assert result.details == "reachable"
+
+
+def test_portable_ping_runner_uping_sends_three_packets(monkeypatch):
+    ping_calls = []
+
+    def fake_ping(target, count=1, timeout=5000, quiet=True):
+        ping_calls.append(("ping", target, count, timeout))
+        return (3, 1, 12.0, 12.0)
+
+    monkeypatch.setitem(sys.modules, "uping", SimpleNamespace(ping=fake_ping))
+
+    result = portable_ping_runner("192.168.1.1", 10)
+
+    assert result.ok is True
+    assert len(ping_calls) == 1
+    assert ping_calls[0][2] == 3
+    assert ping_calls[0][3] == 5000
+
+
+def test_portable_ping_runner_uses_raw_icmp_fallback_on_micropython(monkeypatch):
+    monkeypatch.delitem(sys.modules, "uping", raising=False)
+    monkeypatch.setattr(runtime_checks, "_is_micropython_runtime", lambda: True)
+
+    original_import = builtins.__import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name in {"uping", "subprocess"}:
+            raise ImportError(f"no {name}")
+        return original_import(name, globals, locals, fromlist, level)
+
+    class RawIcmpSocket:
+        def __init__(self, *args):
+            self.args = args
+            self.timeout = None
+            self.sent = []
+            self.closed = False
+
+        def settimeout(self, value):
+            self.timeout = value
+
+        def sendto(self, data, address):
+            self.sent.append((data, address))
+
+        def recvfrom(self, _size):
+            request_packet, _address = self.sent[0]
+            _request_type, _code, _checksum, identifier, sequence = struct.unpack(
+                "!BBHHH", request_packet[:8]
+            )
+            reply = (
+                struct.pack(
+                    "!BBHHH", runtime_checks.ICMP_ECHO_REPLY_TYPE, 0, 0, identifier, sequence
+                )
+                + b"vivipi"
+            )
+            ipv4_header = bytes((0x45,)) + (b"\x00" * 19)
+            return ipv4_header + reply, ("192.168.1.1", 0)
+
+        def close(self):
+            self.closed = True
+
+    raw_socket = RawIcmpSocket()
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    monkeypatch.setattr(runtime_checks.socket, "socket", lambda *args: raw_socket)
+    monkeypatch.setattr(
+        runtime_checks.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (
+                runtime_checks.socket.AF_INET,
+                runtime_checks.socket.SOCK_RAW,
+                1,
+                "",
+                ("192.168.1.1", 0),
+            )
+        ],
+    )
+
+    result = portable_ping_runner("192.168.1.1", 10)
+
+    assert result.ok is True
+    assert result.details == "reachable"
+    assert raw_socket.timeout == 10
+    assert raw_socket.sent[0][1] == ("192.168.1.1", 1)
+    assert raw_socket.closed is True
 
 
 def test_portable_ping_runner_uses_subprocess_fallback(monkeypatch):
@@ -1684,7 +2411,9 @@ def test_portable_ping_runner_uses_subprocess_fallback(monkeypatch):
     monkeypatch.setattr(
         subprocess,
         "run",
-        lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout="", stderr="network unreachable"),
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=1, stdout="", stderr="network unreachable"
+        ),
     )
 
     result = portable_ping_runner("192.168.1.1", 10)
@@ -1706,7 +2435,9 @@ def test_portable_ping_runner_reports_timeout_without_retry(monkeypatch):
         return SimpleNamespace(returncode=1, stdout="", stderr="timeout")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    monkeypatch.setattr("vivipi.runtime.checks._sleep_ms", lambda value_ms: sleep_calls.append(value_ms))
+    monkeypatch.setattr(
+        "vivipi.runtime.checks._sleep_ms", lambda value_ms: sleep_calls.append(value_ms)
+    )
 
     result = portable_ping_runner("192.168.1.1", 10)
 
@@ -1771,7 +2502,11 @@ def test_network_helper_functions_cover_edge_cases(monkeypatch):
     assert _parse_socket_target("nas.example.local", 21) == ("nas.example.local", 21)
     assert _recv_all(FakeSocket([b"a", b"b", b""])) == b"ab"
 
-    monkeypatch.setattr(runtime_checks, "time", SimpleNamespace(perf_counter=lambda: 2.5, sleep=lambda value_s: None))
+    monkeypatch.setattr(
+        runtime_checks,
+        "time",
+        SimpleNamespace(perf_counter=lambda: 2.5, sleep=lambda value_s: None),
+    )
 
     perf_started_at, uses_ticks_ms = runtime_checks._start_timer()
 
@@ -1780,21 +2515,38 @@ def test_network_helper_functions_cover_edge_cases(monkeypatch):
 
 
 def test_runtime_target_alias_resolution_rewrites_matching_hosts_only():
-    assert runtime_checks._resolve_target_alias("router.local", {"router.local": "192.0.2.10"}) == "192.0.2.10"
-    assert runtime_checks._resolve_target_alias(
-        "http://router.local/health",
-        {"router.local": "192.0.2.10"},
-    ) == "http://192.0.2.10/health"
-    assert runtime_checks._resolve_target_alias(
-        "http://router.local/health",
-        {"other.local": "192.0.2.20"},
-    ) == "http://router.local/health"
-    assert runtime_checks._resolve_target_alias("router.local", {"router.local": "   "}) == "router.local"
-    assert runtime_checks._resolve_target_alias("router.local", {"other.local": "192.0.2.20"}) == "router.local"
+    assert (
+        runtime_checks._resolve_target_alias("router.local", {"router.local": "192.0.2.10"})
+        == "192.0.2.10"
+    )
+    assert (
+        runtime_checks._resolve_target_alias(
+            "http://router.local/health",
+            {"router.local": "192.0.2.10"},
+        )
+        == "http://192.0.2.10/health"
+    )
+    assert (
+        runtime_checks._resolve_target_alias(
+            "http://router.local/health",
+            {"other.local": "192.0.2.20"},
+        )
+        == "http://router.local/health"
+    )
+    assert (
+        runtime_checks._resolve_target_alias("router.local", {"router.local": "   "})
+        == "router.local"
+    )
+    assert (
+        runtime_checks._resolve_target_alias("router.local", {"other.local": "192.0.2.20"})
+        == "router.local"
+    )
 
 
 def test_network_helper_functions_cover_additional_fallback_paths(monkeypatch):
-    fake_time = SimpleNamespace(sleep_calls=[], sleep=lambda value_s: fake_time.sleep_calls.append(value_s))
+    fake_time = SimpleNamespace(
+        sleep_calls=[], sleep=lambda value_s: fake_time.sleep_calls.append(value_s)
+    )
     monkeypatch.setattr(runtime_checks, "time", fake_time)
 
     runtime_checks._sleep_ms(5)
@@ -1802,14 +2554,21 @@ def test_network_helper_functions_cover_additional_fallback_paths(monkeypatch):
     assert fake_time.sleep_calls == [0.005]
     assert _classify_network_error(OSError("weird failure")) == "io"
     assert runtime_checks._resolve_target_alias("", {"router.local": "192.0.2.10"}) == ""
-    assert runtime_checks._resolve_target_alias("http://router.local/health", {"router.local": "   "}) == "http://router.local/health"
+    assert (
+        runtime_checks._resolve_target_alias("http://router.local/health", {"router.local": "   "})
+        == "http://router.local/health"
+    )
     assert runtime_checks._error_errno(OSError("boom", 115)) is None
 
 
 def test_error_errno_uses_integer_first_arg_and_socket_helpers_reraise_other_errors(monkeypatch):
     assert runtime_checks._error_errno(OSError(115, "in progress")) == 115
 
-    monkeypatch.setattr(runtime_checks, "_socket_wait", lambda handle, deadline, writable, trace=None, stage="send": None)
+    monkeypatch.setattr(
+        runtime_checks,
+        "_socket_wait",
+        lambda handle, deadline, writable, trace=None, stage="send": None,
+    )
 
     class SenderSocket:
         def send(self, payload):
@@ -1835,7 +2594,11 @@ def test_error_errno_uses_integer_first_arg_and_socket_helpers_reraise_other_err
 
 def test_open_socket_reports_dns_errors(monkeypatch):
     trace_events = []
-    monkeypatch.setattr(runtime_checks.socket, "getaddrinfo", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("name resolution failed")))
+    monkeypatch.setattr(
+        runtime_checks.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("name resolution failed")),
+    )
 
     with pytest.raises(OSError, match="name resolution failed"):
         _open_socket(
@@ -1845,7 +2608,10 @@ def test_open_socket_reports_dns_errors(monkeypatch):
             trace=lambda event, **fields: trace_events.append((event, fields)),
         )
 
-    assert trace_events[0] == ("dns-start", {"host": "nas.example.local", "port": 21, "target": "nas.example.local:21"})
+    assert trace_events[0] == (
+        "dns-start",
+        {"host": "nas.example.local", "port": 21, "target": "nas.example.local:21"},
+    )
     assert trace_events[1][0] == "dns-error"
 
 
@@ -1869,7 +2635,11 @@ def test_portable_http_runner_urllib_fallback_covers_plaintext_and_transport_err
         def close(self):
             return None
 
-    monkeypatch.setitem(sys.modules, "http.client", SimpleNamespace(HTTPConnection=FakeConnection, HTTPSConnection=FakeConnection))
+    monkeypatch.setitem(
+        sys.modules,
+        "http.client",
+        SimpleNamespace(HTTPConnection=FakeConnection, HTTPSConnection=FakeConnection),
+    )
     success = portable_http_runner("GET", "http://192.0.2.10:8080/checks", 10)
 
     assert success.body == "plain text"
@@ -1884,7 +2654,11 @@ def test_portable_http_runner_urllib_fallback_covers_plaintext_and_transport_err
         def close(self):
             return None
 
-    monkeypatch.setitem(sys.modules, "http.client", SimpleNamespace(HTTPConnection=BrokenConnection, HTTPSConnection=BrokenConnection))
+    monkeypatch.setitem(
+        sys.modules,
+        "http.client",
+        SimpleNamespace(HTTPConnection=BrokenConnection, HTTPSConnection=BrokenConnection),
+    )
     failure = portable_http_runner("GET", "http://192.0.2.10:8080/checks", 10)
 
     assert failure.status_code is None
@@ -1892,7 +2666,9 @@ def test_portable_http_runner_urllib_fallback_covers_plaintext_and_transport_err
 
 
 def test_socket_and_telnet_helpers_cover_remaining_edge_cases(monkeypatch):
-    monkeypatch.setattr(runtime_checks.socket, "getaddrinfo", lambda host, port, family, socktype: [])
+    monkeypatch.setattr(
+        runtime_checks.socket, "getaddrinfo", lambda host, port, family, socktype: []
+    )
 
     with pytest.raises(OSError, match="unable to open socket"):
         _open_socket("router.local", 23, 10)
@@ -1904,7 +2680,12 @@ def test_socket_and_telnet_helpers_cover_remaining_edge_cases(monkeypatch):
         _ftp_read_response(FakeSocket([b""]))
 
     assert _telnet_strip_negotiation(FakeSocket([]), bytes([runtime_checks.TELNET_IAC])) == b""
-    assert _telnet_strip_negotiation(FakeSocket([]), bytes([runtime_checks.TELNET_IAC, runtime_checks.TELNET_DO])) == b""
+    assert (
+        _telnet_strip_negotiation(
+            FakeSocket([]), bytes([runtime_checks.TELNET_IAC, runtime_checks.TELNET_DO])
+        )
+        == b""
+    )
     assert runtime_checks._has_alnum_ascii("!!!") is False
 
     class TimeoutSocket:
@@ -1925,7 +2706,11 @@ def test_socket_and_telnet_helpers_cover_remaining_edge_cases(monkeypatch):
 
 
 def test_read_until_markers_covers_timeout_exception_and_marker_match(monkeypatch):
-    monkeypatch.setattr(runtime_checks, "_recv_telnet_chunk", lambda handle, size=4096: (_ for _ in ()).throw(OSError("timed out")))
+    monkeypatch.setattr(
+        runtime_checks,
+        "_recv_telnet_chunk",
+        lambda handle, size=4096: (_ for _ in ()).throw(OSError("timed out")),
+    )
 
     assert _read_until_markers(object(), (b"login:",)) == b""
 
@@ -1935,15 +2720,24 @@ def test_read_until_markers_covers_timeout_exception_and_marker_match(monkeypatc
 
 
 def test_read_until_markers_reraises_non_timeout_socket_errors(monkeypatch):
-    monkeypatch.setattr(runtime_checks, "_recv_telnet_chunk", lambda handle, size=4096: (_ for _ in ()).throw(OSError("broken pipe")))
+    monkeypatch.setattr(
+        runtime_checks,
+        "_recv_telnet_chunk",
+        lambda handle, size=4096: (_ for _ in ()).throw(OSError("broken pipe")),
+    )
 
     with pytest.raises(OSError, match="broken pipe"):
         _read_until_markers(object(), (b"login:",))
 
 
 def test_socket_target_and_protocol_helpers_cover_success_and_error_paths():
-    assert _parse_socket_target("ftp://nas.example.local", 21, expected_scheme="ftp") == ("nas.example.local", 21)
-    assert _parse_socket_target("telnet://switch.example.local:2323", 23, expected_scheme="telnet") == (
+    assert _parse_socket_target("ftp://nas.example.local", 21, expected_scheme="ftp") == (
+        "nas.example.local",
+        21,
+    )
+    assert _parse_socket_target(
+        "telnet://switch.example.local:2323", 23, expected_scheme="telnet"
+    ) == (
         "switch.example.local",
         2323,
     )
@@ -1964,7 +2758,9 @@ def test_socket_target_and_protocol_helpers_cover_success_and_error_paths():
 def test_portable_telnet_runner_classifies_transient_socket_failures_without_retry(monkeypatch):
     sleep_calls = []
     attempts = {"count": 0}
-    monkeypatch.setattr("vivipi.runtime.checks._sleep_ms", lambda value_ms: sleep_calls.append(value_ms))
+    monkeypatch.setattr(
+        "vivipi.runtime.checks._sleep_ms", lambda value_ms: sleep_calls.append(value_ms)
+    )
 
     def fake_open_socket(host, port, timeout_s):
         attempts["count"] += 1
@@ -1972,7 +2768,9 @@ def test_portable_telnet_runner_classifies_transient_socket_failures_without_ret
 
     monkeypatch.setattr("vivipi.runtime.checks._open_socket", fake_open_socket)
 
-    result = portable_telnet_runner("telnet://switch.example.local", 10, trace=lambda event, **fields: None)
+    result = portable_telnet_runner(
+        "telnet://switch.example.local", 10, trace=lambda event, **fields: None
+    )
 
     assert result.ok is False
     assert result.details.startswith("refused:")
@@ -2018,7 +2816,10 @@ def test_socket_helpers_cover_open_close_and_response_errors(monkeypatch):
                 raise OSError("boom")
 
     sockets = [ConnectableSocket(should_fail=True), ConnectableSocket()]
-    monkeypatch.setattr("vivipi.runtime.checks.socket.getaddrinfo", lambda host, port, *_: [(1, 1, 1, "", (host, port)), (1, 1, 1, "", (host, port))])
+    monkeypatch.setattr(
+        "vivipi.runtime.checks.socket.getaddrinfo",
+        lambda host, port, *_: [(1, 1, 1, "", (host, port)), (1, 1, 1, "", (host, port))],
+    )
     monkeypatch.setattr("vivipi.runtime.checks.socket.socket", lambda *args: sockets.pop(0))
 
     opened = _open_socket("nas.example.local", 21, 10)
@@ -2038,14 +2839,20 @@ def test_socket_helpers_cover_open_close_and_response_errors(monkeypatch):
 
     _close_socket(None)
     _close_socket(shutdown_socket)
-    _close_socket(shutdown_error_socket, trace=lambda event, **fields: trace_events.append((event, fields)), target="ftp://nas.example.local")
+    _close_socket(
+        shutdown_error_socket,
+        trace=lambda event, **fields: trace_events.append((event, fields)),
+        target="ftp://nas.example.local",
+    )
     _close_socket(CloseErrorSocket([]))
 
     assert shutdown_socket.shutdown_calls == [runtime_checks.socket.SHUT_RDWR]
     assert shutdown_socket.closed is True
     assert shutdown_error_socket.shutdown_calls == [runtime_checks.socket.SHUT_RDWR]
     assert shutdown_error_socket.closed is True
-    assert trace_events == [("socket-close", {"stage": "close", "target": "ftp://nas.example.local"})]
+    assert trace_events == [
+        ("socket-close", {"stage": "close", "target": "ftp://nas.example.local"})
+    ]
 
     with pytest.raises(ValueError, match="invalid FTP response"):
         _ftp_read_response(FakeSocket([b"oops\r\n"]))
@@ -2078,7 +2885,13 @@ def test_open_socket_uses_deadline_aware_connect_and_trace(monkeypatch):
         lambda host, port, *_: [(1, 1, 1, "", (host, port))],
     )
     monkeypatch.setattr(runtime_checks.socket, "socket", lambda *args: socket_handle)
-    monkeypatch.setattr(runtime_checks.select, "poll", lambda: SimpleNamespace(register=lambda handle, flags: None, poll=lambda timeout: [(0, runtime_checks.POLLOUT)]))
+    monkeypatch.setattr(
+        runtime_checks.select,
+        "poll",
+        lambda: SimpleNamespace(
+            register=lambda handle, flags: None, poll=lambda timeout: [(0, runtime_checks.POLLOUT)]
+        ),
+    )
 
     opened = _open_socket(
         "nas.example.local",
@@ -2164,12 +2977,18 @@ def test_portable_http_runner_uses_manual_socket_deadline_path_on_micropython(mo
             self.recv_sizes.append(size)
             return super().recv(size)
 
-    handle = RecordingSocket([b"HTTP/1.0 200 OK\r\nContent-Length: 12\r\n\r\n{\"ok\": true}", b""])
+    handle = RecordingSocket([b'HTTP/1.0 200 OK\r\nContent-Length: 12\r\n\r\n{"ok": true}', b""])
     fake_time = FakeMicroPythonTime()
 
     monkeypatch.setattr(runtime_checks, "time", fake_time)
-    monkeypatch.setattr(runtime_checks, "urlparse", lambda value: SimpleNamespace(scheme="http", hostname="nas.example.local", port=None))
-    monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s, **kwargs: handle)
+    monkeypatch.setattr(
+        runtime_checks,
+        "urlparse",
+        lambda value: SimpleNamespace(scheme="http", hostname="nas.example.local", port=None),
+    )
+    monkeypatch.setattr(
+        "vivipi.runtime.checks._open_socket", lambda host, port, timeout_s, **kwargs: handle
+    )
 
     result = portable_http_runner("GET", "http://nas.example.local/health?view=1", 8)
 
@@ -2217,7 +3036,9 @@ def test_portable_ftp_runner_caps_manual_socket_read_size_on_micropython(monkeyp
     fake_time = FakeMicroPythonTime()
 
     monkeypatch.setattr(runtime_checks, "time", fake_time)
-    monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s, **kwargs: control_socket)
+    monkeypatch.setattr(
+        "vivipi.runtime.checks._open_socket", lambda host, port, timeout_s, **kwargs: control_socket
+    )
 
     result = portable_ftp_runner(
         "ftp://nas.example.local",
@@ -2234,7 +3055,9 @@ def test_portable_ftp_runner_caps_manual_socket_read_size_on_micropython(monkeyp
 
 def test_portable_ftp_runner_rejects_invalid_greeting(monkeypatch):
     control_socket = FakeSocket([b"500 Down\r\n"])
-    monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: control_socket)
+    monkeypatch.setattr(
+        "vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: control_socket
+    )
 
     result = portable_ftp_runner("nas.example.local:21", 10, trace=lambda event, **fields: None)
 
@@ -2246,7 +3069,9 @@ def test_portable_ftp_runner_rejects_invalid_greeting(monkeypatch):
 def test_portable_ftp_runner_reports_greeting_failures(monkeypatch):
     def run_case(responses):
         control_socket = FakeSocket(responses)
-        monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: control_socket)
+        monkeypatch.setattr(
+            "vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: control_socket
+        )
         return portable_ftp_runner(
             "ftp://nas.example.local",
             10,
@@ -2269,7 +3094,9 @@ def test_portable_ftp_runner_reports_login_failures(monkeypatch):
             b"221 Goodbye\r\n",
         ]
     )
-    monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: control_socket)
+    monkeypatch.setattr(
+        "vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: control_socket
+    )
 
     result = portable_ftp_runner(
         "ftp://nas.example.local",
@@ -2289,7 +3116,10 @@ def test_portable_ftp_runner_reports_login_failures(monkeypatch):
 
 
 def test_portable_ftp_runner_reports_socket_errors(monkeypatch):
-    monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: (_ for _ in ()).throw(OSError("refused")))
+    monkeypatch.setattr(
+        "vivipi.runtime.checks._open_socket",
+        lambda host, port, timeout_s: (_ for _ in ()).throw(OSError("refused")),
+    )
 
     result = portable_ftp_runner("ftp://nas.example.local", 10, trace=lambda event, **fields: None)
 
@@ -2300,9 +3130,11 @@ def test_portable_ftp_runner_reports_socket_errors(monkeypatch):
 def test_portable_telnet_runner_accepts_non_empty_response(monkeypatch):
     class BannerSocket(FakeSocket):
         def __init__(self):
-            super().__init__([
-                b'\xff\xfe"\xff\xfb\x01\x1bc\x1b[0;37;2m\x1b[1;1H\x1bc\x1b[0;37;2m\x1b[1;1H\x1b[1;6H\x1b[0;37;1m*** C64 Ultimate (V1.49) 1.1.0 *** Remote ***\x1b[24;53H\x1b(BF7=HELP'
-            ])
+            super().__init__(
+                [
+                    b'\xff\xfe"\xff\xfb\x01\x1bc\x1b[0;37;2m\x1b[1;1H\x1bc\x1b[0;37;2m\x1b[1;1H\x1b[1;6H\x1b[0;37;1m*** C64 Ultimate (V1.49) 1.1.0 *** Remote ***\x1b[24;53H\x1b(BF7=HELP'
+                ]
+            )
             self.recv_calls = 0
             self.timeout_values = []
 
@@ -2338,7 +3170,9 @@ def test_portable_telnet_runner_rejects_login_failure_text(monkeypatch):
     handle = FakeSocket([b"Login incorrect\r\n", b""])
     monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: handle)
 
-    result = portable_telnet_runner("switch.example.local:23", 10, trace=lambda event, **fields: None)
+    result = portable_telnet_runner(
+        "switch.example.local:23", 10, trace=lambda event, **fields: None
+    )
 
     assert result.ok is False
     assert result.details == "telnet failure marker present"
@@ -2349,7 +3183,9 @@ def test_portable_telnet_runner_rejects_blank_sessions(monkeypatch):
     handle = FakeSocket([b"   \r\n", b""])
     monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: handle)
 
-    result = portable_telnet_runner("switch.example.local:23", 10, trace=lambda event, **fields: None)
+    result = portable_telnet_runner(
+        "switch.example.local:23", 10, trace=lambda event, **fields: None
+    )
 
     assert result.ok is False
     assert result.status == Status.FAIL
@@ -2374,7 +3210,9 @@ def test_portable_telnet_runner_rejects_stable_idle_open_without_response(monkey
     handle = TimeoutThenResponseSocket()
     monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: handle)
 
-    result = portable_telnet_runner("switch.example.local:23", 10, trace=lambda event, **fields: None)
+    result = portable_telnet_runner(
+        "switch.example.local:23", 10, trace=lambda event, **fields: None
+    )
 
     assert result.ok is False
     assert result.status == Status.FAIL
@@ -2407,7 +3245,9 @@ def test_portable_telnet_runner_accepts_password_prompt_response(monkeypatch):
     handle = PasswordPromptSocket()
     monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: handle)
 
-    result = portable_telnet_runner("switch.example.local:23", 10, password="secret", trace=lambda event, **fields: None)
+    result = portable_telnet_runner(
+        "switch.example.local:23", 10, password="secret", trace=lambda event, **fields: None
+    )
 
     assert result.ok is True
     assert result.status == Status.OK
@@ -2440,7 +3280,9 @@ def test_portable_telnet_runner_tolerates_negotiation_reply_timeout(monkeypatch)
     handle = ReplyTimeoutSocket([b"Password: \xff\xfb\x01", b"\r\nREADY\r\n"])
     monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: handle)
 
-    result = portable_telnet_runner("switch.example.local:23", 10, trace=lambda event, **fields: None)
+    result = portable_telnet_runner(
+        "switch.example.local:23", 10, trace=lambda event, **fields: None
+    )
 
     assert result.ok is True
     assert result.status == Status.OK
@@ -2452,10 +3294,12 @@ def test_portable_telnet_runner_tolerates_negotiation_reply_timeout(monkeypatch)
 def test_portable_telnet_runner_waits_for_response_drain_before_success(monkeypatch):
     class DrainingBannerSocket(FakeSocket):
         def __init__(self):
-            super().__init__([
-                b'\xff\xfe"\xff\xfb\x01\x1bc\x1b[0;37;2m\x1b[1;1H\x1bc\x1b[0;37;2m\x1b[1;1H\x1b[1;4H\x1b[0;37;1m*** Ultimate 64 Elite (V1.4B) 3.14e *** Remote ***\x1b[24;53H\x1b(BF3=HELP',
-                b"extra trailing repaint bytes that should never be read",
-            ])
+            super().__init__(
+                [
+                    b'\xff\xfe"\xff\xfb\x01\x1bc\x1b[0;37;2m\x1b[1;1H\x1bc\x1b[0;37;2m\x1b[1;1H\x1b[1;4H\x1b[0;37;1m*** Ultimate 64 Elite (V1.4B) 3.14e *** Remote ***\x1b[24;53H\x1b(BF3=HELP',
+                    b"extra trailing repaint bytes that should never be read",
+                ]
+            )
             self.recv_calls = 0
             self.timeout_values = []
 
@@ -2469,7 +3313,9 @@ def test_portable_telnet_runner_waits_for_response_drain_before_success(monkeypa
     handle = DrainingBannerSocket()
     monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: handle)
 
-    result = portable_telnet_runner("switch.example.local:23", 10, trace=lambda event, **fields: None)
+    result = portable_telnet_runner(
+        "switch.example.local:23", 10, trace=lambda event, **fields: None
+    )
 
     assert result.ok is True
     assert result.status == Status.OK
@@ -2478,14 +3324,18 @@ def test_portable_telnet_runner_waits_for_response_drain_before_success(monkeypa
     assert result.metadata["response_received"] is True
     assert result.metadata["handshake_detected"] is True
     assert handle.recv_calls == 3
-    assert handle.timeout_values == [runtime_checks.TELNET_IDLE_TIMEOUT_S, runtime_checks.TELNET_POST_DATA_IDLE_TIMEOUT_S, runtime_checks.TELNET_POST_DATA_IDLE_TIMEOUT_S]
+    assert handle.timeout_values == [
+        runtime_checks.TELNET_IDLE_TIMEOUT_S,
+        runtime_checks.TELNET_POST_DATA_IDLE_TIMEOUT_S,
+        runtime_checks.TELNET_POST_DATA_IDLE_TIMEOUT_S,
+    ]
 
 
 def test_portable_telnet_runner_accepts_chunk_limited_banner_response(monkeypatch):
     banner = (
         b'\xff\xfe"\xff\xfb\x01\x1bc\x1b[0;37;2m\x1b[1;1H\x1bc\x1b[0;37;2m\x1b[1;1H'
-        b'\x1b[1;6H\x1b[0;37;1m*** C64 Ultimate (V1.49) 1.1.0 *** Remote ***\x1b[24;53H\x1b(BF7=HELP'
-        b'\r\nREADY\r\n' * 32
+        b"\x1b[1;6H\x1b[0;37;1m*** C64 Ultimate (V1.49) 1.1.0 *** Remote ***\x1b[24;53H\x1b(BF7=HELP"
+        b"\r\nREADY\r\n" * 32
     )
 
     class ChunkLimitedBannerSocket(FakeSocket):
@@ -2499,7 +3349,9 @@ def test_portable_telnet_runner_accepts_chunk_limited_banner_response(monkeypatc
     handle = ChunkLimitedBannerSocket()
     monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: handle)
 
-    result = portable_telnet_runner("telnet://switch.example.local", 10, trace=lambda event, **fields: None)
+    result = portable_telnet_runner(
+        "telnet://switch.example.local", 10, trace=lambda event, **fields: None
+    )
 
     assert result.ok is True
     assert result.status == Status.OK
@@ -2513,7 +3365,9 @@ def test_portable_telnet_runner_rejects_escape_only_terminal_control(monkeypatch
     handle = FakeSocket([b'\xff\xfe"\xff\xfb\x01\x1bc\x1b[0;37;2m\x1b[1;1H', b""])
     monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: handle)
 
-    result = portable_telnet_runner("telnet://switch.example.local", 10, trace=lambda event, **fields: None)
+    result = portable_telnet_runner(
+        "telnet://switch.example.local", 10, trace=lambda event, **fields: None
+    )
 
     assert result.ok is False
     assert result.status == Status.FAIL
@@ -2525,15 +3379,22 @@ def test_portable_telnet_runner_rejects_explicit_failure_text_and_reports_socket
     handle = FakeSocket([b"Access denied\r\n", b""])
     monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: handle)
 
-    failed_login = portable_telnet_runner("telnet://switch.example.local", 10, trace=lambda event, **fields: None)
+    failed_login = portable_telnet_runner(
+        "telnet://switch.example.local", 10, trace=lambda event, **fields: None
+    )
 
     assert failed_login.ok is False
     assert failed_login.status == Status.FAIL
     assert failed_login.details == "telnet failure marker present"
 
-    monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: (_ for _ in ()).throw(OSError("refused")))
+    monkeypatch.setattr(
+        "vivipi.runtime.checks._open_socket",
+        lambda host, port, timeout_s: (_ for _ in ()).throw(OSError("refused")),
+    )
 
-    socket_failure = portable_telnet_runner("telnet://switch.example.local", 10, trace=lambda event, **fields: None)
+    socket_failure = portable_telnet_runner(
+        "telnet://switch.example.local", 10, trace=lambda event, **fields: None
+    )
 
     assert socket_failure.ok is False
     assert socket_failure.status == Status.FAIL
@@ -2672,7 +3533,11 @@ def test_ftp_operation_descriptor_redacts_password():
 
 
 def test_socket_sendall_includes_operation_when_provided(monkeypatch):
-    monkeypatch.setattr(runtime_checks, "_socket_wait", lambda handle, deadline, writable, trace=None, stage="send": None)
+    monkeypatch.setattr(
+        runtime_checks,
+        "_socket_wait",
+        lambda handle, deadline, writable, trace=None, stage="send": None,
+    )
 
     class SendallSocket:
         def sendall(self, payload):
@@ -2691,13 +3556,22 @@ def test_socket_sendall_includes_operation_when_provided(monkeypatch):
     assert events == [
         (
             "socket-send",
-            {"stage": "http-send", "operation": "GET /v1/checks", "target": "service.example.local:80", "bytes_sent": 25},
+            {
+                "stage": "http-send",
+                "operation": "GET /v1/checks",
+                "target": "service.example.local:80",
+                "bytes_sent": 25,
+            },
         ),
     ]
 
 
 def test_socket_sendall_omits_operation_when_absent(monkeypatch):
-    monkeypatch.setattr(runtime_checks, "_socket_wait", lambda handle, deadline, writable, trace=None, stage="send": None)
+    monkeypatch.setattr(
+        runtime_checks,
+        "_socket_wait",
+        lambda handle, deadline, writable, trace=None, stage="send": None,
+    )
 
     class SendallSocket:
         def sendall(self, payload):
@@ -2715,7 +3589,11 @@ def test_socket_sendall_omits_operation_when_absent(monkeypatch):
 
 
 def test_socket_sendall_charges_budget_on_successful_send(monkeypatch):
-    monkeypatch.setattr(runtime_checks, "_socket_wait", lambda handle, deadline, writable, trace=None, stage="send": None)
+    monkeypatch.setattr(
+        runtime_checks,
+        "_socket_wait",
+        lambda handle, deadline, writable, trace=None, stage="send": None,
+    )
     monkeypatch.setattr(runtime_checks, "_sleep_ms", lambda value_ms: None)
 
     class SendallSocket:
@@ -2723,14 +3601,22 @@ def test_socket_sendall_charges_budget_on_successful_send(monkeypatch):
             return None
 
     budget = runtime_checks._ProbeBudget(max_ops=1, pacing_ms=0)
-    runtime_checks._socket_sendall(SendallSocket(), b"x", ("perf", 1.0), stage="send", budget=budget)
+    runtime_checks._socket_sendall(
+        SendallSocket(), b"x", ("perf", 1.0), stage="send", budget=budget
+    )
     assert budget.remaining == 0
     with pytest.raises(TimeoutError, match="probe io budget exhausted"):
-        runtime_checks._socket_sendall(SendallSocket(), b"x", ("perf", 1.0), stage="send", budget=budget)
+        runtime_checks._socket_sendall(
+            SendallSocket(), b"x", ("perf", 1.0), stage="send", budget=budget
+        )
 
 
 def test_socket_sendall_exhausts_budget_mid_loop_on_partial_sends(monkeypatch):
-    monkeypatch.setattr(runtime_checks, "_socket_wait", lambda handle, deadline, writable, trace=None, stage="send": None)
+    monkeypatch.setattr(
+        runtime_checks,
+        "_socket_wait",
+        lambda handle, deadline, writable, trace=None, stage="send": None,
+    )
     monkeypatch.setattr(runtime_checks, "_sleep_ms", lambda value_ms: None)
 
     class PartialSender:
@@ -2749,7 +3635,11 @@ def test_socket_sendall_exhausts_budget_mid_loop_on_partial_sends(monkeypatch):
 
 
 def test_socket_sendall_exhausts_budget_on_would_block_storm(monkeypatch):
-    monkeypatch.setattr(runtime_checks, "_socket_wait", lambda handle, deadline, writable, trace=None, stage="send": None)
+    monkeypatch.setattr(
+        runtime_checks,
+        "_socket_wait",
+        lambda handle, deadline, writable, trace=None, stage="send": None,
+    )
     monkeypatch.setattr(runtime_checks, "_sleep_ms", lambda value_ms: None)
 
     class WouldBlockSender:
@@ -2768,7 +3658,11 @@ def test_socket_sendall_exhausts_budget_on_would_block_storm(monkeypatch):
 
 
 def test_socket_recv_charges_budget(monkeypatch):
-    monkeypatch.setattr(runtime_checks, "_socket_wait", lambda handle, deadline, writable, trace=None, stage="recv": None)
+    monkeypatch.setattr(
+        runtime_checks,
+        "_socket_wait",
+        lambda handle, deadline, writable, trace=None, stage="recv": None,
+    )
     monkeypatch.setattr(runtime_checks, "_sleep_ms", lambda value_ms: None)
 
     class RecvSocket:
@@ -2783,7 +3677,11 @@ def test_socket_recv_charges_budget(monkeypatch):
 
 
 def test_socket_recv_exhausts_budget_on_would_block_storm(monkeypatch):
-    monkeypatch.setattr(runtime_checks, "_socket_wait", lambda handle, deadline, writable, trace=None, stage="recv": None)
+    monkeypatch.setattr(
+        runtime_checks,
+        "_socket_wait",
+        lambda handle, deadline, writable, trace=None, stage="recv": None,
+    )
     monkeypatch.setattr(runtime_checks, "_sleep_ms", lambda value_ms: None)
 
     class WouldBlockRecvSocket:
@@ -2802,7 +3700,11 @@ def test_socket_recv_exhausts_budget_on_would_block_storm(monkeypatch):
 
 
 def test_recv_until_closed_exhausts_budget_on_slow_drip_peer(monkeypatch):
-    monkeypatch.setattr(runtime_checks, "_socket_wait", lambda handle, deadline, writable, trace=None, stage="recv": None)
+    monkeypatch.setattr(
+        runtime_checks,
+        "_socket_wait",
+        lambda handle, deadline, writable, trace=None, stage="recv": None,
+    )
     monkeypatch.setattr(runtime_checks, "_sleep_ms", lambda value_ms: None)
 
     class SlowDripSocket:
@@ -2833,7 +3735,9 @@ def test_socket_wait_falls_back_to_local_wait_accounting_when_deadline_stalls(mo
 
     monkeypatch.setattr(runtime_checks.select, "poll", lambda: FakePoller())
     remaining_values = iter((1500, 1500, 0))
-    monkeypatch.setattr(runtime_checks, "_deadline_remaining_ms", lambda deadline: next(remaining_values))
+    monkeypatch.setattr(
+        runtime_checks, "_deadline_remaining_ms", lambda deadline: next(remaining_values)
+    )
 
     with pytest.raises(TimeoutError, match="timed out"):
         runtime_checks._socket_wait(object(), ("perf", 1.0), writable=False, stage="recv")
@@ -2887,7 +3791,9 @@ def test_read_telnet_until_idle_respects_deadline(monkeypatch):
 
 def test_read_telnet_until_idle_stops_when_deadline_expires_mid_loop(monkeypatch):
     remaining_ms = iter((5, 0))
-    monkeypatch.setattr(runtime_checks, "_deadline_remaining_ms", lambda deadline: next(remaining_ms, 0))
+    monkeypatch.setattr(
+        runtime_checks, "_deadline_remaining_ms", lambda deadline: next(remaining_ms, 0)
+    )
 
     class ChattyPeer:
         def __init__(self):
@@ -2983,13 +3889,17 @@ def test_telnet_strip_negotiation_uses_budgeted_telnet_send_path(monkeypatch):
     assert cleaned == b"login: "
     assert handle.sent == [bytes((255, 252, 1))]
     assert budget.remaining == 0
-    assert events == [("socket-send", {"stage": "telnet-send", "operation": "telnet-iac", "bytes_sent": 3})]
+    assert events == [
+        ("socket-send", {"stage": "telnet-send", "operation": "telnet-iac", "bytes_sent": 3})
+    ]
 
 
 def test_portable_http_runner_emits_method_and_path_operation(monkeypatch):
     handle = FakeSocket([b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\nOK", b""])
 
-    monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s, **kwargs: handle)
+    monkeypatch.setattr(
+        "vivipi.runtime.checks._open_socket", lambda host, port, timeout_s, **kwargs: handle
+    )
 
     send_events: list[dict[str, object]] = []
 
@@ -3018,11 +3928,13 @@ def test_portable_ftp_runner_emits_redacted_pass_operation(monkeypatch):
         b"220 welcome\r\n",
         b"331 need password\r\n",
         b"230 ok\r\n",
-        b"257 \"/home/user\"\r\n",
+        b'257 "/home/user"\r\n',
         b"221 bye\r\n",
     ]
     handle = scripted(responses)
-    monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s, **kwargs: handle)
+    monkeypatch.setattr(
+        "vivipi.runtime.checks._open_socket", lambda host, port, timeout_s, **kwargs: handle
+    )
     monkeypatch.setattr(runtime_checks, "_is_micropython_runtime", lambda: True)
 
     send_events: list[dict[str, object]] = []
@@ -3031,7 +3943,9 @@ def test_portable_ftp_runner_emits_redacted_pass_operation(monkeypatch):
         if event == "socket-send":
             send_events.append(fields)
 
-    result = portable_ftp_runner("ftp://service.example.local", 5, username="alice", password="hunter2", trace=trace)
+    result = portable_ftp_runner(
+        "ftp://service.example.local", 5, username="alice", password="hunter2", trace=trace
+    )
     assert result.ok is True
     operations = [fields.get("operation") for fields in send_events]
     assert "USER alice" in operations
@@ -3050,11 +3964,13 @@ def test_portable_ftp_runner_emits_endpoint_and_operation_on_recv(monkeypatch):
             b"220 welcome\r\n",
             b"331 need password\r\n",
             b"230 ok\r\n",
-            b"257 \"/home/user\"\r\n",
+            b'257 "/home/user"\r\n',
             b"221 bye\r\n",
         ]
     )
-    monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s, **kwargs: handle)
+    monkeypatch.setattr(
+        "vivipi.runtime.checks._open_socket", lambda host, port, timeout_s, **kwargs: handle
+    )
     monkeypatch.setattr(runtime_checks, "_is_micropython_runtime", lambda: True)
 
     recv_events: list[dict[str, object]] = []
@@ -3063,14 +3979,41 @@ def test_portable_ftp_runner_emits_endpoint_and_operation_on_recv(monkeypatch):
         if event == "socket-recv":
             recv_events.append(fields)
 
-    result = portable_ftp_runner("ftp://service.example.local", 5, username="alice", password="hunter2", trace=trace)
+    result = portable_ftp_runner(
+        "ftp://service.example.local", 5, username="alice", password="hunter2", trace=trace
+    )
     assert result.ok is True
     assert recv_events == [
-        {"stage": "ftp-recv", "operation": "server-greeting", "target": "service.example.local:21", "bytes_received": 13},
-        {"stage": "ftp-recv", "operation": "USER alice", "target": "service.example.local:21", "bytes_received": 19},
-        {"stage": "ftp-recv", "operation": "PASS ***", "target": "service.example.local:21", "bytes_received": 8},
-        {"stage": "ftp-recv", "operation": "PWD", "target": "service.example.local:21", "bytes_received": 18},
-        {"stage": "ftp-recv", "operation": "QUIT", "target": "service.example.local:21", "bytes_received": 9},
+        {
+            "stage": "ftp-recv",
+            "operation": "server-greeting",
+            "target": "service.example.local:21",
+            "bytes_received": 13,
+        },
+        {
+            "stage": "ftp-recv",
+            "operation": "USER alice",
+            "target": "service.example.local:21",
+            "bytes_received": 19,
+        },
+        {
+            "stage": "ftp-recv",
+            "operation": "PASS ***",
+            "target": "service.example.local:21",
+            "bytes_received": 8,
+        },
+        {
+            "stage": "ftp-recv",
+            "operation": "PWD",
+            "target": "service.example.local:21",
+            "bytes_received": 18,
+        },
+        {
+            "stage": "ftp-recv",
+            "operation": "QUIT",
+            "target": "service.example.local:21",
+            "bytes_received": 9,
+        },
     ]
 
 
@@ -3121,7 +4064,12 @@ def test_read_telnet_until_idle_emits_endpoint_and_operation_on_recv():
     assert session["has_visible_text"] is True
     assert events[0] == (
         "socket-recv",
-        {"stage": "telnet-recv", "operation": "read-visible", "target": "switch.example.local:23", "bytes_received": 8},
+        {
+            "stage": "telnet-recv",
+            "operation": "read-visible",
+            "target": "switch.example.local:23",
+            "bytes_received": 8,
+        },
     )
 
 
@@ -3135,7 +4083,11 @@ def test_read_telnet_until_idle_reports_collect_visible_socket_errors(monkeypatc
             self.timeout_values.append(value)
 
     handle = ChunkSocket()
-    monkeypatch.setattr(runtime_checks, "_telnet_collect_visible", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("refused")))
+    monkeypatch.setattr(
+        runtime_checks,
+        "_telnet_collect_visible",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("refused")),
+    )
 
     session = runtime_checks._read_telnet_until_idle(handle)
 
@@ -3153,7 +4105,11 @@ def test_read_telnet_until_idle_reports_non_budget_timeout_from_collect_visible(
             self.timeout_values.append(value)
 
     handle = ChunkSocket()
-    monkeypatch.setattr(runtime_checks, "_telnet_collect_visible", lambda *args, **kwargs: (_ for _ in ()).throw(TimeoutError("timed out")))
+    monkeypatch.setattr(
+        runtime_checks,
+        "_telnet_collect_visible",
+        lambda *args, **kwargs: (_ for _ in ()).throw(TimeoutError("timed out")),
+    )
 
     session = runtime_checks._read_telnet_until_idle(handle)
 
@@ -3163,7 +4119,11 @@ def test_read_telnet_until_idle_reports_non_budget_timeout_from_collect_visible(
 
 def test_read_telnet_until_idle_reports_stable_open_before_first_read(monkeypatch):
     monkeypatch.setattr(runtime_checks, "_start_timer", lambda: (object(), False))
-    monkeypatch.setattr(runtime_checks, "_elapsed_ms", lambda started_at, uses_ticks_ms: runtime_checks.TELNET_STABLE_OPEN_THRESHOLD_MS)
+    monkeypatch.setattr(
+        runtime_checks,
+        "_elapsed_ms",
+        lambda started_at, uses_ticks_ms: runtime_checks.TELNET_STABLE_OPEN_THRESHOLD_MS,
+    )
 
     session = runtime_checks._read_telnet_until_idle(object())
 
@@ -3194,7 +4154,9 @@ def test_read_telnet_until_idle_retries_timeout_after_meaningful_interaction(mon
 
     elapsed_values = iter((0.0, 0.0, 90.0, 150.0, 250.0, 510.0, 510.0, 510.0))
     monkeypatch.setattr(runtime_checks, "_start_timer", lambda: (object(), False))
-    monkeypatch.setattr(runtime_checks, "_elapsed_ms", lambda started_at, uses_ticks_ms: next(elapsed_values))
+    monkeypatch.setattr(
+        runtime_checks, "_elapsed_ms", lambda started_at, uses_ticks_ms: next(elapsed_values)
+    )
 
     handle = VisibleThenTimeoutSocket()
     session = runtime_checks._read_telnet_until_idle(handle, quiet_timeout_s=0.01)
@@ -3221,7 +4183,9 @@ def test_read_telnet_until_idle_retries_oserror_timeout_after_meaningful_interac
 
     elapsed_values = iter((0.0, 0.0, 90.0, 150.0, 250.0, 510.0, 510.0, 510.0))
     monkeypatch.setattr(runtime_checks, "_start_timer", lambda: (object(), False))
-    monkeypatch.setattr(runtime_checks, "_elapsed_ms", lambda started_at, uses_ticks_ms: next(elapsed_values))
+    monkeypatch.setattr(
+        runtime_checks, "_elapsed_ms", lambda started_at, uses_ticks_ms: next(elapsed_values)
+    )
 
     handle = VisibleThenOSErrorTimeoutSocket()
     session = runtime_checks._read_telnet_until_idle(handle, quiet_timeout_s=0.01)
@@ -3252,3 +4216,446 @@ def test_read_telnet_until_idle_continues_after_handshake_only_chunks(monkeypatc
     assert session["close_reason"] == "remote-close"
     assert session["handshake_detected"] is True
     assert session["has_visible_text"] is False
+
+
+# ---------------------------------------------------------------------------
+# _icmp_checksum
+# ---------------------------------------------------------------------------
+
+def test_icmp_checksum_pads_odd_length_payload():
+    # An odd-length payload must be zero-padded before folding
+    result = runtime_checks._icmp_checksum(b"\x01")
+    assert isinstance(result, int)
+    assert 0 <= result <= 0xFFFF
+
+
+def test_icmp_checksum_even_length_payload():
+    result = runtime_checks._icmp_checksum(b"\x01\x02")
+    assert isinstance(result, int)
+    assert 0 <= result <= 0xFFFF
+
+
+# ---------------------------------------------------------------------------
+# _icmp_reply_offset
+# ---------------------------------------------------------------------------
+
+def test_icmp_reply_offset_returns_zero_for_raw_icmp_packet():
+    # First byte is ICMP_ECHO_REPLY_TYPE (0) — raw socket that already stripped IP header
+    packet = bytes([0, 0, 0, 0, 0, 0, 0, 0])
+    assert runtime_checks._icmp_reply_offset(packet) == 0
+
+
+def test_icmp_reply_offset_returns_none_for_unrecognised_packet():
+    # Packet too short and no recognisable format
+    assert runtime_checks._icmp_reply_offset(b"\x99\x00") is None
+
+
+def test_icmp_reply_offset_returns_none_for_empty_packet():
+    assert runtime_checks._icmp_reply_offset(b"") is None
+
+
+# ---------------------------------------------------------------------------
+# _raw_icmp_ping — socket creation failure path
+# ---------------------------------------------------------------------------
+
+def test_raw_icmp_ping_returns_none_when_socket_creation_fails(monkeypatch):
+    def _fail(*args, **kwargs):
+        raise PermissionError("operation not permitted")
+
+    monkeypatch.setattr(runtime_checks.socket, "socket", _fail)
+    result = runtime_checks._raw_icmp_ping("192.0.2.1", 1)
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# _parse_socket_target_with_schemes
+# ---------------------------------------------------------------------------
+
+def test_parse_socket_target_with_schemes_rejects_wrong_scheme():
+    with pytest.raises(ValueError, match="expected"):
+        runtime_checks._parse_socket_target_with_schemes(
+            "ftp://host:21", 64, expected_schemes=("ident", "dma")
+        )
+
+
+def test_parse_socket_target_with_schemes_rejects_url_without_hostname():
+    with pytest.raises(ValueError, match="host"):
+        runtime_checks._parse_socket_target_with_schemes(
+            "ident://:64", 64, expected_schemes=("ident",)
+        )
+
+
+def test_parse_socket_target_with_schemes_parses_host_colon_port():
+    host, port = runtime_checks._parse_socket_target_with_schemes("myhost:1234", 64)
+    assert host == "myhost"
+    assert port == 1234
+
+
+def test_parse_socket_target_with_schemes_returns_default_port_for_plain_hostname():
+    host, port = runtime_checks._parse_socket_target_with_schemes("myhost", 64)
+    assert host == "myhost"
+    assert port == 64
+
+
+def test_parse_socket_target_with_schemes_raises_for_empty_target():
+    with pytest.raises(ValueError, match="host"):
+        runtime_checks._parse_socket_target_with_schemes("", 64)
+
+
+# ---------------------------------------------------------------------------
+# portable_ident_runner — validation failure paths
+# ---------------------------------------------------------------------------
+
+def test_portable_ident_runner_fails_on_non_dict_json(monkeypatch):
+    class ListResponseSocket:
+        def settimeout(self, t):
+            pass
+
+        def sendto(self, payload, addr):
+            pass
+
+        def recvfrom(self, size):
+            return (b"[1, 2, 3]", ("host", 64))
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(runtime_checks, "_probe_nonce", lambda: "nonce-1")
+    monkeypatch.setattr(runtime_checks.socket, "socket", lambda *a, **kw: ListResponseSocket())
+
+    result = portable_ident_runner("ident://host:64", 10)
+
+    assert result.ok is False
+    assert "invalid ident payload" in result.details
+
+
+def test_portable_ident_runner_fails_on_missing_required_field(monkeypatch):
+    class MissingFieldSocket:
+        def settimeout(self, t):
+            pass
+
+        def sendto(self, payload, addr):
+            pass
+
+        def recvfrom(self, size):
+            # Missing "firmware_version"
+            return (
+                b'{"product":"U64","hostname":"u64","your_string":"nonce-1"}',
+                ("host", 64),
+            )
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(runtime_checks, "_probe_nonce", lambda: "nonce-1")
+    monkeypatch.setattr(runtime_checks.socket, "socket", lambda *a, **kw: MissingFieldSocket())
+
+    result = portable_ident_runner("ident://host:64", 10)
+
+    assert result.ok is False
+    assert "missing ident field" in result.details
+
+
+def test_portable_ident_runner_fails_on_echo_mismatch(monkeypatch):
+    class BadEchoSocket:
+        def settimeout(self, t):
+            pass
+
+        def sendto(self, payload, addr):
+            pass
+
+        def recvfrom(self, size):
+            return (
+                b'{"product":"U64","firmware_version":"1.0","hostname":"u64","your_string":"wrong"}',
+                ("host", 64),
+            )
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(runtime_checks, "_probe_nonce", lambda: "nonce-1")
+    monkeypatch.setattr(runtime_checks.socket, "socket", lambda *a, **kw: BadEchoSocket())
+
+    result = portable_ident_runner("ident://host:64", 10)
+
+    assert result.ok is False
+    assert "ident echo mismatch" in result.details
+
+
+# ---------------------------------------------------------------------------
+# _dma_authenticate — no-password early return and auth failure
+# ---------------------------------------------------------------------------
+
+def test_dma_authenticate_skips_when_no_password(monkeypatch):
+    calls = []
+
+    class SpySocket:
+        def sendall(self, data):
+            calls.append(data)
+
+        def recv(self, n):
+            return b"\x00"
+
+    deadline = runtime_checks._deadline_after_s(10)
+    # Should return without sending anything
+    runtime_checks._dma_authenticate(SpySocket(), None, deadline, target="host:64")
+    assert calls == []
+
+    runtime_checks._dma_authenticate(SpySocket(), "", deadline, target="host:64")
+    assert calls == []
+
+
+def test_dma_authenticate_raises_on_rejection(monkeypatch):
+    class RejectSocket:
+        def sendall(self, data):
+            pass
+
+        def recv(self, n):
+            return b"\x00"  # not b"\x01" — auth rejected
+
+    deadline = runtime_checks._deadline_after_s(10)
+    with pytest.raises(RuntimeError, match="authentication failed"):
+        runtime_checks._dma_authenticate(RejectSocket(), "wrong", deadline, target="host:64")
+
+
+# ---------------------------------------------------------------------------
+# _dma_recv_exact — short read
+# ---------------------------------------------------------------------------
+
+def test_dma_recv_exact_raises_on_short_read(monkeypatch):
+    class EmptySocket:
+        def recv(self, n):
+            return b""  # EOF immediately
+
+    deadline = runtime_checks._deadline_after_s(10)
+    with pytest.raises(RuntimeError, match="short dma read"):
+        runtime_checks._dma_recv_exact(EmptySocket(), 4, deadline, operation="test", target="host:64")
+
+
+# ---------------------------------------------------------------------------
+# _dma_identify — empty title
+# ---------------------------------------------------------------------------
+
+def test_dma_identify_raises_on_zero_length_title(monkeypatch):
+    class ZeroLenSocket:
+        def sendall(self, data):
+            pass
+
+        def recv(self, n):
+            return b"\x00"  # title_length == 0
+
+    deadline = runtime_checks._deadline_after_s(10)
+    with pytest.raises(RuntimeError, match="empty identify title"):
+        runtime_checks._dma_identify(ZeroLenSocket(), deadline, target="host:64")
+
+
+def test_dma_identify_raises_on_whitespace_only_title(monkeypatch):
+    responses = iter([b"\x03", b"   "])  # 3-byte title that is all spaces
+
+    class WhitespaceSocket:
+        def sendall(self, data):
+            pass
+
+        def recv(self, n):
+            return next(responses)
+
+    deadline = runtime_checks._deadline_after_s(10)
+    with pytest.raises(RuntimeError, match="empty identify title"):
+        runtime_checks._dma_identify(WhitespaceSocket(), deadline, target="host:64")
+
+
+# ---------------------------------------------------------------------------
+# portable_dma_runner — flash validation and exception path
+# ---------------------------------------------------------------------------
+
+def test_portable_dma_runner_fails_on_zero_flash_page_size(monkeypatch):
+    class ZeroPageSizeSocket:
+        def __init__(self):
+            self.responses = [
+                b"\x01",              # auth OK
+                b"\x03", b"U64",      # identify: len=3, title="U64"
+                b"\x00",              # debug_reg
+                (0).to_bytes(4, "little"),    # page_size = 0 (invalid)
+                (4096).to_bytes(4, "little"),
+            ]
+
+        def settimeout(self, t):
+            pass
+
+        def sendall(self, data):
+            pass
+
+        def recv(self, n):
+            return self.responses.pop(0)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(runtime_checks, "_maybe_collect_gc", lambda **kw: None)
+    monkeypatch.setattr(
+        runtime_checks, "_open_socket_compat",
+        lambda host, port, timeout_s, deadline, trace=None: ZeroPageSizeSocket()
+    )
+
+    result = portable_dma_runner("dma://host:64", 10, password="p")
+
+    assert result.ok is False
+    assert "flash page size" in result.details
+
+
+def test_portable_dma_runner_fails_on_zero_flash_page_count(monkeypatch):
+    class ZeroPageCountSocket:
+        def __init__(self):
+            self.responses = [
+                b"\x01",
+                b"\x03", b"U64",
+                b"\x00",
+                (256).to_bytes(4, "little"),
+                (0).to_bytes(4, "little"),  # page_count = 0 (invalid)
+            ]
+
+        def settimeout(self, t):
+            pass
+
+        def sendall(self, data):
+            pass
+
+        def recv(self, n):
+            return self.responses.pop(0)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(runtime_checks, "_maybe_collect_gc", lambda **kw: None)
+    monkeypatch.setattr(
+        runtime_checks, "_open_socket_compat",
+        lambda host, port, timeout_s, deadline, trace=None: ZeroPageCountSocket()
+    )
+
+    result = portable_dma_runner("dma://host:64", 10, password="p")
+
+    assert result.ok is False
+    assert "flash page count" in result.details
+
+
+def test_portable_dma_runner_returns_fail_on_connection_error(monkeypatch):
+    monkeypatch.setattr(runtime_checks, "_maybe_collect_gc", lambda **kw: None)
+    monkeypatch.setattr(
+        runtime_checks, "_open_socket_compat",
+        lambda host, port, timeout_s, deadline, trace=None: (_ for _ in ()).throw(OSError("refused"))
+    )
+
+    result = portable_dma_runner("dma://host:64", 10)
+
+    assert result.ok is False
+    assert result.details != ""
+
+
+# ---------------------------------------------------------------------------
+# _raw_icmp_ping — loop filtering and exception paths
+# ---------------------------------------------------------------------------
+
+def test_raw_icmp_ping_filters_mismatched_packets_then_succeeds(monkeypatch):
+    import struct as _struct
+
+    responses = []
+
+    # Packet 1: _icmp_reply_offset returns None (too short)
+    responses.append(b"\x99")  # 1 byte, no recognisable header -> None
+
+    # Packet 2: correct offset 0 but wrong message type (not ICMP_ECHO_REPLY_TYPE)
+    bad_type_pkt = _struct.pack("!BBHHH", 8, 0, 0, 0xABCD, 1)  # type=8 (request)
+    responses.append(bad_type_pkt)
+
+    # Packet 3: right type but wrong identifier
+    wrong_id_pkt = _struct.pack("!BBHHH", 0, 0, 0, 0xFFFF, 1)  # type=0, identifier != real
+    responses.append(wrong_id_pkt)
+
+    # We'll force a TimeoutError after the 3 bad packets so the function exits via exception
+    responses.append(TimeoutError("timed out"))
+
+    recv_iter = iter(responses)
+
+    class FilteringSocket:
+        def settimeout(self, t):
+            pass
+
+        def sendto(self, data, addr):
+            pass
+
+        def recvfrom(self, n):
+            item = next(recv_iter)
+            if isinstance(item, BaseException):
+                raise item
+            return (item, ("192.0.2.1", 0))
+
+        def close(self):
+            pass
+
+        def fileno(self):
+            return -1
+
+    monkeypatch.setattr(runtime_checks.socket, "socket", lambda *a, **kw: FilteringSocket())
+    monkeypatch.setattr(
+        runtime_checks.socket, "getaddrinfo",
+        lambda *a, **kw: [(None, None, None, None, ("192.0.2.1", 0))]
+    )
+
+    result = runtime_checks._raw_icmp_ping("192.0.2.1", 1)
+
+    assert result is not None
+    assert result.ok is False  # timed out after filtering
+
+
+def test_raw_icmp_ping_returns_fail_on_socket_exception(monkeypatch):
+    class ErrorSocket:
+        def settimeout(self, t):
+            pass
+
+        def sendto(self, data, addr):
+            raise OSError("network unreachable")
+
+        def recvfrom(self, n):
+            raise OSError("unreachable")
+
+        def close(self):
+            pass
+
+        def fileno(self):
+            return -1
+
+    monkeypatch.setattr(runtime_checks.socket, "socket", lambda *a, **kw: ErrorSocket())
+    monkeypatch.setattr(
+        runtime_checks.socket, "getaddrinfo",
+        lambda *a, **kw: [(None, None, None, None, ("192.0.2.1", 0))]
+    )
+
+    result = runtime_checks._raw_icmp_ping("192.0.2.1", 1)
+
+    assert result is not None
+    assert result.ok is False
+
+
+def test_icmp_reply_offset_returns_header_length_for_ipv4_encapsulated_packet():
+    # IPv4 packet: version=4, IHL=5 (0x45), total 28+ bytes, ICMP payload after header
+    # First byte 0x45: version=4 (>>4 == 4), IHL=5 (& 0x0F == 5, header_length = 20)
+    # Need at least 28 bytes total; header_length(20) + 8 = 28 <= len(packet)
+    ipv4_header = bytes([0x45]) + bytes(27)  # 28 bytes total, IHL=5 → header_length=20
+    offset = runtime_checks._icmp_reply_offset(ipv4_header)
+    assert offset == 20
+
+
+def test_portable_ident_runner_breaks_on_expired_deadline(monkeypatch):
+    monkeypatch.setattr(runtime_checks, "_probe_nonce", lambda: "nonce-1")
+    # Provide a deadline that is already past so _deadline_remaining_s raises immediately
+    monkeypatch.setattr(
+        runtime_checks,
+        "_deadline_remaining_s",
+        lambda _deadline: (_ for _ in ()).throw(TimeoutError("expired")),
+    )
+    monkeypatch.setattr(runtime_checks.socket, "socket", lambda *a, **kw: None)
+
+    result = portable_ident_runner("ident://host:64", 1)
+
+    assert result.ok is False
+    assert "timeout" in result.details

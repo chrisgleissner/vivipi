@@ -2,8 +2,8 @@ checks:
   - name: Router
     type: ping
     target: 192.168.1.1
-    interval_s: 10
-    timeout_s: 8
+    interval_s: 15
+    timeout_s: 12
 
   - name: NAS API
     type: http

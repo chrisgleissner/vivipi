@@ -214,6 +214,20 @@ Checks are evaluated periodically.
 - Latency measured locally
 - Failure = no response or timeout
 
+### IDENT
+
+- UDP port 64 JSON discovery request
+- Success requires a valid JSON object with `product`, `firmware_version`, `hostname`, and `your_string`
+- `your_string` MUST echo the nonce sent by the probe
+- Failure = invalid JSON, missing required fields, echo mismatch, connection failure, or timeout
+
+### DMA
+
+- TCP port 64 DMA command session
+- The probe MAY authenticate first when a password is configured
+- Success requires a valid identify response, a readable debug register, and valid flash metadata
+- Failure = authentication failure, invalid response payload, connection failure, or timeout
+
 ### HTTP
 
 - HTTP request
@@ -363,7 +377,7 @@ If more checks exist than fit on the current page:
 
 - Pagination is used
 - Pages are cyclic
-- Default automatic page interval: 15 seconds
+- Default automatic page interval: 20 seconds
 - Automatic page cycling MAY be disabled with a `0s` interval
 
 [VIVIPI-UX-PAGE-001]

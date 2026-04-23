@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import socket
+
 from tests.unit.tooling._script_loader import load_script_module
 
 
@@ -15,8 +17,20 @@ def load_http():
     return load_script_module("u64_http")
 
 
+def load_ident():
+    return load_script_module("u64_ident")
+
+
 def load_ping():
     return load_script_module("u64_ping")
+
+
+def load_modem():
+    return load_script_module("u64_modem")
+
+
+def load_dma():
+    return load_script_module("u64_raw64")
 
 
 def load_connection_test():
@@ -73,6 +87,43 @@ def test_http_normal_mode_requests_connection_close_and_reads_body(monkeypatch):
     assert calls[-1] == "close"
 
 
+def test_http_request_adds_x_password_when_configured(monkeypatch):
+    runtime = load_runtime()
+    module = load_http()
+    settings = runtime.RuntimeSettings("host", "v1/version", 80, 23, 21, "anonymous", "", 0, 1, True, network_password="secret")
+    captured = {}
+
+    class FakeResponse:
+        status = 200
+
+        def read(self):
+            return b"ok"
+
+    class FakeConnection:
+        def __init__(self, host, port, timeout):
+            del host, port, timeout
+
+        def request(self, method, path, headers):
+            captured["headers"] = headers
+            captured["method"] = method
+            captured["path"] = path
+
+        def getresponse(self):
+            return FakeResponse()
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(module.http.client, "HTTPConnection", FakeConnection)
+
+    outcome = module.run_probe(settings, runtime.ProbeCorrectness.COMPLETE)
+
+    assert outcome.result == "OK"
+    assert captured["method"] == "GET"
+    assert captured["path"] == "/v1/version"
+    assert captured["headers"] == {"Connection": "close", "X-Password": "secret"}
+
+
 def test_http_surface_operations_retry_transient_transport_errors(monkeypatch):
     runtime = load_runtime()
     module = load_http()
@@ -124,6 +175,194 @@ def test_ping_probe_uses_ping_terminology(monkeypatch):
 
     assert outcome.result == "OK"
     assert outcome.detail.startswith("ping_reply_ms=")
+
+
+def test_ident_probe_requires_json_reply_with_echo(monkeypatch):
+    runtime = load_runtime()
+    module = load_ident()
+    calls = []
+
+    class FakeSocket:
+        def settimeout(self, timeout):
+            calls.append(("settimeout", timeout))
+
+        def sendto(self, payload, address):
+            calls.append(("sendto", payload, address))
+
+        def recvfrom(self, size):
+            del size
+            return (b'{"product":"U64","firmware_version":"1.0","hostname":"u64","your_string":"nonce-1"}', ("host", 64))
+
+        def close(self):
+            calls.append("close")
+
+    monkeypatch.setattr(module, "ident_nonce", lambda: "nonce-1")
+    monkeypatch.setattr(module, "_expected_ident_addresses", lambda host: {"host"})
+    monkeypatch.setattr(module.socket, "socket", lambda *args, **kwargs: FakeSocket())
+
+    outcome = module.run_probe(make_settings(runtime), runtime.ProbeCorrectness.COMPLETE)
+
+    assert outcome.result == "OK"
+    assert ("sendto", b"jsonnonce-1", ("host", 64)) in calls
+    assert calls[-1] == "close"
+
+
+def test_dma_probe_authenticates_identifies_and_reads_debug_register(monkeypatch):
+    runtime = load_runtime()
+    module = load_dma()
+    settings = runtime.RuntimeSettings("host", "v1/version", 80, 23, 21, "anonymous", "", 0, 1, True, network_password="secret")
+    calls = []
+
+    class FakeSocket:
+        def __init__(self):
+            self.responses = [b"\x01", b"\x03", b"U64", b"\x5A"]
+
+        def settimeout(self, timeout):
+            calls.append(("settimeout", timeout))
+
+        def sendall(self, payload):
+            calls.append(("sendall", payload))
+
+        def recv(self, size):
+            response = self.responses.pop(0)
+            assert len(response) == size
+            return response
+
+        def close(self):
+            calls.append("close")
+
+    monkeypatch.setattr(module.socket, "create_connection", lambda address, timeout: FakeSocket())
+
+    outcome = module.run_probe(settings, runtime.ProbeCorrectness.COMPLETE)
+
+    assert outcome.result == "OK"
+    assert "title=U64" in outcome.detail
+    assert "debug_reg=0x5A" in outcome.detail
+    assert calls.count("close") == 1
+
+
+def test_dma_readwrite_surface_restores_debug_register(monkeypatch):
+    runtime = load_runtime()
+    module = load_dma()
+    calls = []
+
+    class WriteRestoreState:
+        def next_probe_operation_index(self, protocol, runner_id, surface, pool_size):
+            del protocol, runner_id, surface, pool_size
+            return 4
+
+    class FakeSocket:
+        def __init__(self):
+            self.responses = [b"\xAA", b"\xAA", b"\xAB", b"\xAB", b"\xAA"]
+
+        def settimeout(self, timeout):
+            calls.append(("settimeout", timeout))
+
+        def sendall(self, payload):
+            calls.append(("sendall", payload))
+
+        def recv(self, size):
+            response = self.responses.pop(0)
+            assert len(response) == size
+            return response
+
+        def close(self):
+            calls.append("close")
+
+    monkeypatch.setattr(module.socket, "create_connection", lambda address, timeout: FakeSocket())
+
+    context = runtime.ProbeExecutionContext(
+        protocol="dma",
+        runner_id=1,
+        iteration=5,
+        surface=runtime.ProbeSurface.READWRITE,
+        state=WriteRestoreState(),
+    )
+
+    outcome = module.run_probe(make_settings(runtime), runtime.ProbeCorrectness.COMPLETE, context=context)
+
+    assert outcome.result == "OK"
+    assert outcome.detail == "surface=readwrite op=dma_debug_register_write_restore debug_reg_restored=0xAA temporary=0xAB"
+    assert calls == [
+        ("settimeout", module.DMA_TIMEOUT_S),
+        ("sendall", module.command_frame(module.SOCKET_CMD_DEBUG_REG)),
+        ("sendall", module.command_frame(module.SOCKET_CMD_DEBUG_REG, b"\xAB")),
+        ("sendall", module.command_frame(module.SOCKET_CMD_DEBUG_REG)),
+        ("sendall", module.command_frame(module.SOCKET_CMD_DEBUG_REG, b"\xAA")),
+        ("sendall", module.command_frame(module.SOCKET_CMD_DEBUG_REG)),
+        "close",
+    ]
+
+
+def test_ftp_connect_uses_shared_network_password(monkeypatch):
+    runtime = load_runtime()
+    module = load_ftp()
+    settings = runtime.RuntimeSettings("host", "v1/version", 80, 23, 21, "anonymous", "shared-secret", 0, 1, True, network_password="shared-secret")
+    calls = []
+
+    class FakeFTP:
+        def connect(self, host, port, timeout):
+            calls.append(("connect", host, port, timeout))
+            return "220 ready"
+
+        def login(self, user, password):
+            calls.append(("login", user, password))
+            return "230 logged in"
+
+        def set_pasv(self, enabled):
+            calls.append(("set_pasv", enabled))
+
+    module.ftplib.FTP = FakeFTP
+
+    ftp = module.connect(settings)
+
+    assert isinstance(ftp, FakeFTP)
+    assert calls == [
+        ("connect", "host", 21, 3),
+        ("login", "anonymous", "shared-secret"),
+        ("set_pasv", True),
+    ]
+
+
+def test_modem_probe_classifies_offline_banner(monkeypatch):
+    runtime = load_runtime()
+    module = load_modem()
+    settings = runtime.RuntimeSettings("host", "v1/version", 80, 23, 21, "anonymous", "", 0, 1, True, modem_port=3456)
+    calls = []
+
+    class FakeSocket:
+        def __init__(self):
+            self.recv_count = 0
+
+        def settimeout(self, timeout):
+            calls.append(("settimeout", timeout))
+
+        def recv(self, size):
+            del size
+            self.recv_count += 1
+            calls.append("recv")
+            if self.recv_count == 1:
+                return b"Modem Software is currently not running...\n"
+            raise socket.timeout()
+
+        def close(self):
+            calls.append("close")
+
+    class FakeSocketModule:
+        timeout = socket.timeout
+
+        @staticmethod
+        def create_connection(address, timeout):
+            del address, timeout
+            return FakeSocket()
+
+    monkeypatch.setattr(module, "socket", FakeSocketModule())
+
+    outcome = module.run_probe(settings, runtime.ProbeCorrectness.COMPLETE)
+
+    assert outcome.result == "OK"
+    assert outcome.detail == "status=offline port=3456 banner_bytes=43"
+    assert calls[-1] == "close"
 
 
 def test_http_audio_mixer_write_preserves_latest_known_state(monkeypatch):

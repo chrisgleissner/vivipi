@@ -1,5 +1,206 @@
 # ViviPi Work Log
 
+## 2026-04-23T16:41:55Z
+
+- Investigated the report that Pico-side `PING` and `IDENT` were failing while the host-side `scripts/u64_connection_test.py` surfaces still passed.
+- Root cause:
+  - the Pico `portable_ping_runner()` depended on `uping` first and host `subprocess ping` second; on the deployed Pico build neither path was available, so the probe degraded to `ICMP unsupported on device` even though the firmware exposed working raw ICMP sockets
+  - the removed U64 network password was not relevant to `PING` or `IDENT`; both the generated device config and the host-side probe scripts run those surfaces without authentication
+- What changed:
+  - added a MicroPython-only raw ICMP echo fallback in `src/vivipi/runtime/checks.py` so Pico ping probes stay semantically correct instead of failing when `uping` is absent
+  - added a focused regression test covering the raw-socket fallback path in `tests/unit/runtime/test_checks.py`
+- Cross-checks performed:
+  - host-side direct script probes from `scripts/u64_ping.py` and `scripts/u64_ident.py` passed for both `192.168.1.13` and `192.168.1.167` with no network password configured
+  - direct Pico helper invocations passed for both hosts once networking was up
+  - a fresh on-device startup-path reproduction via `runtime.build_runtime_app_from_path('config.json')`, `_run_startup_network(...)`, and `_run_startup_tick(...)` logged `status=OK` for `c64u-ping`, `c64u-ident`, `u64-ping`, and `u64-ident`
+- Validation:
+  - `pytest --no-cov tests/unit/runtime/test_checks.py -k portable_ping_runner` -> `5 passed`
+  - `pytest --no-cov tests/unit/runtime/test_checks.py` -> `124 passed`
+  - `./build` -> `747 passed`, total coverage `97.10%`
+
+## 2026-04-23T16:23:37Z
+
+- Completed the in-flight Pico multi-page follow-up and then resumed the broader execution plan after the steering-only button fix.
+- What changed:
+  - kept the existing overview page-rotation mechanism and made the user-facing default consistent at `20s` for OLED/LCD Pico display families by updating `src/vivipi/core/display.py`, the firmware fallback in `firmware/runtime.py`, the local/example build configs, and the README/spec documentation
+  - added an explicit runtime regression proving overview pages do not rotate when all checks fit on a single page
+  - expanded `config/checks.local.yaml` so both `c64u` and `u64` now include direct `PING`, `IDENT`, and `DMA` probes in addition to the existing `REST`, `FTP`, and `TELNET` checks; the shipped default `config/checks.yaml` remains unchanged
+  - updated traceability and stale ordering expectations in `tests/unit/runtime/test_app.py` and `tests/unit/core/test_vivipulse.py` so the branch reflects the current FTP-before-HTTP network priority consistently
+- Why it changed:
+  - the requested multi-page feature already existed in the runtime, but its inferred default interval still documented and tested as `15s`; the execution needed the contract, config surface, and runtime defaults to agree on `20s`
+  - the local real-device profile still did not expose enough direct probes on `c64u`/`u64` to force overview paging on the Pico
+  - stale ordering assertions from earlier probe-priority changes would have blocked the final repo-wide validation gate
+- Validation:
+  - focused validation passed: `pytest --no-cov tests/unit/core/test_display_config.py tests/unit/firmware/test_firmware_input.py tests/unit/runtime/test_app.py tests/unit/tooling/test_build_deploy.py` -> `150 passed`
+  - focused vivipulse ordering validation passed after aligning the stale expectations: `pytest --no-cov tests/unit/core/test_vivipulse.py` -> `23 passed`
+  - final repo-wide validation passed: `./build` -> `746 passed`, total coverage `97.30%`
+  - `./build deploy` completed against the attached Pico, but the current `vivipi.tooling.display_capture` path rebuilds a fresh app and only produced a boot-logo-style framebuffer artifact instead of a hardware-facing proof of the live health overview; direct OLED confirmation remains outstanding
+
+## 2026-04-23T16:15:15Z
+
+- Applied the steering follow-up for sporadic Pico button handling and the unnecessary bottom-row button banner while preserving the in-flight page/probe work.
+- What changed:
+  - updated `firmware/input.py` so debounced button presses are latched across runtime ticks via optional GPIO edge interrupts when available, which prevents short taps from being missed during probe work
+  - changed the on-device button reader to emit at most one navigation event per physical press, removing hold-repeat page skips on the Pico path
+  - disabled the transient `BTN ...` overlay in `src/vivipi/runtime/app.py` so button presses no longer overwrite the bottom row
+  - updated focused firmware/runtime tests to cover the new single-fire and latched-press behavior
+- Why it changed:
+  - the existing Pico path only sampled button state during `app.tick()`, so short presses could be missed while probes were running
+  - `Button.A` intentionally auto-repeated while held, which matched the observed multi-page jumps from a single long press
+  - the `BTN ...` overlay was purely transient feedback and not needed on-screen
+- Validation:
+  - focused button-path validation passed: `pytest --no-cov tests/unit/firmware/test_firmware_input.py::test_button_reader_emits_button_a_only_once_while_held tests/unit/firmware/test_firmware_input.py::test_button_reader_latches_short_debounced_tap_between_polls_via_irq tests/unit/runtime/test_app.py::test_runtime_app_button_press_feedback_is_not_rendered tests/unit/runtime/test_app.py::test_apply_button_events_leaves_press_feedback_disabled_for_no_op_button_press tests/unit/runtime/test_app.py::test_runtime_app_enters_detail_on_button_b_and_returns_to_overview tests/unit/runtime/test_app.py::test_runtime_app_moves_selection_with_button_a` -> `6 passed`
+
+## 2026-04-23T12:42:51Z
+
+- Started Stage 1 real-device validation for the expanded Ultimate 64 host-side connection test tooling with the U64 still configured for no network password.
+- Required planning/logging files already existed, so I updated `PLANS.md` with a dedicated `U64 Connection Test Stage 1 Validation Plan` and will treat that section as the authoritative execution plan for this task.
+- Repository discovery completed before any code changes:
+  - inspected `scripts/u64_connection_test.py`, `scripts/u64_connection_runtime.py`, `scripts/u64_http.py`, `scripts/u64_telnet.py`, `scripts/u64_ftp.py`, `scripts/u64_ident.py`, `scripts/u64_raw64.py`, `scripts/u64_modem.py`, `scripts/u64_stream.py`
+  - inspected focused tooling tests in `tests/unit/tooling/test_u64_connection_test.py`, `tests/unit/tooling/test_u64_connection_protocols.py`, `tests/unit/tooling/test_u64_telnet.py`, and `tests/unit/tooling/test_u64_stream.py`
+  - inspected repository-integrated config and invocation paths in `config/build-deploy.yaml`, `config/build-deploy.local.yaml`, `config/checks.yaml`, `config/checks.local.yaml`, `src/vivipi/core/config.py`, `src/vivipi/tooling/vivipulse.py`, `src/vivipi/services/adb_service.py`, and `README.md`
+  - reviewed the task source documents in `docs/research/connection-test-expansion/u64-connection-test-expansion.md` and `docs/research/connection-test-expansion/plan.md`
+- Verified discovery findings:
+  - `scripts/u64_connection_test.py` is a standalone host-side probe driver; no production repo path currently invokes it directly
+  - the repository-integrated host path is `scripts/vivipulse`, which resolves `config/build-deploy*.yaml` plus `config/checks*.yaml` into the shared runtime probe model
+  - the active checked-in local build profile is `config/build-deploy.local.yaml`, which selects `config/checks.local.yaml`
+  - `config/checks.local.yaml` currently covers only `HTTP`, `FTP`, and `TELNET` for `c64u` and `u64`; the newly added `ident`, `raw64`, and optional `modem` surfaces are not yet exercised through the ViviPi runtime config path
+  - the checked-in config path already models an optional shared network password via `${VIVIPI_NETWORK_PASSWORD}`, and `vivipi.core.config.load_checks_config(...)` resolves missing auth placeholders to empty strings for `username` / `password`
+- Working hypothesis for Stage 1:
+  - the highest-risk no-password failures are in the newly added direct-tool `ident` / `raw64` live-device behavior or in the clarity of no-password diagnostics, not in the parser defaults alone
+- Next actions:
+  - run the focused tooling test slice unchanged
+  - run direct no-password U64 connection-test invocations, starting with `ident` and `raw64`
+  - run the repository-integrated local ViviPi path via `scripts/vivipulse --mode local`
+
+## 2026-04-23T12:50:11Z
+
+- Completed Stage 1 real-device validation for the expanded U64 host-side connection tooling against the live no-password U64 at `192.168.1.13`.
+- Focused tooling validation before fixes:
+  - `python -m pytest -o addopts='' tests/unit/tooling/test_u64_connection_test.py tests/unit/tooling/test_u64_connection_protocols.py tests/unit/tooling/test_u64_telnet.py tests/unit/tooling/test_u64_stream.py` -> `78 passed`
+- Live no-password direct-tool validation:
+  - `./.venv/bin/python scripts/u64_connection_test.py --host 192.168.1.13 --probes ident,raw64 --duration-s 5 --log-every 1 -v`
+  - observed `ident` and `raw64` both succeeding on the device, but the command exited non-zero because explicit `--probes ident,raw64` still inherited soak-profile stream monitoring and hit unrelated stream timeout failures
+  - discriminating rerun `./.venv/bin/python scripts/u64_connection_test.py --host 192.168.1.13 --profile stress --probes ident,raw64 --duration-s 5 --log-every 1 -v` confirmed the new direct surfaces were healthy and isolated the bug to config resolution, not the device protocols
+- Minimal Stage 1 fix applied:
+  - updated `scripts/u64_connection_test.py` so explicit `--probes` disables profile-default streams unless `--stream` is also supplied
+  - updated `tests/unit/tooling/test_u64_connection_test.py` with a regression test for that behavior and extended CLI help coverage
+  - documented the new behavior in the `--probes` help text
+- Post-fix validation of the repaired live scenario:
+  - `python -m pytest -o addopts='' tests/unit/tooling/test_u64_connection_test.py` -> `28 passed`
+  - re-ran `./.venv/bin/python scripts/u64_connection_test.py --host 192.168.1.13 --probes ident,raw64 --duration-s 5 --log-every 1 -v`
+  - observed `streams=off`, repeated `ident` success with strict JSON echo validation, and repeated `raw64` success across identify/debug-register/flash metadata reads with no unrelated stream failures
+- Wider direct-tool no-password validation:
+  - `./.venv/bin/python scripts/u64_connection_test.py --host 192.168.1.13 --profile stress --probes ping,http,ftp,telnet,ident,raw64 --schedule sequential --runners 1 --duration-s 3 --log-every 1 -v`
+  - observed repeated `OK` results for all six probes with `network_password_set=0`
+- Repository-integrated ViviPi path validation:
+  - first attempted `./.venv/bin/python scripts/vivipulse ...` and confirmed the failure was only an invocation mistake because `scripts/vivipulse` is a shell entrypoint, not a Python module
+  - `env -u VIVIPI_NETWORK_PASSWORD -u VIVIPI_NETWORK_USERNAME scripts/vivipulse --mode local --build-config config/build-deploy.local.yaml --check-id u64-rest --check-id u64-ftp --check-id u64-telnet` -> `Selected checks: u64-rest, u64-ftp, u64-telnet`, `Successes: 3`
+  - `VIVIPI_NETWORK_PASSWORD='' VIVIPI_NETWORK_USERNAME='' scripts/vivipulse --mode local --build-config config/build-deploy.local.yaml --check-id u64-rest --check-id u64-ftp --check-id u64-telnet` -> `Selected checks: u64-rest, u64-ftp, u64-telnet`, `Successes: 3`
+  - this verified both omitted-password and explicit-empty-password behavior through the checked-in local build-config and checks-config path
+- Optional modem listener classification:
+  - `./.venv/bin/python scripts/u64_connection_test.py --host 192.168.1.13 --profile stress --probes modem --duration-s 2 --log-every 1 -v`
+  - observed clean smoke classifications on port `3000`, alternating between `status=offline` and `status=busy`; no destructive action required and the probe remained non-blocking
+- Final focused validation after the fix:
+  - initial rerun of the required focused slice found only one wrapped-help assertion failure in `tests/unit/tooling/test_u64_connection_test.py`; the implementation itself was fine
+  - tightened that assertion to match the stable clause instead of the exact wrapped sentence
+  - reran `python -m pytest -o addopts='' tests/unit/tooling/test_u64_connection_test.py tests/unit/tooling/test_u64_connection_protocols.py tests/unit/tooling/test_u64_telnet.py tests/unit/tooling/test_u64_stream.py` -> `79 passed`
+- Final repository validation:
+  - `./build` -> `731 passed`, total coverage `97.90%`
+- Stage 1 outcome:
+  - no-password direct-tool path: PASS
+  - no-password ViviPi-integrated path: PASS
+  - optional modem smoke classification: PASS as non-blocking `offline` / `busy`
+  - Stage 2 remains deferred until the shared U64 network password is enabled by the user
+
+## 2026-04-23T13:12:14Z
+
+- Completed Stage 2 password-enabled validation after the user enabled the shared U64 network password on the live device.
+- Direct authenticated host-tool validation:
+  - `./.venv/bin/python scripts/u64_connection_test.py --host 192.168.1.13 --network-password pwd --profile stress --probes ping,http,ftp,telnet,ident,raw64 --schedule sequential --runners 1 --duration-s 3 --log-every 1 -v`
+  - observed clean authenticated success across `ping`, `http`, `ftp`, `telnet`, `ident`, and `raw64`; startup line confirmed `network_password_set=1`
+  - authenticated HTTP readwrite operations returned `200`, FTP authenticated and completed readwrite operations, Telnet authenticated and completed menu-abort probes, `ident` remained healthy without device-state mutation, and `raw64` completed authenticated read operations successfully
+- Targeted authenticated direct validation:
+  - `./.venv/bin/python scripts/u64_connection_test.py --host 192.168.1.13 --network-password pwd --probes ident,raw64 --duration-s 5 --log-every 1 -v`
+  - observed `streams=off` with repeated `ident` success and repeated authenticated `raw64` identify/debug-register/flash-metadata operations
+  - noted occasional `ident` iterations around `~1116ms` latency but still `result=OK`; no auth failure or functional regression was observed
+- Repo-integrated password-enabled validation initially failed:
+  - `VIVIPI_NETWORK_PASSWORD='pwd' VIVIPI_NETWORK_USERNAME='' scripts/vivipulse --mode local --build-config config/build-deploy.local.yaml --check-id u64-rest --check-id u64-ftp --check-id u64-telnet` -> `Successes: 2`
+  - artifact trace in `artifacts/vivipulse/20260423T130553.128035Z-local/trace.jsonl` showed the single failing check was `u64-rest` with `HTTP 403`; `u64-ftp` and `u64-telnet` were already `OK`
+- Root cause and fix:
+  - inspected `src/vivipi/runtime/checks.py` and confirmed `portable_http_runner(...)` accepted `password` but discarded it, always sending only `Connection: close`
+  - inspected `config/checks.local.yaml` and confirmed the local `C64U REST` and `U64 REST` checks did not pass `${VIVIPI_NETWORK_PASSWORD}` through at all
+  - updated `src/vivipi/runtime/checks.py` so both the normal `http.client` branch and `_portable_http_runner_socket(...)` send `X-Password` when `password` is configured
+  - updated `config/checks.local.yaml` so `C64U REST` and `U64 REST` include `password: ${VIVIPI_NETWORK_PASSWORD}`
+  - added focused runtime regressions in `tests/unit/runtime/test_checks.py` covering `X-Password` forwarding in both HTTP execution branches
+- Post-fix validation:
+  - `python -m pytest -o addopts='' tests/unit/runtime/test_checks.py` -> `119 passed`
+  - re-ran `VIVIPI_NETWORK_PASSWORD='pwd' VIVIPI_NETWORK_USERNAME='' scripts/vivipulse --mode local --build-config config/build-deploy.local.yaml --check-id u64-rest --check-id u64-ftp --check-id u64-telnet` -> `Successes: 3`
+- Final repository validation:
+  - `./build` -> `732 passed`, total coverage `97.90%`
+- Stage 2 outcome:
+  - direct password-enabled host-tool path: PASS
+  - repo-integrated password-enabled local path: PASS
+  - the Stage 1 and Stage 2 validation/hardening work for the extended U64 network-surface tooling is complete
+
+## 2026-04-23T13:43:29Z
+
+- Investigated the follow-up user report that the default authenticated direct-tool command could crash during stream startup with `ConnectionResetError` inside `u64_raw64.authenticate_socket(...)` while enabling audio/video streams.
+- Root-cause hypothesis and discriminating checks:
+  - isolated authenticated stream startup was healthy for `--stream audio`, `--stream video`, and `--stream audio video`, which ruled out a basic password/auth incompatibility in the stream-control path
+  - the exact default command no longer reproduced the startup crash consistently, which pointed to a transient TCP/64 control-socket reset rather than a deterministic protocol bug
+- Minimal hardening applied:
+  - updated `scripts/u64_stream.py` so `_send_command(...)` retries transient control-channel transport failures (`ConnectionResetError`, timeout, broken pipe, equivalent retryable `OSError`s) with short backoff before failing
+  - kept non-transient failures, including genuine authentication rejection, as immediate failures
+  - added focused regression coverage in `tests/unit/tooling/test_u64_stream.py` proving a first auth-reset attempt is retried and the second successful attempt completes the command
+- Validation:
+  - `python -m pytest -o addopts='' tests/unit/tooling/test_u64_stream.py` -> `8 passed`
+  - `cd /home/chris/dev/vivipi/scripts && /home/chris/dev/vivipi/.venv/bin/python u64_connection_test.py --network-password pwd --duration-s 5` -> both streams enabled successfully; no startup auth-reset crash
+  - `cd /home/chris/dev/vivipi && python -m pytest -o addopts='' tests/unit/tooling/test_u64_stream.py tests/unit/tooling/test_u64_connection_test.py` -> `36 passed`
+  - `./build` -> `733 passed`, total coverage `97.90%`
+- Residual observation:
+  - the longer default authenticated soak run still showed later telnet/stream degradation under sustained load, but that is separate from the reported startup crash and was not changed by this fix
+
+## 2026-04-23T15:04:41Z
+
+- Applied the steering follow-up to verify the authenticated telnet interaction model against a real interactive telnet session and then tighten the direct-tool implementation only where that live behavior differed.
+- What changed:
+  - updated `scripts/u64_telnet.py` so authenticated telnet password submission uses a telnet newline sequence instead of bare carriage return, and preserved the first meaningful post-login screen while discarding masked password echo noise
+  - updated `scripts/u64_connection_test.py` so FTP temp-dir priming happens after `stream_monitor.start()` instead of before stream startup
+  - added focused regressions in `tests/unit/tooling/test_u64_telnet.py` for masked-echo post-login handling and in `tests/unit/tooling/test_u64_connection_test.py` for the stream-start-before-FTP-prime order
+- Why it changed:
+  - live interactive telnet proved the password-gated server shows a `Password:` prompt before any menu appears; the raw helper had been sending only `\r`, which left the session in password-entry mode and caused later `F2` and arrow keys to be masked as more password input
+  - once telnet was fixed, the remaining full-command failure was isolated to audio stream startup only when FTP priming ran before streams; removing FTP from the pre-start path made the same audio+video slice green, confirming the ordering defect
+- Validation:
+  - `python -m pytest -o addopts='' tests/unit/tooling/test_u64_telnet.py` -> `20 passed`
+  - `python -m pytest -o addopts='' tests/unit/tooling/test_u64_connection_test.py tests/unit/tooling/test_u64_telnet.py tests/unit/tooling/test_u64_stream.py` -> `57 passed`
+  - `cd /home/chris/dev/vivipi/scripts && /home/chris/dev/vivipi/.venv/bin/python u64_connection_test.py --network-password pwd --duration-s 10 --log-every 1` -> full default authenticated command green for 10 seconds
+  - `cd /home/chris/dev/vivipi/scripts && /home/chris/dev/vivipi/.venv/bin/python u64_connection_test.py --network-password pwd --duration-s 60 --log-every 10` -> full default authenticated command green for a full 60 seconds with `stream_audio=OK` and `stream_video=OK`
+  - `./build` -> `735 passed`, total coverage `97.90%`
+
+## 2026-04-23T15:28:30Z
+
+- Completed the residual U64 follow-up on default probe surfaces and the intermittent early audio stream FAIL.
+- Root-cause confirmation:
+  - `scripts/u64_connection_test.py` still hard-coded `raw64` to `ProbeSurface.READ` in the soak and stress profiles even though `scripts/u64_raw64.py` already supported `ProbeSurface.READWRITE`
+  - repeated stream-only live runs stayed green, which ruled out a persistent audio/video stream defect and narrowed the audio issue to intermittent startup behavior
+- Minimal fixes applied:
+  - updated `scripts/u64_connection_test.py` so profile defaults derive from the largest supported surface in `PROBE_SURFACE_CHOICES`; raw64 now defaults to `readwrite` automatically
+  - updated `scripts/u64_stream.py` with a one-shot audio startup re-enable after `0.25s` if audio still has zero packets, preserving the existing steady-state timeout/error model
+  - added focused regressions in `tests/unit/tooling/test_u64_connection_test.py` and `tests/unit/tooling/test_u64_stream.py`
+- Validation:
+  - `python -m pytest -o addopts='' tests/unit/tooling/test_u64_connection_test.py tests/unit/tooling/test_u64_stream.py` -> `39 passed`
+  - `cd /home/chris/dev/vivipi/scripts && /home/chris/dev/vivipi/.venv/bin/python u64_connection_test.py --network-password pwd --duration-s 10 --log-every 1`
+    - config now reports `surfaces=... raw64:readwrite`
+    - live raw64 `readwrite` coverage executed `raw64_debug_register_write_restore`
+    - both streams stayed healthy from the first iteration: `stream_audio=OK`, `stream_video=OK`
+  - `cd /home/chris/dev/vivipi/scripts && /home/chris/dev/vivipi/.venv/bin/python u64_connection_test.py --network-password pwd --duration-s 60 --log-every 10`
+    - remained green for the full 60 seconds with `stream_audio=OK` and `stream_video=OK`
+  - `./build`
+    - first full run hit one non-reproducing failure in `tests/unit/runtime/test_app.py::test_runtime_app_executes_due_checks_and_updates_state`
+    - isolated rerun of that test passed immediately
+    - full rerun passed cleanly: `737 passed`, total coverage `97.90%`
+
 ## 2026-04-20T16:35:00Z
 
 - Investigated the report that the attached Pico appeared stuck on the boot screen with a non-moving liveness pixel.
