@@ -16,6 +16,7 @@ DEFAULT_CONTROL_PORT = 64
 DEFAULT_PACKET_TIMEOUT_S = 1.0
 DEFAULT_STARTUP_GRACE_S = 2.0
 DEFAULT_RECEIVE_BUFFER_BYTES = 2 * 1024 * 1024
+AUDIO_START_RETRY_DELAY_S = 0.25
 STREAM_CONTROL_RETRY_DELAYS_S = (0.05, 0.1)
 MAX_ERROR_LOGS = 20
 ERROR_LOG_INTERVAL = 100
@@ -435,6 +436,26 @@ class StreamMonitor:
         self._threads: dict[StreamKind, _StreamReceiver] = {}
         self._trackers: dict[StreamKind, StreamPacketTracker] = {}
 
+    def _destination_for(self, kind: StreamKind) -> str:
+        return f"{self.local_ip}:{self._sockets[kind].getsockname()[1]}"
+
+    def _enable_stream(self, kind: StreamKind, *, retry: bool = False) -> None:
+        destination = self._destination_for(kind)
+        _send_command(self.settings, _build_enable_command(kind, destination))
+        action = "re-enabled" if retry else "enabled"
+        detail = f"kind={kind.value} {action} destination={destination}"
+        if retry:
+            detail += " reason=startup_silence"
+        self.logger("stream", "INFO", detail)
+
+    def _retry_audio_start_if_silent(self) -> None:
+        if StreamKind.AUDIO not in self._trackers:
+            return
+        time.sleep(AUDIO_START_RETRY_DELAY_S)
+        if self._trackers[StreamKind.AUDIO].snapshot().packets_received != 0:
+            return
+        self._enable_stream(StreamKind.AUDIO, retry=True)
+
     def start(self) -> None:
         for kind in self.streams:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -455,10 +476,8 @@ class StreamMonitor:
             receiver.start()
         try:
             for kind in self.streams:
-                port = self._sockets[kind].getsockname()[1]
-                destination = f"{self.local_ip}:{port}"
-                _send_command(self.settings, _build_enable_command(kind, destination))
-                self.logger("stream", "INFO", f"kind={kind.value} enabled destination={destination}")
+                self._enable_stream(kind)
+            self._retry_audio_start_if_silent()
         except Exception:
             self.stop()
             raise

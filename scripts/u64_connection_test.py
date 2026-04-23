@@ -447,6 +447,10 @@ def default_execution_config() -> ExecutionConfig:
     return profile_execution_config(PROFILE_SOAK)
 
 
+def _profile_default_probe_surfaces() -> dict[str, ProbeSurface]:
+    return {protocol: PROBE_SURFACE_CHOICES[protocol][-1] for protocol in PROBE_CHOICES}
+
+
 def profile_execution_config(profile: str) -> ExecutionConfig:
     if profile == PROFILE_SOAK:
         return ExecutionConfig(
@@ -458,15 +462,7 @@ def profile_execution_config(profile: str) -> ExecutionConfig:
             probe_correctness={protocol: PROBE_CORRECTNESS_CHOICES[protocol][0] for protocol in PROBE_CHOICES},
             uses_extended_flags=True,
             overrides=(),
-            probe_surfaces={
-                "ping": ProbeSurface.SMOKE,
-                "http": ProbeSurface.READWRITE,
-                "ftp": ProbeSurface.READWRITE,
-                "telnet": ProbeSurface.READWRITE,
-                "ident": ProbeSurface.SMOKE,
-                "raw64": ProbeSurface.READ,
-                "modem": ProbeSurface.SMOKE,
-            },
+            probe_surfaces=_profile_default_probe_surfaces(),
             streams=DEFAULT_CONNECTION_STREAMS,
         )
     if profile == PROFILE_STRESS:
@@ -487,15 +483,7 @@ def profile_execution_config(profile: str) -> ExecutionConfig:
             },
             uses_extended_flags=True,
             overrides=(),
-            probe_surfaces={
-                "ping": ProbeSurface.SMOKE,
-                "http": ProbeSurface.READWRITE,
-                "ftp": ProbeSurface.READWRITE,
-                "telnet": ProbeSurface.READWRITE,
-                "ident": ProbeSurface.SMOKE,
-                "raw64": ProbeSurface.READ,
-                "modem": ProbeSurface.SMOKE,
-            },
+            probe_surfaces=_profile_default_probe_surfaces(),
             streams=(),
         )
     raise ValueError(f"unsupported profile: {profile}")
@@ -746,8 +734,10 @@ def run_runner_loop(
 
 
 def run_extended(config: ExecutionConfig, settings: RuntimeSettings) -> int:
-    if "ftp" in config.probes and config.probe_surfaces.get("ftp", ProbeSurface.SMOKE) in (ProbeSurface.READ, ProbeSurface.READWRITE):
-        u64_ftp.try_prime_temp_dir(settings, log_fn=lambda detail: log("ftp", "INFO", detail))
+    should_prime_ftp_temp_dir = "ftp" in config.probes and config.probe_surfaces.get("ftp", ProbeSurface.SMOKE) in (
+        ProbeSurface.READ,
+        ProbeSurface.READWRITE,
+    )
     state = ExecutionState(settings=settings, include_runner_context=True, runner_count=config.runners)
     stop_event = threading.Event()
     deadline_s = None if config.duration_s is None else time.monotonic() + config.duration_s
@@ -773,6 +763,8 @@ def run_extended(config: ExecutionConfig, settings: RuntimeSettings) -> int:
     try:
         if stream_monitor is not None:
             stream_monitor.start()
+        if should_prime_ftp_temp_dir:
+            u64_ftp.try_prime_temp_dir(settings, log_fn=lambda detail: log("ftp", "INFO", detail))
         if config.runners == 1:
             run_runner_loop(1, config, settings, state, stop_event, deadline_s=deadline_s)
         else:

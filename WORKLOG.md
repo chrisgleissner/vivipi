@@ -110,6 +110,46 @@
 - Residual observation:
   - the longer default authenticated soak run still showed later telnet/stream degradation under sustained load, but that is separate from the reported startup crash and was not changed by this fix
 
+## 2026-04-23T15:04:41Z
+
+- Applied the steering follow-up to verify the authenticated telnet interaction model against a real interactive telnet session and then tighten the direct-tool implementation only where that live behavior differed.
+- What changed:
+  - updated `scripts/u64_telnet.py` so authenticated telnet password submission uses a telnet newline sequence instead of bare carriage return, and preserved the first meaningful post-login screen while discarding masked password echo noise
+  - updated `scripts/u64_connection_test.py` so FTP temp-dir priming happens after `stream_monitor.start()` instead of before stream startup
+  - added focused regressions in `tests/unit/tooling/test_u64_telnet.py` for masked-echo post-login handling and in `tests/unit/tooling/test_u64_connection_test.py` for the stream-start-before-FTP-prime order
+- Why it changed:
+  - live interactive telnet proved the password-gated server shows a `Password:` prompt before any menu appears; the raw helper had been sending only `\r`, which left the session in password-entry mode and caused later `F2` and arrow keys to be masked as more password input
+  - once telnet was fixed, the remaining full-command failure was isolated to audio stream startup only when FTP priming ran before streams; removing FTP from the pre-start path made the same audio+video slice green, confirming the ordering defect
+- Validation:
+  - `python -m pytest -o addopts='' tests/unit/tooling/test_u64_telnet.py` -> `20 passed`
+  - `python -m pytest -o addopts='' tests/unit/tooling/test_u64_connection_test.py tests/unit/tooling/test_u64_telnet.py tests/unit/tooling/test_u64_stream.py` -> `57 passed`
+  - `cd /home/chris/dev/vivipi/scripts && /home/chris/dev/vivipi/.venv/bin/python u64_connection_test.py --network-password pwd --duration-s 10 --log-every 1` -> full default authenticated command green for 10 seconds
+  - `cd /home/chris/dev/vivipi/scripts && /home/chris/dev/vivipi/.venv/bin/python u64_connection_test.py --network-password pwd --duration-s 60 --log-every 10` -> full default authenticated command green for a full 60 seconds with `stream_audio=OK` and `stream_video=OK`
+  - `./build` -> `735 passed`, total coverage `97.90%`
+
+## 2026-04-23T15:28:30Z
+
+- Completed the residual U64 follow-up on default probe surfaces and the intermittent early audio stream FAIL.
+- Root-cause confirmation:
+  - `scripts/u64_connection_test.py` still hard-coded `raw64` to `ProbeSurface.READ` in the soak and stress profiles even though `scripts/u64_raw64.py` already supported `ProbeSurface.READWRITE`
+  - repeated stream-only live runs stayed green, which ruled out a persistent audio/video stream defect and narrowed the audio issue to intermittent startup behavior
+- Minimal fixes applied:
+  - updated `scripts/u64_connection_test.py` so profile defaults derive from the largest supported surface in `PROBE_SURFACE_CHOICES`; raw64 now defaults to `readwrite` automatically
+  - updated `scripts/u64_stream.py` with a one-shot audio startup re-enable after `0.25s` if audio still has zero packets, preserving the existing steady-state timeout/error model
+  - added focused regressions in `tests/unit/tooling/test_u64_connection_test.py` and `tests/unit/tooling/test_u64_stream.py`
+- Validation:
+  - `python -m pytest -o addopts='' tests/unit/tooling/test_u64_connection_test.py tests/unit/tooling/test_u64_stream.py` -> `39 passed`
+  - `cd /home/chris/dev/vivipi/scripts && /home/chris/dev/vivipi/.venv/bin/python u64_connection_test.py --network-password pwd --duration-s 10 --log-every 1`
+    - config now reports `surfaces=... raw64:readwrite`
+    - live raw64 `readwrite` coverage executed `raw64_debug_register_write_restore`
+    - both streams stayed healthy from the first iteration: `stream_audio=OK`, `stream_video=OK`
+  - `cd /home/chris/dev/vivipi/scripts && /home/chris/dev/vivipi/.venv/bin/python u64_connection_test.py --network-password pwd --duration-s 60 --log-every 10`
+    - remained green for the full 60 seconds with `stream_audio=OK` and `stream_video=OK`
+  - `./build`
+    - first full run hit one non-reproducing failure in `tests/unit/runtime/test_app.py::test_runtime_app_executes_due_checks_and_updates_state`
+    - isolated rerun of that test passed immediately
+    - full rerun passed cleanly: `737 passed`, total coverage `97.90%`
+
 ## 2026-04-20T16:35:00Z
 
 - Investigated the report that the attached Pico appeared stuck on the boot screen with a non-moving liveness pixel.

@@ -84,6 +84,7 @@ Status: COMPLETED
 	- a later real-device repro showed an intermittent authenticated stream-control startup failure in the default soak command, with `ConnectionResetError` during raw64 authentication while enabling streams
 	- `scripts/u64_stream.py` now retries transient TCP/64 transport failures during `_send_command(...)` with short backoff, while preserving immediate failure for non-transient errors such as real authentication rejection
 	- focused regression coverage was added for the retry path, the authenticated startup path was re-run successfully against the live device, and `./build` remained green
+	- TODO (completed): verified the authenticated telnet interaction model from a real interactive session, updated the direct telnet helper to submit the password with a telnet newline and preserve the first real post-login screen, and moved FTP temp-dir priming after stream startup so the full authenticated soak command stays green with both streams active
 
 ## Probe I/O Safety and Observability Plan
 
@@ -257,6 +258,37 @@ Status: COMPLETED
 - Runtime `CHECK` and `PROBE` logs now include TELNET session-close metadata so failures and degraded sessions are diagnosable without changing the existing log format.
 - Validation completed with:
 	- focused TELNET/execution/runtime/service slice passing
+
+## U64 Raw64 Default Surface and Audio Startup Hardening Plan
+
+Authoritative execution plan for the residual U64 direct-tool follow-up: ensure newly added probes default to the largest supported surface, and harden the intermittent early audio stream startup miss without widening scope.
+
+Status: COMPLETED
+
+### Local Hypothesis
+
+- The raw64 default-surface defect is configuration-only: `scripts/u64_connection_test.py` still pinned `raw64` to `read` even though `scripts/u64_raw64.py` already implements a `readwrite` write/restore path.
+- The early audio FAIL is a startup race rather than a persistent stream defect: repeated stream-only runs stay green, but the first audio enable can intermittently fail to produce packets before the startup grace window expires.
+
+### Cheapest Disconfirming Checks
+
+- Inspect `profile_execution_config(...)` and existing raw64 surface tests to confirm whether the default profile shape is still lagging behind raw64 capability.
+- Re-run the live authenticated direct command after a minimal stream-start change to see whether audio still times out before the first packet.
+
+### Minimal Changes
+
+- Change profile defaults to use the largest supported surface per probe so raw64 inherits `readwrite` automatically when available.
+- Add a one-shot audio startup re-enable in `scripts/u64_stream.py` if audio remains silent shortly after stream startup.
+- Add focused tooling regressions for both behaviors.
+
+### Completion Notes
+
+- `scripts/u64_connection_test.py` now derives profile-default probe surfaces from `PROBE_SURFACE_CHOICES`, so new probes inherit their largest supported surface automatically; raw64 now defaults to `readwrite` in both soak and stress profiles.
+- `scripts/u64_stream.py` now performs a one-shot audio re-enable after a short delay if the audio tracker still has zero packets, which hardens the intermittent early startup miss without changing steady-state monitoring behavior.
+- Focused tooling validation passed: `tests/unit/tooling/test_u64_connection_test.py` and `tests/unit/tooling/test_u64_stream.py` are green.
+- Live-device validation passed:
+	- the 10-second authenticated default command reported `surfaces=... raw64:readwrite` and executed `raw64_debug_register_write_restore`
+	- the 60-second authenticated default command stayed green with `stream_audio=OK` and `stream_video=OK` throughout
 	- `tests/spec/test_traceability.py` passing
 	- final `./build` passing at `661 passed` with `97.26%` total coverage
 	- deterministic socket-fixture proof: immediate close => `FAIL`, stable idle open => `DEG`, negotiated stable session => `OK`

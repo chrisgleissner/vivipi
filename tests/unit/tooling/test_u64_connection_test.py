@@ -67,7 +67,7 @@ def test_main_without_args_runs_default_soak_configuration(monkeypatch):
         "ftp": module.ProbeSurface.READWRITE,
         "telnet": module.ProbeSurface.READWRITE,
         "ident": module.ProbeSurface.SMOKE,
-        "raw64": module.ProbeSurface.READ,
+        "raw64": module.ProbeSurface.READWRITE,
         "modem": module.ProbeSurface.SMOKE,
     }
     assert captured["config"].streams == ("audio", "video")
@@ -99,7 +99,7 @@ def test_stress_profile_resolves_deterministically():
         "ftp": module.ProbeSurface.READWRITE,
         "telnet": module.ProbeSurface.READWRITE,
         "ident": module.ProbeSurface.SMOKE,
-        "raw64": module.ProbeSurface.READ,
+        "raw64": module.ProbeSurface.READWRITE,
         "modem": module.ProbeSurface.SMOKE,
     }
     assert resolved.streams == ()
@@ -625,6 +625,61 @@ def test_run_extended_returns_failure_when_stream_monitor_reports_failure(monkey
     monkeypatch.setattr(module.u64_stream, "StreamMonitor", FakeStreamMonitor)
 
     assert module.run_extended(config, settings) == 1
+
+
+def test_run_extended_starts_streams_before_priming_ftp_temp_dir(monkeypatch):
+    module = load_module()
+    settings = make_settings(module)
+    config = module.ExecutionConfig(
+        profile="soak",
+        probes=("ftp",),
+        schedule="sequential",
+        runners=1,
+        duration_s=1,
+        probe_correctness={protocol: module.ProbeCorrectness.COMPLETE for protocol in module.DEFAULT_PROBES},
+        uses_extended_flags=True,
+        overrides=("stream",),
+        probe_surfaces={"ftp": module.ProbeSurface.READWRITE},
+        streams=("audio",),
+    )
+    calls = []
+
+    monkeypatch.setattr(module.u64_ftp, "try_prime_temp_dir", lambda current_settings, **kwargs: calls.append("prime") or ())
+    monkeypatch.setattr(module, "run_runner_loop", lambda *args, **kwargs: calls.append("run") or 0)
+
+    class FakeStreamMonitor:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            calls.append("start")
+
+        def stop(self):
+            calls.append("stop")
+
+        def snapshots(self):
+            return (
+                module.u64_stream.StreamSnapshot(
+                    kind=module.u64_stream.StreamKind.AUDIO,
+                    status="OK",
+                    packets_received=1,
+                    lost_packets=0,
+                    reordered_packets=0,
+                    size_errors=0,
+                    header_errors=0,
+                    structure_errors=0,
+                    timeout_errors=0,
+                    first_packet_at=1.0,
+                    last_packet_at=1.0,
+                    last_sequence=0,
+                    last_error="",
+                ),
+            )
+
+    monkeypatch.setattr(module.u64_stream, "StreamMonitor", FakeStreamMonitor)
+
+    assert module.run_extended(config, settings) == 0
+    assert calls[:3] == ["start", "prime", "run"]
 
 
 def test_historical_correctness_mapping_is_pinned_to_git_evidence():

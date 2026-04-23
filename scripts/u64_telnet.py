@@ -27,6 +27,10 @@ TELNET_IDLE_TIMEOUT_S = 0.12
 TELNET_POST_DATA_IDLE_TIMEOUT_S = 0.02
 TELNET_COMMAND_RESPONSE_TIMEOUT_S = 0.12
 TELNET_MAX_EMPTY_READS = 1
+TELNET_LOGIN_INITIAL_TIMEOUT_S = 1.0
+TELNET_LOGIN_QUIET_TIMEOUT_S = 0.2
+TELNET_LOGIN_MAX_EMPTY_READS = 4
+TELNET_AUTH_ENTER = b"\r\n"
 IAC = 255
 DONT = 254
 DO = 253
@@ -53,6 +57,28 @@ class TelnetSocket(Protocol):
     def recv(self, bufsize: int) -> bytes: ...
 
     def close(self) -> None: ...
+
+
+class PrefetchedTelnetSocket:
+    def __init__(self, sock: TelnetSocket, prefetched: bytes):
+        self._sock = sock
+        self._prefetched = prefetched
+
+    def sendall(self, data: bytes) -> None:
+        self._sock.sendall(data)
+
+    def recv(self, bufsize: int) -> bytes:
+        if self._prefetched:
+            chunk = self._prefetched[:bufsize]
+            self._prefetched = self._prefetched[bufsize:]
+            return chunk
+        return self._sock.recv(bufsize)
+
+    def close(self) -> None:
+        self._sock.close()
+
+    def __getattr__(self, name: str):
+        return getattr(self._sock, name)
 
 
 @dataclass
@@ -198,24 +224,53 @@ def strip_vt_text(value: bytes) -> str:
 def connect(settings: RuntimeSettings) -> TelnetSocket:
     sock = socket.create_connection((settings.host, settings.telnet_port), timeout=2)
     sock.settimeout(TELNET_IDLE_TIMEOUT_S)
-    authenticate_if_needed(sock, settings)
+    prefetched = authenticate_if_needed(sock, settings)
+    if prefetched:
+        return PrefetchedTelnetSocket(sock, prefetched)
     return sock
 
 
-def authenticate_if_needed(sock: TelnetSocket, settings: RuntimeSettings) -> None:
+def _looks_like_password_echo(text: str) -> bool:
+    stripped = text.strip()
+    return bool(stripped) and set(stripped) <= {"*"}
+
+
+def _merge_post_login_text(existing: str, chunk: str) -> str:
+    chunk = chunk.strip()
+    if not chunk:
+        return existing
+    if _looks_like_password_echo(chunk):
+        return existing
+    if not existing or _looks_like_password_echo(existing):
+        return chunk
+    return f"{existing} {chunk}".strip()
+
+
+def authenticate_if_needed(sock: TelnetSocket, settings: RuntimeSettings) -> bytes:
     if not settings.network_password:
-        return
+        return b""
     prompt = read_until_idle(sock, max_empty_reads=2)
     if TELNET_PASSWORD_PROMPT not in prompt.lower():
         sock.sendall(TELNET_KEY_ENTER)
         prompt = read_until_idle(sock, max_empty_reads=2)
         if TELNET_PASSWORD_PROMPT not in prompt.lower():
-            return
-    sock.sendall(settings.network_password.encode("utf-8") + TELNET_KEY_ENTER)
-    response = read_until_idle(sock, max_empty_reads=2)
-    lowered = response.lower()
-    if any(marker.decode("utf-8") in lowered for marker in TELNET_FAILURE_MARKERS) or TELNET_PASSWORD_PROMPT in lowered:
-        raise RuntimeError("login failed")
+            return b""
+    sock.sendall(settings.network_password.encode("utf-8") + TELNET_AUTH_ENTER)
+    response = ""
+    for _ in range(2):
+        chunk = read_until_idle(
+            sock,
+            max_empty_reads=TELNET_LOGIN_MAX_EMPTY_READS,
+            initial_timeout_s=TELNET_LOGIN_INITIAL_TIMEOUT_S,
+            quiet_timeout_s=TELNET_LOGIN_QUIET_TIMEOUT_S,
+        )
+        response = _merge_post_login_text(response, chunk)
+        lowered = response.lower()
+        if any(marker.decode("utf-8") in lowered for marker in TELNET_FAILURE_MARKERS) or TELNET_PASSWORD_PROMPT in lowered:
+            raise RuntimeError("login failed")
+        if response and not _looks_like_password_echo(response):
+            return response.encode("utf-8")
+    return b""
 
 
 def _wait_for_readable(sock: TelnetSocket, timeout_s: float) -> bool:
