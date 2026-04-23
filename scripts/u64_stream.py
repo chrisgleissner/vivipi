@@ -8,6 +8,8 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Sequence
 
+import u64_raw64
+
 
 DEFAULT_CONTROL_PORT = 64
 DEFAULT_PACKET_TIMEOUT_S = 1.0
@@ -57,6 +59,7 @@ class StreamRuntimeSettings:
     packet_timeout_s: float = DEFAULT_PACKET_TIMEOUT_S
     startup_grace_s: float = DEFAULT_STARTUP_GRACE_S
     receive_buffer_bytes: int = DEFAULT_RECEIVE_BUFFER_BYTES
+    network_password: str = ""
 
 
 @dataclass(frozen=True)
@@ -148,6 +151,7 @@ def _build_disable_command(kind: StreamKind) -> bytes:
 def _send_command(settings: StreamRuntimeSettings, payload: bytes) -> None:
     command_sock = socket.create_connection((settings.host, settings.control_port), timeout=2)
     try:
+        u64_raw64.authenticate_socket(command_sock, settings.network_password)
         command_sock.sendall(payload)
     finally:
         command_sock.close()

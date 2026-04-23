@@ -1,5 +1,71 @@
 # Plans
 
+## U64 Connection Test Stage 1 Validation Plan
+
+Authoritative execution plan for validating and hardening the recently expanded host-side Ultimate 64 connection test tooling against the live U64 with no network password configured. Stage 2 is explicitly deferred until the user enables the device network password.
+
+Status: COMPLETED
+
+### Stage Boundary
+
+- Stage 1 only: validate the no-password device state end to end, fix any defects found, rerun focused tests, rerun the failing real-device scenario, then stop with a Stage 2 rerun checklist.
+- Stage 2 must not begin in this task. It will reuse the same paths after the user enables the shared U64 network password.
+
+### Verified Discovery Anchors
+
+- `scripts/u64_connection_test.py` is the standalone host-side probe driver for the newly expanded U64 surfaces.
+- The repository-integrated host entrypoint is `scripts/vivipulse`, which resolves `config/build-deploy*.yaml` plus `config/checks*.yaml` into the shared runtime probe model; it does not currently invoke `scripts/u64_connection_test.py`.
+- The checked-in active local build profile is `config/build-deploy.local.yaml`, which selects `config/checks.local.yaml`.
+- `config/checks.local.yaml` currently exercises only direct `HTTP`, `FTP`, and `TELNET` checks for `c64u` and `u64`; it does not yet route `ident`, `raw64`, or `modem` through the runtime-side ViviPi path.
+- The current local checks config already plumbs `${VIVIPI_NETWORK_PASSWORD}` into FTP/Telnet credentials, and `vivipi.core.config.load_checks_config(...)` intentionally treats missing auth placeholders as optional by resolving absent `username` / `password` placeholders to empty strings.
+
+### Stage 1 Matrix
+
+1. Baseline host tooling validation
+	- Run the focused unit slice for `u64_connection_test.py`, protocol helpers, telnet, and stream auth plumbing.
+	- Run a direct no-password `u64_connection_test.py` smoke pass across `ping,http,ftp,telnet,ident,raw64`.
+2. Repository-integrated ViviPi path validation
+	- Resolve the active local config through `scripts/vivipulse --mode local` and verify the current no-password `HTTP`, `FTP`, and `TELNET` checks still pass from the standard local build-config path.
+	- Verify omitted-password and empty-password behavior through the active config loading path where practical.
+3. High-value real-device edge validation
+	- Run targeted direct invocations for `ident` and `raw64` because those surfaces are not yet part of `config/checks.local.yaml`.
+	- Optionally probe `modem` smoke if the configured listener is reachable; otherwise classify it explicitly as optional/offline rather than a Stage 1 blocker.
+4. Fix and rerun
+	- For any failure, identify whether it is a code bug, config plumbing defect, invocation defect, or environment limitation.
+	- Apply the smallest local fix, rerun the focused failing scenario first, then rerun the full focused tooling slice.
+5. Completion gate
+	- Run `./build` after the focused slice is green.
+	- Stop after Stage 1 with an explicit Stage 2 rerun checklist.
+
+### Current Hypothesis
+
+- The most likely Stage 1 failure is not the parser or password wiring itself, but a mismatch between the newly added direct-tool surfaces (`ident` / `raw64`) and live U64 behavior under no-password mode, because those surfaces are not covered by the repository-integrated ViviPi config path and therefore have had less real-device exercise.
+
+### Cheapest Disconfirming Checks
+
+- Run the focused tooling tests unchanged to see whether the touched host-side slice is already internally consistent.
+- Run a direct live `u64_connection_test.py --probes ident,raw64 --duration-s 1 --log-every 1` against `192.168.1.13` to determine whether the newly added surfaces actually succeed on the device without a password.
+
+### Stage 1 Completion Notes
+
+- Focused tooling validation passed before and after the Stage 1 fix.
+- Live no-password direct-tool validation passed for `ident` and `raw64`, and the wider no-password all-probe direct run passed for `ping`, `http`, `ftp`, `telnet`, `ident`, and `raw64`.
+- Repository-integrated validation through `scripts/vivipulse` passed for `u64-rest`, `u64-ftp`, and `u64-telnet` with both omitted auth env and explicit empty auth env.
+- Optional modem smoke is non-blocking and classifies cleanly on the live device; observed statuses were `offline` and `busy` on port `3000`.
+- One Stage 1 defect was found and fixed: explicit `--probes` runs inherited soak-profile stream monitoring and could fail on unrelated stream timeouts. `resolve_execution_config(...)` now disables profile-default streams when `--probes` is provided without `--stream`, and the CLI help plus regression tests were updated accordingly.
+- Final validation gates passed: focused tooling slice green and `./build` green.
+
+### Stage 2 Rerun Checklist
+
+1. Enable the shared U64 network password on the device.
+2. Provide the password to the repo paths that use it:
+	- direct tool: `--network-password` or legacy `--ftp-pass`
+	- ViviPi-integrated path: `VIVIPI_NETWORK_PASSWORD`
+3. Re-run the direct all-probe host command against `192.168.1.13` with the password set.
+4. Re-run the targeted direct `ident,raw64` command and confirm `network_password_set=1` while `ident` remains unauthenticated and `raw64` authenticates successfully.
+5. Re-run `scripts/vivipulse --mode local --build-config config/build-deploy.local.yaml --check-id u64-rest --check-id u64-ftp --check-id u64-telnet` with `VIVIPI_NETWORK_PASSWORD` set.
+6. Re-run the focused tooling slice and `./build` if any Stage 2 auth-path fix is required.
+
 ## Probe I/O Safety and Observability Plan
 
 Authoritative execution plan for eliminating unbounded/rapid-fire I/O paths in the HTTP, FTP, and Telnet probes while extending the existing `socket-send` log events with operation-level visibility. No new log events, no new log volume, no retry loops.

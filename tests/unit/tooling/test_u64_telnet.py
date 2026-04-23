@@ -126,6 +126,35 @@ def test_telnet_initial_read_classify_returns_banner_ready(monkeypatch):
     assert calls[-1] == "close"
 
 
+def test_telnet_connect_authenticates_when_network_password_configured(monkeypatch):
+    runtime = load_runtime()
+    module = load_telnet()
+    calls = []
+    prompts = iter(["Password:", "READY>"])
+
+    class FakeSocket:
+        def settimeout(self, timeout):
+            calls.append(("settimeout", timeout))
+
+        def sendall(self, payload):
+            calls.append(("sendall", payload))
+
+        def close(self):
+            calls.append("close")
+
+    monkeypatch.setattr(module.socket, "create_connection", lambda address, timeout: FakeSocket())
+    monkeypatch.setattr(module, "read_until_idle", lambda sock, max_empty_reads=2: next(prompts))
+
+    settings = runtime.RuntimeSettings("host", "v1/version", 80, 23, 21, "anonymous", "", 0, 1, True, network_password="secret")
+    sock = module.connect(settings)
+
+    assert isinstance(sock, FakeSocket)
+    assert calls == [
+        ("settimeout", module.TELNET_IDLE_TIMEOUT_S),
+        ("sendall", b"secret\r"),
+    ]
+
+
 def test_read_until_idle_switches_to_short_post_data_timeout():
     module = load_telnet()
     timeouts = []

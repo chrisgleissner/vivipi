@@ -30,6 +30,13 @@ SCREEN_RAM_RUNNER_SLOT_COUNT = 40
 STATE_VERIFY_RETRY_DELAYS_S = (0.05, 0.10, 0.20)
 
 
+def request_headers(settings: RuntimeSettings) -> dict[str, str]:
+    headers = {"Connection": "close"}
+    if settings.network_password:
+        headers["X-Password"] = settings.network_password
+    return headers
+
+
 def request_path(http_path: str) -> str:
     return f"/{http_path}"
 
@@ -49,7 +56,7 @@ def parse_response(payload: bytes) -> tuple[int, bytes]:
 def request_bytes(settings: RuntimeSettings, method: str, path: str) -> tuple[int, bytes, dict[str, str]]:
     conn = http.client.HTTPConnection(settings.host, settings.http_port, timeout=3)
     try:
-        conn.request(method, path, headers={"Connection": "close"})
+        conn.request(method, path, headers=request_headers(settings))
         response = conn.getresponse()
         body = response.read()
         headers = {key.lower(): value for key, value in response.getheaders()}
@@ -341,7 +348,7 @@ def run_probe(settings: RuntimeSettings, correctness, *, context: ProbeExecution
     conn = http.client.HTTPConnection(settings.host, settings.http_port, timeout=8)
     started_at = time.perf_counter_ns()
     try:
-        conn.request("GET", request_path(settings.http_path), headers={"Connection": "close"})
+        conn.request("GET", request_path(settings.http_path), headers=request_headers(settings))
         response = conn.getresponse()
         body = response.read()
         if not 200 <= response.status < 300:

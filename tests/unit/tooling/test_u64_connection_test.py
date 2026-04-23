@@ -28,7 +28,7 @@ def make_config(module, *, probes=("ping", "http"), schedule="sequential", runne
         schedule=schedule,
         runners=runners,
         duration_s=None,
-        probe_correctness={protocol: module.ProbeCorrectness.COMPLETE for protocol in module.DEFAULT_PROBES},
+        probe_correctness={protocol: module.ProbeCorrectness.COMPLETE for protocol in module.PROBE_CHOICES},
         uses_extended_flags=True,
         overrides=(),
         probe_surfaces={
@@ -36,6 +36,9 @@ def make_config(module, *, probes=("ping", "http"), schedule="sequential", runne
             "http": module.ProbeSurface.READWRITE,
             "ftp": module.ProbeSurface.READWRITE,
             "telnet": module.ProbeSurface.READWRITE,
+            "ident": module.ProbeSurface.SMOKE,
+            "raw64": module.ProbeSurface.READ,
+            "modem": module.ProbeSurface.SMOKE,
         },
     )
 
@@ -54,6 +57,7 @@ def test_main_without_args_runs_default_soak_configuration(monkeypatch):
     assert module.main([]) == 17
     assert captured["settings"].host == "u64"
     assert captured["config"].profile == "soak"
+    assert captured["config"].probes == ("ping", "http", "ftp", "telnet", "ident", "raw64")
     assert captured["config"].schedule == "concurrent"
     assert captured["config"].runners == 1
     assert captured["config"].duration_s == 12 * 60 * 60
@@ -62,6 +66,9 @@ def test_main_without_args_runs_default_soak_configuration(monkeypatch):
         "http": module.ProbeSurface.READWRITE,
         "ftp": module.ProbeSurface.READWRITE,
         "telnet": module.ProbeSurface.READWRITE,
+        "ident": module.ProbeSurface.SMOKE,
+        "raw64": module.ProbeSurface.READ,
+        "modem": module.ProbeSurface.SMOKE,
     }
     assert captured["config"].streams == ("audio", "video")
 
@@ -73,7 +80,7 @@ def test_stress_profile_resolves_deterministically():
     resolved = module.resolve_execution_config(parser.parse_args(["--profile", "stress"]))
 
     assert resolved.profile == "stress"
-    assert resolved.probes == ("ftp", "telnet", "http", "ftp", "telnet", "ping")
+    assert resolved.probes == ("raw64", "ftp", "telnet", "http", "ftp", "telnet", "ping", "ident")
     assert resolved.schedule == "concurrent"
     assert resolved.runners == 5
     assert resolved.duration_s == 120
@@ -82,12 +89,18 @@ def test_stress_profile_resolves_deterministically():
         "http": module.ProbeCorrectness.COMPLETE,
         "ftp": module.ProbeCorrectness.INCOMPLETE,
         "telnet": module.ProbeCorrectness.INCOMPLETE,
+        "ident": module.ProbeCorrectness.COMPLETE,
+        "raw64": module.ProbeCorrectness.COMPLETE,
+        "modem": module.ProbeCorrectness.COMPLETE,
     }
     assert resolved.probe_surfaces == {
         "ping": module.ProbeSurface.SMOKE,
         "http": module.ProbeSurface.READWRITE,
         "ftp": module.ProbeSurface.READWRITE,
         "telnet": module.ProbeSurface.READWRITE,
+        "ident": module.ProbeSurface.SMOKE,
+        "raw64": module.ProbeSurface.READ,
+        "modem": module.ProbeSurface.SMOKE,
     }
     assert resolved.streams == ()
 
@@ -103,12 +116,18 @@ def test_global_surface_and_mode_apply_with_fallbacks():
         "http": module.ProbeSurface.READWRITE,
         "ftp": module.ProbeSurface.READWRITE,
         "telnet": module.ProbeSurface.READWRITE,
+        "ident": module.ProbeSurface.SMOKE,
+        "raw64": module.ProbeSurface.READWRITE,
+        "modem": module.ProbeSurface.SMOKE,
     }
     assert resolved.probe_correctness == {
         "ping": module.ProbeCorrectness.COMPLETE,
         "http": module.ProbeCorrectness.COMPLETE,
         "ftp": module.ProbeCorrectness.INVALID,
         "telnet": module.ProbeCorrectness.INCOMPLETE,
+        "ident": module.ProbeCorrectness.COMPLETE,
+        "raw64": module.ProbeCorrectness.COMPLETE,
+        "modem": module.ProbeCorrectness.COMPLETE,
     }
 
 
@@ -123,6 +142,9 @@ def test_global_open_mode_applies_with_fallbacks():
         "http": module.ProbeCorrectness.COMPLETE,
         "ftp": module.ProbeCorrectness.OPEN,
         "telnet": module.ProbeCorrectness.OPEN,
+        "ident": module.ProbeCorrectness.COMPLETE,
+        "raw64": module.ProbeCorrectness.COMPLETE,
+        "modem": module.ProbeCorrectness.COMPLETE,
     }
 
 
@@ -163,9 +185,50 @@ def test_explicit_high_value_overrides_can_reenable_write_surface_with_single_st
         "http": module.ProbeSurface.READWRITE,
         "ftp": module.ProbeSurface.READWRITE,
         "telnet": module.ProbeSurface.READWRITE,
+        "ident": module.ProbeSurface.SMOKE,
+        "raw64": module.ProbeSurface.READWRITE,
+        "modem": module.ProbeSurface.SMOKE,
     }
     assert resolved.streams == ("video",)
     assert resolved.overrides == ("schedule", "duration-s", "surface", "stream")
+
+
+def test_build_runtime_settings_uses_network_password_as_ftp_fallback_and_tracks_modem_port():
+    module = load_module()
+    parser = module.build_parser()
+
+    settings = module.build_runtime_settings(parser.parse_args(["--network-password", "secret", "--modem-port", "3456"]))
+
+    assert settings.network_password == "secret"
+    assert settings.ftp_pass == "secret"
+    assert settings.modem_port == 3456
+
+
+def test_build_runtime_settings_uses_ftp_pass_as_legacy_shared_password_alias():
+    module = load_module()
+    parser = module.build_parser()
+
+    settings = module.build_runtime_settings(parser.parse_args(["--ftp-pass", "legacy-secret"]))
+
+    assert settings.network_password == "legacy-secret"
+    assert settings.ftp_pass == "legacy-secret"
+
+
+def test_parse_probes_accepts_ident_raw64_and_modem():
+    module = load_module()
+
+    assert module.parse_probes("ping,ident,raw64,modem") == ("ping", "ident", "raw64", "modem")
+
+
+def test_explicit_probe_subset_disables_profile_streams_by_default():
+    module = load_module()
+    parser = module.build_parser()
+
+    resolved = module.resolve_execution_config(parser.parse_args(["--probes", "ident,raw64"]))
+
+    assert resolved.probes == ("ident", "raw64")
+    assert resolved.streams == ()
+    assert resolved.overrides == ("probes",)
 
 
 def test_validate_execution_config_rejects_concurrent_http_readwrite_runner_overflow():
@@ -223,9 +286,20 @@ def test_help_output_mentions_restored_default_shape():
     help_text = module.build_parser().format_help()
 
     assert "Default: 12h soak with concurrent readwrite probes and audio+video streams." in help_text
+    assert "ident targets UDP port 64 JSON discovery; raw64 targets the DMA-capable TCP port 64 command endpoint." in help_text
+    assert "profile-default streams are disabled." in help_text
     assert "Correctness degradation: complete (finish and close cleanly), open (finish and skip orderly teardown), incomplete (abort before completion), invalid (send malformed or unsupported input)." in help_text
     assert "./u64_connection_test.py --profile stress --runners 4" in help_text
     assert "./u64_connection_test.py --profile soak --probes ping,http" in help_text
+
+
+def test_resolve_execution_config_accepts_raw64_surface_override():
+    module = load_module()
+    parser = module.build_parser()
+
+    resolved = module.resolve_execution_config(parser.parse_args(["--raw64-surface", "readwrite"]))
+
+    assert resolved.probe_surfaces["raw64"] == module.ProbeSurface.READWRITE
 
 
 def test_iteration_summary_appends_stream_health(capsys):

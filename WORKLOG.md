@@ -1,5 +1,67 @@
 # ViviPi Work Log
 
+## 2026-04-23T12:42:51Z
+
+- Started Stage 1 real-device validation for the expanded Ultimate 64 host-side connection test tooling with the U64 still configured for no network password.
+- Required planning/logging files already existed, so I updated `PLANS.md` with a dedicated `U64 Connection Test Stage 1 Validation Plan` and will treat that section as the authoritative execution plan for this task.
+- Repository discovery completed before any code changes:
+  - inspected `scripts/u64_connection_test.py`, `scripts/u64_connection_runtime.py`, `scripts/u64_http.py`, `scripts/u64_telnet.py`, `scripts/u64_ftp.py`, `scripts/u64_ident.py`, `scripts/u64_raw64.py`, `scripts/u64_modem.py`, `scripts/u64_stream.py`
+  - inspected focused tooling tests in `tests/unit/tooling/test_u64_connection_test.py`, `tests/unit/tooling/test_u64_connection_protocols.py`, `tests/unit/tooling/test_u64_telnet.py`, and `tests/unit/tooling/test_u64_stream.py`
+  - inspected repository-integrated config and invocation paths in `config/build-deploy.yaml`, `config/build-deploy.local.yaml`, `config/checks.yaml`, `config/checks.local.yaml`, `src/vivipi/core/config.py`, `src/vivipi/tooling/vivipulse.py`, `src/vivipi/services/adb_service.py`, and `README.md`
+  - reviewed the task source documents in `docs/research/connection-test-expansion/u64-connection-test-expansion.md` and `docs/research/connection-test-expansion/plan.md`
+- Verified discovery findings:
+  - `scripts/u64_connection_test.py` is a standalone host-side probe driver; no production repo path currently invokes it directly
+  - the repository-integrated host path is `scripts/vivipulse`, which resolves `config/build-deploy*.yaml` plus `config/checks*.yaml` into the shared runtime probe model
+  - the active checked-in local build profile is `config/build-deploy.local.yaml`, which selects `config/checks.local.yaml`
+  - `config/checks.local.yaml` currently covers only `HTTP`, `FTP`, and `TELNET` for `c64u` and `u64`; the newly added `ident`, `raw64`, and optional `modem` surfaces are not yet exercised through the ViviPi runtime config path
+  - the checked-in config path already models an optional shared network password via `${VIVIPI_NETWORK_PASSWORD}`, and `vivipi.core.config.load_checks_config(...)` resolves missing auth placeholders to empty strings for `username` / `password`
+- Working hypothesis for Stage 1:
+  - the highest-risk no-password failures are in the newly added direct-tool `ident` / `raw64` live-device behavior or in the clarity of no-password diagnostics, not in the parser defaults alone
+- Next actions:
+  - run the focused tooling test slice unchanged
+  - run direct no-password U64 connection-test invocations, starting with `ident` and `raw64`
+  - run the repository-integrated local ViviPi path via `scripts/vivipulse --mode local`
+
+## 2026-04-23T12:50:11Z
+
+- Completed Stage 1 real-device validation for the expanded U64 host-side connection tooling against the live no-password U64 at `192.168.1.13`.
+- Focused tooling validation before fixes:
+  - `python -m pytest -o addopts='' tests/unit/tooling/test_u64_connection_test.py tests/unit/tooling/test_u64_connection_protocols.py tests/unit/tooling/test_u64_telnet.py tests/unit/tooling/test_u64_stream.py` -> `78 passed`
+- Live no-password direct-tool validation:
+  - `./.venv/bin/python scripts/u64_connection_test.py --host 192.168.1.13 --probes ident,raw64 --duration-s 5 --log-every 1 -v`
+  - observed `ident` and `raw64` both succeeding on the device, but the command exited non-zero because explicit `--probes ident,raw64` still inherited soak-profile stream monitoring and hit unrelated stream timeout failures
+  - discriminating rerun `./.venv/bin/python scripts/u64_connection_test.py --host 192.168.1.13 --profile stress --probes ident,raw64 --duration-s 5 --log-every 1 -v` confirmed the new direct surfaces were healthy and isolated the bug to config resolution, not the device protocols
+- Minimal Stage 1 fix applied:
+  - updated `scripts/u64_connection_test.py` so explicit `--probes` disables profile-default streams unless `--stream` is also supplied
+  - updated `tests/unit/tooling/test_u64_connection_test.py` with a regression test for that behavior and extended CLI help coverage
+  - documented the new behavior in the `--probes` help text
+- Post-fix validation of the repaired live scenario:
+  - `python -m pytest -o addopts='' tests/unit/tooling/test_u64_connection_test.py` -> `28 passed`
+  - re-ran `./.venv/bin/python scripts/u64_connection_test.py --host 192.168.1.13 --probes ident,raw64 --duration-s 5 --log-every 1 -v`
+  - observed `streams=off`, repeated `ident` success with strict JSON echo validation, and repeated `raw64` success across identify/debug-register/flash metadata reads with no unrelated stream failures
+- Wider direct-tool no-password validation:
+  - `./.venv/bin/python scripts/u64_connection_test.py --host 192.168.1.13 --profile stress --probes ping,http,ftp,telnet,ident,raw64 --schedule sequential --runners 1 --duration-s 3 --log-every 1 -v`
+  - observed repeated `OK` results for all six probes with `network_password_set=0`
+- Repository-integrated ViviPi path validation:
+  - first attempted `./.venv/bin/python scripts/vivipulse ...` and confirmed the failure was only an invocation mistake because `scripts/vivipulse` is a shell entrypoint, not a Python module
+  - `env -u VIVIPI_NETWORK_PASSWORD -u VIVIPI_NETWORK_USERNAME scripts/vivipulse --mode local --build-config config/build-deploy.local.yaml --check-id u64-rest --check-id u64-ftp --check-id u64-telnet` -> `Selected checks: u64-rest, u64-ftp, u64-telnet`, `Successes: 3`
+  - `VIVIPI_NETWORK_PASSWORD='' VIVIPI_NETWORK_USERNAME='' scripts/vivipulse --mode local --build-config config/build-deploy.local.yaml --check-id u64-rest --check-id u64-ftp --check-id u64-telnet` -> `Selected checks: u64-rest, u64-ftp, u64-telnet`, `Successes: 3`
+  - this verified both omitted-password and explicit-empty-password behavior through the checked-in local build-config and checks-config path
+- Optional modem listener classification:
+  - `./.venv/bin/python scripts/u64_connection_test.py --host 192.168.1.13 --profile stress --probes modem --duration-s 2 --log-every 1 -v`
+  - observed clean smoke classifications on port `3000`, alternating between `status=offline` and `status=busy`; no destructive action required and the probe remained non-blocking
+- Final focused validation after the fix:
+  - initial rerun of the required focused slice found only one wrapped-help assertion failure in `tests/unit/tooling/test_u64_connection_test.py`; the implementation itself was fine
+  - tightened that assertion to match the stable clause instead of the exact wrapped sentence
+  - reran `python -m pytest -o addopts='' tests/unit/tooling/test_u64_connection_test.py tests/unit/tooling/test_u64_connection_protocols.py tests/unit/tooling/test_u64_telnet.py tests/unit/tooling/test_u64_stream.py` -> `79 passed`
+- Final repository validation:
+  - `./build` -> `731 passed`, total coverage `97.90%`
+- Stage 1 outcome:
+  - no-password direct-tool path: PASS
+  - no-password ViviPi-integrated path: PASS
+  - optional modem smoke classification: PASS as non-blocking `offline` / `busy`
+  - Stage 2 remains deferred until the shared U64 network password is enabled by the user
+
 ## 2026-04-20T16:35:00Z
 
 - Investigated the report that the attached Pico appeared stuck on the boot screen with a non-moving liveness pixel.

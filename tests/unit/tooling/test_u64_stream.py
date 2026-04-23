@@ -84,3 +84,30 @@ def test_stream_packet_tracker_detects_video_size_error():
 
     assert snapshot.status == "FAIL"
     assert snapshot.size_errors == 1
+
+
+def test_send_command_authenticates_with_shared_network_password(monkeypatch):
+    module = load_module()
+    calls = []
+
+    class FakeSocket:
+        def sendall(self, payload):
+            calls.append(("sendall", payload))
+
+        def close(self):
+            calls.append("close")
+
+    fake_socket = FakeSocket()
+    monkeypatch.setattr(module.socket, "create_connection", lambda address, timeout: fake_socket)
+    monkeypatch.setattr(module.u64_raw64, "authenticate_socket", lambda sock, password: calls.append(("auth", password)))
+
+    module._send_command(
+        module.StreamRuntimeSettings(host="host", control_port=64, network_password="secret"),
+        b"payload",
+    )
+
+    assert calls == [
+        ("auth", "secret"),
+        ("sendall", b"payload"),
+        "close",
+    ]

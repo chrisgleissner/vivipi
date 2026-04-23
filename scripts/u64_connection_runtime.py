@@ -34,6 +34,8 @@ class RuntimeSettings:
     delay_ms: int
     log_every: int
     verbose: bool
+    network_password: str = ""
+    modem_port: int = 3000
 
 
 @dataclass(frozen=True)

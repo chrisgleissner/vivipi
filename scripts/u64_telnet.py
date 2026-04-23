@@ -43,6 +43,7 @@ TELNET_KEY_ESC = b"\x1b"
 TELNET_KEY_ENTER = b"\r"
 TELNET_FAILURE_MARKERS = (b"incorrect", b"failed", b"denied", b"invalid")
 TELNET_SAVE_FLASH_MARKERS = ("save changes to flash", "yes", "no")
+TELNET_PASSWORD_PROMPT = "password:"
 AUDIO_MIXER_WRITE_VALUE_PATTERN = re.compile(r"Vol UltiSid 1\s+(OFF|[+-]?\d+ dB|\d+ dB)")
 
 
@@ -197,7 +198,24 @@ def strip_vt_text(value: bytes) -> str:
 def connect(settings: RuntimeSettings) -> TelnetSocket:
     sock = socket.create_connection((settings.host, settings.telnet_port), timeout=2)
     sock.settimeout(TELNET_IDLE_TIMEOUT_S)
+    authenticate_if_needed(sock, settings)
     return sock
+
+
+def authenticate_if_needed(sock: TelnetSocket, settings: RuntimeSettings) -> None:
+    if not settings.network_password:
+        return
+    prompt = read_until_idle(sock, max_empty_reads=2)
+    if TELNET_PASSWORD_PROMPT not in prompt.lower():
+        sock.sendall(TELNET_KEY_ENTER)
+        prompt = read_until_idle(sock, max_empty_reads=2)
+        if TELNET_PASSWORD_PROMPT not in prompt.lower():
+            return
+    sock.sendall(settings.network_password.encode("utf-8") + TELNET_KEY_ENTER)
+    response = read_until_idle(sock, max_empty_reads=2)
+    lowered = response.lower()
+    if any(marker.decode("utf-8") in lowered for marker in TELNET_FAILURE_MARKERS) or TELNET_PASSWORD_PROMPT in lowered:
+        raise RuntimeError("login failed")
 
 
 def _wait_for_readable(sock: TelnetSocket, timeout_s: float) -> bool:
@@ -876,8 +894,7 @@ def run_probe(
     sock = None
     started_at = time.perf_counter_ns()
     try:
-        sock = socket.create_connection((settings.host, settings.telnet_port), timeout=2)
-        sock.settimeout(TELNET_IDLE_TIMEOUT_S)
+        sock = connect(settings)
         sock.sendall(b"\r\n")
         visible = bytearray()
         while True:
