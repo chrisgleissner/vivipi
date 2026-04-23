@@ -4549,3 +4549,113 @@ def test_portable_dma_runner_returns_fail_on_connection_error(monkeypatch):
 
     assert result.ok is False
     assert result.details != ""
+
+
+# ---------------------------------------------------------------------------
+# _raw_icmp_ping — loop filtering and exception paths
+# ---------------------------------------------------------------------------
+
+def test_raw_icmp_ping_filters_mismatched_packets_then_succeeds(monkeypatch):
+    import struct as _struct
+
+    responses = []
+
+    # Packet 1: _icmp_reply_offset returns None (too short)
+    responses.append(b"\x99")  # 1 byte, no recognisable header -> None
+
+    # Packet 2: correct offset 0 but wrong message type (not ICMP_ECHO_REPLY_TYPE)
+    bad_type_pkt = _struct.pack("!BBHHH", 8, 0, 0, 0xABCD, 1)  # type=8 (request)
+    responses.append(bad_type_pkt)
+
+    # Packet 3: right type but wrong identifier
+    wrong_id_pkt = _struct.pack("!BBHHH", 0, 0, 0, 0xFFFF, 1)  # type=0, identifier != real
+    responses.append(wrong_id_pkt)
+
+    # We'll force a TimeoutError after the 3 bad packets so the function exits via exception
+    responses.append(TimeoutError("timed out"))
+
+    recv_iter = iter(responses)
+
+    class FilteringSocket:
+        def settimeout(self, t):
+            pass
+
+        def sendto(self, data, addr):
+            pass
+
+        def recvfrom(self, n):
+            item = next(recv_iter)
+            if isinstance(item, BaseException):
+                raise item
+            return (item, ("192.0.2.1", 0))
+
+        def close(self):
+            pass
+
+        def fileno(self):
+            return -1
+
+    monkeypatch.setattr(runtime_checks.socket, "socket", lambda *a, **kw: FilteringSocket())
+    monkeypatch.setattr(
+        runtime_checks.socket, "getaddrinfo",
+        lambda *a, **kw: [(None, None, None, None, ("192.0.2.1", 0))]
+    )
+
+    result = runtime_checks._raw_icmp_ping("192.0.2.1", 1)
+
+    assert result is not None
+    assert result.ok is False  # timed out after filtering
+
+
+def test_raw_icmp_ping_returns_fail_on_socket_exception(monkeypatch):
+    class ErrorSocket:
+        def settimeout(self, t):
+            pass
+
+        def sendto(self, data, addr):
+            raise OSError("network unreachable")
+
+        def recvfrom(self, n):
+            raise OSError("unreachable")
+
+        def close(self):
+            pass
+
+        def fileno(self):
+            return -1
+
+    monkeypatch.setattr(runtime_checks.socket, "socket", lambda *a, **kw: ErrorSocket())
+    monkeypatch.setattr(
+        runtime_checks.socket, "getaddrinfo",
+        lambda *a, **kw: [(None, None, None, None, ("192.0.2.1", 0))]
+    )
+
+    result = runtime_checks._raw_icmp_ping("192.0.2.1", 1)
+
+    assert result is not None
+    assert result.ok is False
+
+
+def test_icmp_reply_offset_returns_header_length_for_ipv4_encapsulated_packet():
+    # IPv4 packet: version=4, IHL=5 (0x45), total 28+ bytes, ICMP payload after header
+    # First byte 0x45: version=4 (>>4 == 4), IHL=5 (& 0x0F == 5, header_length = 20)
+    # Need at least 28 bytes total; header_length(20) + 8 = 28 <= len(packet)
+    ipv4_header = bytes([0x45]) + bytes(27)  # 28 bytes total, IHL=5 → header_length=20
+    offset = runtime_checks._icmp_reply_offset(ipv4_header)
+    assert offset == 20
+
+
+def test_portable_ident_runner_breaks_on_expired_deadline(monkeypatch):
+    monkeypatch.setattr(runtime_checks, "_probe_nonce", lambda: "nonce-1")
+    # Provide a deadline that is already past so _deadline_remaining_s raises immediately
+    monkeypatch.setattr(
+        runtime_checks,
+        "_deadline_remaining_s",
+        lambda _deadline: (_ for _ in ()).throw(TimeoutError("expired")),
+    )
+    monkeypatch.setattr(runtime_checks.socket, "socket", lambda *a, **kw: None)
+
+    result = portable_ident_runner("ident://host:64", 1)
+
+    assert result.ok is False
+    assert "timeout" in result.details

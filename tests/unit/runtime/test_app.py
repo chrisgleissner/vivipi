@@ -1647,3 +1647,13 @@ def test_runtime_app_enforces_minimum_same_host_backoff_floor():
         app.tick(0.05)
 
     assert sleep_calls == [250]
+
+
+def test_set_press_feedback_clears_message_and_timestamp():
+    display = FakeDisplay()
+    app = RuntimeApp(definitions=(), executor=lambda definition, now_s: None, display=display, probe_time_provider=lambda: 1.0)
+
+    app._set_press_feedback(button="A", now_s=1.0)
+
+    assert app.press_feedback_message == ""
+    assert app.press_feedback_until_s is None
