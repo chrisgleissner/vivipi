@@ -1,5 +1,56 @@
 # ViviPi Work Log
 
+## 2026-04-23T16:41:55Z
+
+- Investigated the report that Pico-side `PING` and `IDENT` were failing while the host-side `scripts/u64_connection_test.py` surfaces still passed.
+- Root cause:
+  - the Pico `portable_ping_runner()` depended on `uping` first and host `subprocess ping` second; on the deployed Pico build neither path was available, so the probe degraded to `ICMP unsupported on device` even though the firmware exposed working raw ICMP sockets
+  - the removed U64 network password was not relevant to `PING` or `IDENT`; both the generated device config and the host-side probe scripts run those surfaces without authentication
+- What changed:
+  - added a MicroPython-only raw ICMP echo fallback in `src/vivipi/runtime/checks.py` so Pico ping probes stay semantically correct instead of failing when `uping` is absent
+  - added a focused regression test covering the raw-socket fallback path in `tests/unit/runtime/test_checks.py`
+- Cross-checks performed:
+  - host-side direct script probes from `scripts/u64_ping.py` and `scripts/u64_ident.py` passed for both `192.168.1.13` and `192.168.1.167` with no network password configured
+  - direct Pico helper invocations passed for both hosts once networking was up
+  - a fresh on-device startup-path reproduction via `runtime.build_runtime_app_from_path('config.json')`, `_run_startup_network(...)`, and `_run_startup_tick(...)` logged `status=OK` for `c64u-ping`, `c64u-ident`, `u64-ping`, and `u64-ident`
+- Validation:
+  - `pytest --no-cov tests/unit/runtime/test_checks.py -k portable_ping_runner` -> `5 passed`
+  - `pytest --no-cov tests/unit/runtime/test_checks.py` -> `124 passed`
+  - `./build` -> `747 passed`, total coverage `97.10%`
+
+## 2026-04-23T16:23:37Z
+
+- Completed the in-flight Pico multi-page follow-up and then resumed the broader execution plan after the steering-only button fix.
+- What changed:
+  - kept the existing overview page-rotation mechanism and made the user-facing default consistent at `20s` for OLED/LCD Pico display families by updating `src/vivipi/core/display.py`, the firmware fallback in `firmware/runtime.py`, the local/example build configs, and the README/spec documentation
+  - added an explicit runtime regression proving overview pages do not rotate when all checks fit on a single page
+  - expanded `config/checks.local.yaml` so both `c64u` and `u64` now include direct `PING`, `IDENT`, and `DMA` probes in addition to the existing `REST`, `FTP`, and `TELNET` checks; the shipped default `config/checks.yaml` remains unchanged
+  - updated traceability and stale ordering expectations in `tests/unit/runtime/test_app.py` and `tests/unit/core/test_vivipulse.py` so the branch reflects the current FTP-before-HTTP network priority consistently
+- Why it changed:
+  - the requested multi-page feature already existed in the runtime, but its inferred default interval still documented and tested as `15s`; the execution needed the contract, config surface, and runtime defaults to agree on `20s`
+  - the local real-device profile still did not expose enough direct probes on `c64u`/`u64` to force overview paging on the Pico
+  - stale ordering assertions from earlier probe-priority changes would have blocked the final repo-wide validation gate
+- Validation:
+  - focused validation passed: `pytest --no-cov tests/unit/core/test_display_config.py tests/unit/firmware/test_firmware_input.py tests/unit/runtime/test_app.py tests/unit/tooling/test_build_deploy.py` -> `150 passed`
+  - focused vivipulse ordering validation passed after aligning the stale expectations: `pytest --no-cov tests/unit/core/test_vivipulse.py` -> `23 passed`
+  - final repo-wide validation passed: `./build` -> `746 passed`, total coverage `97.30%`
+  - `./build deploy` completed against the attached Pico, but the current `vivipi.tooling.display_capture` path rebuilds a fresh app and only produced a boot-logo-style framebuffer artifact instead of a hardware-facing proof of the live health overview; direct OLED confirmation remains outstanding
+
+## 2026-04-23T16:15:15Z
+
+- Applied the steering follow-up for sporadic Pico button handling and the unnecessary bottom-row button banner while preserving the in-flight page/probe work.
+- What changed:
+  - updated `firmware/input.py` so debounced button presses are latched across runtime ticks via optional GPIO edge interrupts when available, which prevents short taps from being missed during probe work
+  - changed the on-device button reader to emit at most one navigation event per physical press, removing hold-repeat page skips on the Pico path
+  - disabled the transient `BTN ...` overlay in `src/vivipi/runtime/app.py` so button presses no longer overwrite the bottom row
+  - updated focused firmware/runtime tests to cover the new single-fire and latched-press behavior
+- Why it changed:
+  - the existing Pico path only sampled button state during `app.tick()`, so short presses could be missed while probes were running
+  - `Button.A` intentionally auto-repeated while held, which matched the observed multi-page jumps from a single long press
+  - the `BTN ...` overlay was purely transient feedback and not needed on-screen
+- Validation:
+  - focused button-path validation passed: `pytest --no-cov tests/unit/firmware/test_firmware_input.py::test_button_reader_emits_button_a_only_once_while_held tests/unit/firmware/test_firmware_input.py::test_button_reader_latches_short_debounced_tap_between_polls_via_irq tests/unit/runtime/test_app.py::test_runtime_app_button_press_feedback_is_not_rendered tests/unit/runtime/test_app.py::test_apply_button_events_leaves_press_feedback_disabled_for_no_op_button_press tests/unit/runtime/test_app.py::test_runtime_app_enters_detail_on_button_b_and_returns_to_overview tests/unit/runtime/test_app.py::test_runtime_app_moves_selection_with_button_a` -> `6 passed`
+
 ## 2026-04-23T12:42:51Z
 
 - Started Stage 1 real-device validation for the expanded Ultimate 64 host-side connection test tooling with the U64 still configured for no network password.

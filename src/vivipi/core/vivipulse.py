@@ -316,10 +316,12 @@ def apply_profile(
 def _network_weight(definition: CheckDefinition, reverse: bool = False) -> tuple[int, str]:
     order = {
         CheckType.PING: 0,
-        CheckType.HTTP: 1,
-        CheckType.SERVICE: 2,
+        CheckType.IDENT: 1,
+        CheckType.DMA: 2,
         CheckType.TELNET: 3,
         CheckType.FTP: 4,
+        CheckType.HTTP: 5,
+        CheckType.SERVICE: 6,
     }
     value = order[definition.check_type]
     if reverse:

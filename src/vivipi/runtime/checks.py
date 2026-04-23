@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import gc
+import struct
 try:
     import importlib
 except ImportError:  # pragma: no cover - MicroPython fallback
@@ -25,6 +26,9 @@ from vivipi.core.models import CheckDefinition, CheckType, Status
 
 PING_LATENCY_PATTERN = re.compile(r"time[=<]([0-9.]+)")
 FTP_PASV_PATTERN = re.compile(r"\((\d+),(\d+),(\d+),(\d+),(\d+),(\d+)\)")
+IDENT_REQUIRED_FIELDS = ("product", "firmware_version", "hostname", "your_string")
+ICMP_ECHO_REPLY_TYPE = 0
+ICMP_ECHO_REQUEST_TYPE = 8
 TELNET_FAILURE_MARKERS = (b"incorrect", b"failed", b"denied", b"invalid")
 TELNET_LOGIN_MARKERS = (b"login:", b"username:", b"user:")
 TELNET_PASSWORD_MARKERS = (b"password:",)
@@ -51,6 +55,13 @@ SOCKET_CONNECT_IN_PROGRESS_ERRNOS = frozenset({11, 36, 114, 115, 10035})
 SOCKET_ALREADY_CONNECTED_ERRNOS = frozenset({56, 106, 127})
 SOCKET_WOULD_BLOCK_ERRNOS = frozenset({11, 35, 36, 10035})
 SOCKET_TIMEOUT_ERRNOS = frozenset({110})
+DIGITAL_CONTROL_PORT = 64
+DMA_SOCKET_CMD_IDENTIFY = 0xFF0E
+DMA_SOCKET_CMD_AUTHENTICATE = 0xFF1F
+DMA_SOCKET_CMD_READFLASH = 0xFF75
+DMA_SOCKET_CMD_DEBUG_REG = 0xFF76
+DMA_FLASH_METADATA_PAGE_SIZE = 0
+DMA_FLASH_METADATA_PAGE_COUNT = 1
 
 PROBE_MAX_SOCKET_OPS = 48
 PROBE_IO_PACING_MS = 2
@@ -178,6 +189,78 @@ def _maybe_collect_gc(min_free_bytes: int = TELNET_RECV_CHUNK_SIZE * 4):
     if free_bytes is not None and free_bytes >= min_free_bytes:
         return
     gc.collect()
+
+
+def _icmp_checksum(payload: bytes) -> int:
+    if len(payload) % 2:
+        payload += b"\x00"
+    checksum = 0
+    for index in range(0, len(payload), 2):
+        checksum += (payload[index] << 8) | payload[index + 1]
+        checksum = (checksum & 0xFFFF) + (checksum >> 16)
+    return (~checksum) & 0xFFFF
+
+
+def _icmp_reply_offset(packet: bytes) -> int | None:
+    if len(packet) >= 8 and packet[0] in (ICMP_ECHO_REQUEST_TYPE, ICMP_ECHO_REPLY_TYPE):
+        return 0
+    if len(packet) >= 28 and (packet[0] >> 4) == 4:
+        header_length = (packet[0] & 0x0F) * 4
+        if header_length >= 20 and header_length + 8 <= len(packet):
+            return header_length
+    return None
+
+
+def _raw_icmp_ping(target: str, timeout_s: int) -> PingProbeResult | None:
+    protocol = getattr(socket, "IPPROTO_ICMP", 1)
+    try:
+        handle = socket.socket(socket.AF_INET, socket.SOCK_RAW, protocol)
+    except Exception:
+        return None
+
+    started_at, uses_ticks_ms = _start_timer()
+    identifier = int(started_at) & 0xFFFF
+    sequence = 1
+    payload = b"vivipi"
+    header = struct.pack("!BBHHH", ICMP_ECHO_REQUEST_TYPE, 0, 0, identifier, sequence)
+    packet = header + payload
+    checksum = _icmp_checksum(packet)
+    request_packet = struct.pack("!BBHHH", ICMP_ECHO_REQUEST_TYPE, 0, checksum, identifier, sequence) + payload
+
+    try:
+        resolved = socket.getaddrinfo(target, 0, socket.AF_INET, 0, 0)
+        endpoint = resolved[0][-1]
+        host = endpoint[0]
+        handle.settimeout(timeout_s)
+        handle.sendto(request_packet, (host, 1))
+        while True:
+            response_packet, _address = handle.recvfrom(4096)
+            reply_offset = _icmp_reply_offset(response_packet)
+            if reply_offset is None:
+                continue
+            message_type, code, _reply_checksum, reply_identifier, reply_sequence = struct.unpack(
+                "!BBHHH",
+                response_packet[reply_offset : reply_offset + 8],
+            )
+            if message_type != ICMP_ECHO_REPLY_TYPE or code != 0:
+                continue
+            if reply_identifier != identifier or reply_sequence != sequence:
+                continue
+            return PingProbeResult(
+                ok=True,
+                latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
+                details="reachable",
+            )
+    except Exception as error:
+        return PingProbeResult(
+            ok=False,
+            latency_ms=None,
+            details=_probe_error_detail(error),
+        )
+    finally:
+        _close_socket(handle)
+
+    return PingProbeResult(ok=False, latency_ms=None, details="timeout")
 
 
 def _deadline_after_s(timeout_s: int | float):
@@ -422,6 +505,10 @@ def portable_ping_runner(target: str, timeout_s: int, trace=None) -> PingProbeRe
         try:
             import uping  # type: ignore
         except ImportError:
+            if _is_micropython_runtime():
+                raw_socket_result = _raw_icmp_ping(target, timeout_s)
+                if raw_socket_result is not None:
+                    return raw_socket_result
             try:
                 import subprocess
             except ImportError:
@@ -460,6 +547,207 @@ def portable_ping_runner(target: str, timeout_s: int, trace=None) -> PingProbeRe
         )
 
     return _single_ping()
+
+
+def _probe_nonce() -> str:
+    if hasattr(time, "ticks_ms"):
+        return f"vivipi-{int(time.ticks_ms())}"
+    return f"vivipi-{time.monotonic_ns()}"
+
+
+def _parse_socket_target_with_schemes(target: str, default_port: int, expected_schemes: tuple[str, ...] | None = None) -> tuple[str, int]:
+    raw_target = str(target).strip()
+    if "://" in raw_target:
+        parsed = urlparse(raw_target)
+        if expected_schemes is not None and parsed.scheme and _fold(parsed.scheme) not in expected_schemes:
+            allowed = "/".join(expected_schemes)
+            raise ValueError(f"expected {allowed} target")
+        if not parsed.hostname:
+            raise ValueError("target must include a host")
+        return parsed.hostname, parsed.port or default_port
+
+    host, separator, port_text = raw_target.rpartition(":")
+    if separator and host and port_text.isdigit():
+        return host, int(port_text)
+    if not raw_target:
+        raise ValueError("target must include a host")
+    return raw_target, default_port
+
+
+def portable_ident_runner(target: str, timeout_s: int, trace=None) -> PingProbeResult:
+    host, port = _parse_socket_target_with_schemes(target, DIGITAL_CONTROL_PORT, ("ident",))
+    endpoint = f"{host}:{port}"
+    nonce = _probe_nonce()
+    request_payload = f"json{nonce}".encode("utf-8")
+    started_at, uses_ticks_ms = _start_timer()
+    handle = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        _emit_probe_trace(trace, "socket-open", stage="ident-open", target=endpoint, timeout_s=timeout_s)
+        handle.settimeout(timeout_s)
+        handle.sendto(request_payload, (host, port))
+        _emit_socket_send(trace, stage="ident-send", bytes_sent=len(request_payload), operation="json-discovery", target=endpoint)
+        payload, _address = handle.recvfrom(4096)
+        _emit_socket_recv(trace, stage="ident-recv", bytes_received=len(payload), operation="json-discovery", target=endpoint)
+        response = json.loads(payload.decode("utf-8"))
+        if not isinstance(response, dict):
+            raise RuntimeError("invalid ident payload")
+        for field_name in IDENT_REQUIRED_FIELDS:
+            value = response.get(field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise RuntimeError(f"missing ident field: {field_name}")
+        if response["your_string"] != nonce:
+            raise RuntimeError("ident echo mismatch")
+        return PingProbeResult(
+            ok=True,
+            latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
+            details=f"product={response['product']} hostname={response['hostname']}",
+        )
+    except Exception as error:
+        return PingProbeResult(
+            ok=False,
+            latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
+            details=_probe_error_detail(error),
+        )
+    finally:
+        _close_socket(handle, trace=trace, target=endpoint)
+
+
+def _dma_command_frame(command: int, payload: bytes = b"") -> bytes:
+    return struct.pack("<HH", command, len(payload)) + payload
+
+
+def _dma_recv_exact(handle, size: int, deadline, trace=None, *, operation: str, target: str, budget=None) -> bytes:
+    chunks = bytearray()
+    while len(chunks) < size:
+        chunk = _socket_recv(
+            handle,
+            size - len(chunks),
+            deadline,
+            trace=trace,
+            stage="dma-recv",
+            operation=operation,
+            target=target,
+            budget=budget,
+        )
+        if not chunk:
+            raise RuntimeError(f"short dma read expected={size} got={len(chunks)}")
+        chunks.extend(chunk)
+    return bytes(chunks)
+
+
+def _dma_command(handle, command: int, deadline, trace=None, *, payload: bytes = b"", operation: str, target: str, budget=None) -> None:
+    _socket_sendall(
+        handle,
+        _dma_command_frame(command, payload),
+        deadline,
+        trace=trace,
+        stage="dma-send",
+        operation=operation,
+        target=target,
+        budget=budget,
+    )
+
+
+def _dma_authenticate(handle, password: str | None, deadline, trace=None, *, target: str, budget=None) -> None:
+    if not password:
+        return
+    _dma_command(
+        handle,
+        DMA_SOCKET_CMD_AUTHENTICATE,
+        deadline,
+        trace=trace,
+        payload=password.encode("utf-8"),
+        operation="dma-authenticate",
+        target=target,
+        budget=budget,
+    )
+    if _dma_recv_exact(handle, 1, deadline, trace=trace, operation="dma-authenticate", target=target, budget=budget) != b"\x01":
+        raise RuntimeError("dma authentication failed")
+
+
+def _dma_identify(handle, deadline, trace=None, *, target: str, budget=None) -> str:
+    _dma_command(
+        handle,
+        DMA_SOCKET_CMD_IDENTIFY,
+        deadline,
+        trace=trace,
+        operation="dma-identify",
+        target=target,
+        budget=budget,
+    )
+    title_length = _dma_recv_exact(handle, 1, deadline, trace=trace, operation="dma-identify", target=target, budget=budget)[0]
+    if title_length < 1:
+        raise RuntimeError("empty identify title")
+    title = _dma_recv_exact(handle, title_length, deadline, trace=trace, operation="dma-identify", target=target, budget=budget).decode("utf-8", "replace").strip()
+    if not title:
+        raise RuntimeError("empty identify title")
+    return f"title={title}"
+
+
+def _dma_read_debug_register(handle, deadline, trace=None, *, target: str, budget=None) -> str:
+    _dma_command(
+        handle,
+        DMA_SOCKET_CMD_DEBUG_REG,
+        deadline,
+        trace=trace,
+        operation="dma-debug-register",
+        target=target,
+        budget=budget,
+    )
+    value = _dma_recv_exact(handle, 1, deadline, trace=trace, operation="dma-debug-register", target=target, budget=budget)[0]
+    return f"debug_reg=0x{value:02X}"
+
+
+def _dma_read_flash_metadata(handle, selector: int, deadline, trace=None, *, target: str, budget=None) -> int:
+    _dma_command(
+        handle,
+        DMA_SOCKET_CMD_READFLASH,
+        deadline,
+        trace=trace,
+        payload=bytes((selector & 0xFF,)),
+        operation="dma-flash-metadata",
+        target=target,
+        budget=budget,
+    )
+    return int.from_bytes(
+        _dma_recv_exact(handle, 4, deadline, trace=trace, operation="dma-flash-metadata", target=target, budget=budget),
+        "little",
+    )
+
+
+def portable_dma_runner(target: str, timeout_s: int, password: str | None = None, trace=None) -> PingProbeResult:
+    host, port = _parse_socket_target_with_schemes(target, DIGITAL_CONTROL_PORT, ("dma", "raw64"))
+    endpoint = f"{host}:{port}"
+    started_at, uses_ticks_ms = _start_timer()
+    deadline = _deadline_after_s(timeout_s)
+    budget = _ProbeBudget()
+    handle = None
+    try:
+        _maybe_collect_gc()
+        handle = _open_socket_compat(host, port, timeout_s, deadline, trace=trace)
+        _dma_authenticate(handle, password, deadline, trace=trace, target=endpoint, budget=budget)
+        identify_detail = _dma_identify(handle, deadline, trace=trace, target=endpoint, budget=budget)
+        debug_detail = _dma_read_debug_register(handle, deadline, trace=trace, target=endpoint, budget=budget)
+        page_size = _dma_read_flash_metadata(handle, DMA_FLASH_METADATA_PAGE_SIZE, deadline, trace=trace, target=endpoint, budget=budget)
+        page_count = _dma_read_flash_metadata(handle, DMA_FLASH_METADATA_PAGE_COUNT, deadline, trace=trace, target=endpoint, budget=budget)
+        if page_size < 1:
+            raise RuntimeError("invalid flash page size")
+        if page_count < 1:
+            raise RuntimeError("invalid flash page count")
+        return PingProbeResult(
+            ok=True,
+            latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
+            details=f"{identify_detail} {debug_detail} flash_page_size={page_size} flash_pages={page_count}",
+        )
+    except Exception as error:
+        return PingProbeResult(
+            ok=False,
+            latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
+            details=_probe_error_detail(error),
+        )
+    finally:
+        _close_socket(handle, trace=trace, target=endpoint)
+        _maybe_collect_gc()
 
 
 def _probe_error_detail(error: BaseException) -> str:
@@ -1463,6 +1751,12 @@ def build_executor(ping_runner=None, http_runner=None, ftp_runner=None, telnet_r
         def ping(target: str, timeout_s: int, trace=None):
             return ping_runner(target, timeout_s)
 
+    def ident(target: str, timeout_s: int, trace=None):
+        return portable_ident_runner(target, timeout_s, trace=trace)
+
+    def dma(target: str, timeout_s: int, password: str | None = None, trace=None):
+        return portable_dma_runner(target, timeout_s, password=password, trace=trace)
+
     if http_runner is None:
         def http(method: str, target: str, timeout_s: int, username: str | None = None, password: str | None = None, trace=None):
             return portable_http_runner(method, target, timeout_s, username, password, trace=trace)
@@ -1510,6 +1804,8 @@ def build_executor(ping_runner=None, http_runner=None, ftp_runner=None, telnet_r
                     password,
                     trace=trace,
                 ),
+                lambda target, timeout_s: ident(target, timeout_s, trace=trace),
+                lambda target, timeout_s, password=None: dma(target, timeout_s, password=password, trace=trace),
                 lambda target, timeout_s, username=None, password=None: ftp(
                     target,
                     timeout_s,

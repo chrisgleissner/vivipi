@@ -68,8 +68,11 @@ class ButtonReader:
                 "stable_value": raw_value,
                 "raw_changed_ms": time.ticks_ms(),
                 "pressed_since_ms": None,
+                "pending_presses": 0,
+                "press_emitted": False,
                 "emitted_steps": 0,
             }
+            self._bind_irq(button, self.states[button])
             self._log(
                 "info",
                 "init",
@@ -101,6 +104,82 @@ class ButtonReader:
     def _pull_constant(self, bias):
         return Pin.PULL_DOWN if bias == "down" else Pin.PULL_UP
 
+    def _bind_irq(self, button, state):
+        irq_method = getattr(state["pin"], "irq", None)
+        if not callable(irq_method):
+            return
+        if not hasattr(Pin, "IRQ_RISING") or not hasattr(Pin, "IRQ_FALLING"):
+            return
+
+        trigger = Pin.IRQ_RISING | Pin.IRQ_FALLING
+
+        def _handler(_pin, _button=button):
+            self._capture_irq(_button)
+
+        irq_method(trigger=trigger, handler=_handler)
+
+    def _capture_irq(self, button):
+        state = self.states.get(button)
+        if state is None:
+            return
+        now_ms = time.ticks_ms()
+        raw_value = state["pin"].value()
+        self._update_raw_transition(state, button, raw_value, now_ms, log=False)
+        self._update_press_state(state, raw_value, now_ms)
+
+    def _update_raw_transition(self, state, button, raw_value, now_ms, log=True):
+        if raw_value == state["raw_value"]:
+            return
+        edge = "rising" if raw_value > state["raw_value"] else "falling"
+        state["raw_value"] = raw_value
+        state["raw_changed_ms"] = now_ms
+        if log:
+            self._log(
+                "info",
+                "raw",
+                _button_fields(state, button, edge=edge),
+            )
+
+    def _update_press_state(self, state, raw_value, now_ms):
+        pressed = raw_value != state["idle_value"]
+        if pressed:
+            if state["pressed_since_ms"] is None:
+                state["pressed_since_ms"] = now_ms
+                state["press_emitted"] = False
+                state["emitted_steps"] = 0
+            return
+
+        pressed_since_ms = state["pressed_since_ms"]
+        if pressed_since_ms is None:
+            return
+        held_ms = max(0, time.ticks_diff(now_ms, pressed_since_ms))
+        if held_ms >= self.input_controller.debounce_ms and not state["press_emitted"]:
+            state["pending_presses"] += 1
+        state["pressed_since_ms"] = None
+        state["press_emitted"] = False
+        state["emitted_steps"] = 0
+
+    def _queue_live_press_if_due(self, state, now_ms):
+        pressed_since_ms = state["pressed_since_ms"]
+        if pressed_since_ms is None or state["press_emitted"]:
+            return
+        held_ms = max(0, time.ticks_diff(now_ms, pressed_since_ms))
+        if held_ms < self.input_controller.debounce_ms:
+            return
+        state["pending_presses"] += 1
+        state["press_emitted"] = True
+
+    def _drain_pending_presses(self, state, button, events):
+        while state["pending_presses"] > 0:
+            state["pending_presses"] -= 1
+            state["emitted_steps"] = 1
+            events.append(ButtonEvent(button=button, held_ms=self.input_controller.debounce_ms))
+            self._log(
+                "info",
+                "event",
+                _button_fields(state, button, held_ms=self.input_controller.debounce_ms, step=state["emitted_steps"], pressed=True),
+            )
+
     def _log(self, method, message, fields=()):
         if self.logger is None:
             return
@@ -114,15 +193,7 @@ class ButtonReader:
         events = []
         for button, state in self.states.items():
             raw_value = state["pin"].value()
-            if raw_value != state["raw_value"]:
-                edge = "rising" if raw_value > state["raw_value"] else "falling"
-                state["raw_value"] = raw_value
-                state["raw_changed_ms"] = now_ms
-                self._log(
-                    "info",
-                    "raw",
-                    _button_fields(state, button, edge=edge),
-                )
+            self._update_raw_transition(state, button, raw_value, now_ms)
 
             if raw_value != state["stable_value"]:
                 if time.ticks_diff(now_ms, state["raw_changed_ms"]) < self.input_controller.debounce_ms:
@@ -134,10 +205,10 @@ class ButtonReader:
                 edge = "rising" if raw_value > previous_value else "falling"
                 if pressed:
                     state["pressed_since_ms"] = state["raw_changed_ms"]
+                    state["press_emitted"] = False
                     state["emitted_steps"] = 0
                 else:
-                    state["pressed_since_ms"] = None
-                    state["emitted_steps"] = 0
+                    self._update_press_state(state, raw_value, now_ms)
                 self._log(
                     "info",
                     "debounced",
@@ -150,30 +221,11 @@ class ButtonReader:
                 )
 
             if state["stable_value"] == state["idle_value"]:
+                self._drain_pending_presses(state, button, events)
                 continue
 
-            pressed_since_ms = state["pressed_since_ms"]
-            if pressed_since_ms is None:
-                pressed_since_ms = state["raw_changed_ms"]
-                state["pressed_since_ms"] = pressed_since_ms
-
-            held_ms = max(0, time.ticks_diff(now_ms, pressed_since_ms))
-            step_count = self.input_controller._step_count(held_ms)
-            if button != Button.A:
-                step_count = min(step_count, 1)
-
-            emitted_steps = state["emitted_steps"]
-            if step_count <= emitted_steps:
-                continue
-
-            state["emitted_steps"] = step_count
-            for _ in range(step_count - emitted_steps):
-                events.append(ButtonEvent(button=button, held_ms=self.input_controller.debounce_ms))
-                self._log(
-                    "info",
-                    "event",
-                    _button_fields(state, button, held_ms=held_ms, step=state["emitted_steps"], pressed=True),
-                )
+            self._queue_live_press_if_due(state, now_ms)
+            self._drain_pending_presses(state, button, events)
 
         return tuple(events)
 

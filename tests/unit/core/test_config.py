@@ -206,6 +206,30 @@ checks:
     assert definitions[1].password is None
 
 
+def test_load_checks_config_supports_ident_and_dma_direct_checks(tmp_path: Path):
+    config_path = tmp_path / "checks.yaml"
+    config_path.write_text(
+        """
+checks:
+  - name: U64 Ident
+    type: ident
+    target: ident://u64.example.local:64
+  - name: U64 DMA
+    type: dma
+    target: dma://u64.example.local:64
+    password: secret
+""".strip(),
+        encoding="utf-8",
+    )
+
+    definitions = load_checks_config(config_path)
+
+    assert definitions[0].check_type == CheckType.IDENT
+    assert definitions[0].target == "ident://u64.example.local:64"
+    assert definitions[1].check_type == CheckType.DMA
+    assert definitions[1].password == "secret"
+
+
 def test_load_checks_config_treats_missing_auth_placeholders_as_optional(tmp_path: Path):
     config_path = tmp_path / "checks.yaml"
     config_path.write_text(

@@ -13,7 +13,7 @@ ViviPi (pronounced "VEE-vee-pie", from the Latin *viv-* in *vivere*, "to live") 
 ## Features
 
 - Display support includes Pico OLED, LCD, and e-paper modules; verified on the Waveshare Pico OLED 1.3.
-- Supports `PING`, `HTTP`, `FTP`, `TELNET`, and `SERVICE` health checks.
+- Supports `PING`, `IDENT`, `DMA`, `TELNET`, `FTP`, `HTTP`, and `SERVICE` health checks.
 - Configurable back-off and scheduling policies to avoid overwhelming targets.
 - Easy build and deployment via a one-stop shop `build` command.
 
@@ -23,7 +23,7 @@ ViviPi (pronounced "VEE-vee-pie", from the Latin *viv-* in *vivere*, "to live") 
 
 ## System Architecture
 
-ViviPi runs on the Pico and evaluates checks through two paths: direct network probes (`PING`, `HTTP`, `FTP`, `TELNET`) and `SERVICE` probes.
+ViviPi runs on the Pico and evaluates checks through two paths: direct network probes (`PING`, `IDENT`, `DMA`, `TELNET`, `FTP`, `HTTP`) and `SERVICE` probes.
 
 ```mermaid
 flowchart TB
@@ -32,9 +32,11 @@ flowchart TB
   subgraph Direct[Direct probes from the Pico]
     direction LR
     Ping[PING]
-    Http[HTTP]
-    Ftp[FTP]
+    Ident[IDENT]
+    Dma[DMA]
     Telnet[TELNET]
+    Ftp[FTP]
+    Http[HTTP]
   end
 
   subgraph ServicePath[SERVICE probe path]
@@ -52,9 +54,11 @@ flowchart TB
   end
 
   Pico --> Ping
-  Pico --> Http
-  Pico --> Ftp
+  Pico --> Ident
+  Pico --> Dma
   Pico --> Telnet
+  Pico --> Ftp
+  Pico --> Http
   Pico --> ServiceProbe
 ```
 
@@ -75,9 +79,11 @@ The bottom scanline shows a 3-pixel health indicator that moves from left to rig
 | Probe | Performs | Success condition | Failure condition or note |
 | --- | --- | --- | --- |
 | `PING` | ICMP ping | Response received; latency measured locally | No response or timeout |
-| `HTTP` | HTTP request | Response status is `2xx` or `3xx`; latency measured locally | Non-`2xx`/`3xx` response or timeout |
-| `FTP` | FTP control session with optional credentials | A valid FTP greeting is received and the control socket stays usable long enough to quit cleanly | Missing or invalid greeting, connection failure, or timeout |
+| `IDENT` | UDP/64 JSON discovery request | Returns a JSON device identity payload with a matching echo token | Invalid JSON, missing identity fields, echo mismatch, connection failure, or timeout |
+| `DMA` | TCP/64 DMA command session with optional password | Authenticates when configured, identifies the device, reads the debug register, and returns flash metadata | Authentication failure, invalid reply payloads, connection failure, or timeout |
 | `TELNET` | Telnet session with optional credentials | `OK` after Telnet returns a non-empty response with no clear failure markers and the probe drains that response before closing the session | Connection failure, explicit failure-marker text such as denied/incorrect/failed/invalid, no non-empty response before idle/close, incomplete response consumption before timeout/chunk limit, or immediate close/reset before any non-empty response is received |
+| `FTP` | FTP control session with optional credentials | A valid FTP greeting is received and the control socket stays usable long enough to quit cleanly | Missing or invalid greeting, connection failure, or timeout |
+| `HTTP` | HTTP request | Response status is `2xx` or `3xx`; latency measured locally | Non-`2xx`/`3xx` response or timeout |
 | `SERVICE` | HTTP request to a `/checks` endpoint | Response returns a valid checks payload; each returned check becomes an independent ViviPi check | Default backend uses `adb` to report Android availability, but any backend can return checks through the same schema |
 
 ## Default Hardware Target
@@ -130,7 +136,7 @@ export VIVIPI_SERVICE_BASE_URL="http://192.168.1.10:8080/checks"
 
 `./build` with no command is equivalent to `./build ci`.
 
-Without `VIVIPI_SERVICE_BASE_URL`, ViviPi builds only the direct `PING`, `HTTP`, `FTP`, and `TELNET` checks from [config/checks.yaml](config/checks.yaml).
+Without `VIVIPI_SERVICE_BASE_URL`, ViviPi builds only the default direct `PING`, `HTTP`, `FTP`, and `TELNET` checks from [config/checks.yaml](config/checks.yaml). The Pico runtime also supports optional `IDENT` and `DMA` direct checks when you add them explicitly to a custom checks config, but they are not enabled in the shipped default setup.
 
 1. Start the default Vivi Service only if you want the sample `SERVICE` check.
 
@@ -478,12 +484,13 @@ If `VIVIPI_SERVICE_BASE_URL` is omitted, build-time filtering drops `SERVICE` ch
 | `checks_config` | relative path | `checks.yaml` | Path to the checks definition file |
 
 Visible rows and columns are derived automatically from the selected display geometry and the resolved font size.
+When configured checks exceed the visible rows, the overview cycles across pages using `device.display.page_interval`.
 
 `device.display.page_interval` defaults by display family:
 
 | Display family | Default page interval |
 | --- | --- |
-| OLED and LCD | `15s` |
+| OLED and LCD | `20s` |
 | 2.13 inch e-paper | `180s` |
 | 2.7 to 2.9 inch e-paper | `240s` |
 | 3.7 to 4.2 inch e-paper | `300s` |
@@ -498,7 +505,7 @@ device:
     mode: compact
     columns: 2
     font: medium
-    page_interval: 15s
+    page_interval: 20s
 ```
 
 ### Supported Display Types
@@ -535,7 +542,7 @@ Published specs below are based on current The Pi Hut Waveshare product listings
 | Field | Required | Notes |
 | --- | --- | --- |
 | `name` | Yes | Label shown on the display |
-| `type` | Yes | `ping`, `http`, `telnet`, `ftp`, or `service` |
+| `type` | Yes | `ping`, `ident`, `dma`, `telnet`, `ftp`, `http`, or `service` |
 | `target` | Yes | Host, URL, or service endpoint target |
 | `interval_s` | Yes | Check cadence in seconds |
 | `timeout_s` | Yes | Per-check timeout in seconds |

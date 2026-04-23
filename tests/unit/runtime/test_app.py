@@ -291,7 +291,7 @@ def test_runtime_app_hidden_degraded_state_skips_redundant_fail_render():
     assert len(display.frames) == 1
 
 
-def test_runtime_app_button_press_feedback_stays_visible_long_enough_to_notice():
+def test_runtime_app_button_press_feedback_is_not_rendered():
     display = FakeDisplay()
     app = RuntimeApp(definitions=(), executor=lambda definition, now_s: None, display=display, probe_time_provider=lambda: 1.0)
     app.background_workers_enabled = False
@@ -299,8 +299,8 @@ def test_runtime_app_button_press_feedback_stays_visible_long_enough_to_notice()
     app.tick(0.0)
     app.tick(1.0, button_events=(ButtonEvent(button=Button.A, held_ms=30),))
 
-    assert display.frames[-1].rows[-1].strip() == "BTN A"
-    assert app._press_feedback_text(1.5) == "BTN A"
+    assert display.frames[-1].rows[-1].strip() != "BTN A"
+    assert app._press_feedback_text(1.5) is None
     assert app._press_feedback_text(1.8) is None
 
 
@@ -349,11 +349,11 @@ def test_runtime_app_rotates_pages_when_interval_elapsed():
         definitions=definitions,
         executor=executor,
         display=display,
-        page_interval_s=15,
+        page_interval_s=20,
     )
 
     app.tick(0.0)
-    reason = app.tick(15.0)
+    reason = app.tick(20.0)
 
     assert reason == "state"
     assert app.state.page_index == 1
@@ -389,7 +389,7 @@ def test_runtime_app_rotates_over_filtered_compact_pages_only():
         definitions=definitions,
         executor=executor,
         display=display,
-        page_interval_s=15,
+        page_interval_s=20,
         display_mode=DisplayMode.COMPACT,
         overview_columns=1,
         page_size=2,
@@ -397,10 +397,42 @@ def test_runtime_app_rotates_over_filtered_compact_pages_only():
     app.background_workers_enabled = False
 
     app.tick(0.0)
-    app.tick(15.0)
+    app.tick(20.0)
 
     assert app.state.page_index == 1
     assert display.frames[-1].rows[0].startswith("Echo")
+
+
+def test_runtime_app_does_not_rotate_when_all_checks_fit_on_one_page():
+    display = FakeDisplay()
+    definitions = tuple(make_definition(identifier) for identifier in ("alpha", "bravo", "charlie"))
+
+    def executor(definition, now_s):
+        return CheckExecutionResult(
+            source_identifier=definition.identifier,
+            observations=(
+                CheckObservation(
+                    identifier=definition.identifier,
+                    name=definition.name,
+                    status=Status.OK,
+                    observed_at_s=now_s,
+                ),
+            ),
+        )
+
+    app = RuntimeApp(
+        definitions=definitions,
+        executor=executor,
+        display=display,
+        page_interval_s=20,
+        page_size=8,
+    )
+
+    app.tick(0.0)
+    reason = app.tick(20.0)
+
+    assert reason == "none"
+    assert app.state.page_index == 0
 
 
 def test_runtime_app_enters_detail_on_button_b_and_returns_to_overview():
@@ -470,7 +502,7 @@ def test_runtime_app_moves_selection_with_button_a():
     assert display.frames[-1].inverted_row == 1
 
 
-def test_apply_button_events_sets_and_clears_press_feedback_for_no_op_button_press():
+def test_apply_button_events_leaves_press_feedback_disabled_for_no_op_button_press():
     display = FakeDisplay()
     definition = make_definition("router")
 
@@ -498,8 +530,8 @@ def test_apply_button_events_sets_and_clears_press_feedback_for_no_op_button_pre
     app._apply_button_events((ButtonEvent(button=Button.A, held_ms=30),))
 
     assert app.state == unchanged_state
-    assert app.press_feedback_until_s == pytest.approx(2.75)
-    assert app._press_feedback_text(2.0) == "BTN A"
+    assert app.press_feedback_until_s is None
+    assert app._press_feedback_text(2.0) is None
     assert app._press_feedback_text(2.8) is None
 
 
@@ -1479,7 +1511,7 @@ def test_runtime_app_waits_between_due_checks_for_the_same_host_by_default():
         app.tick(0.05)
 
     assert set(calls) == {"ftp", "http", "other"}
-    assert calls.index("http") < calls.index("ftp")
+    assert calls.index("ftp") < calls.index("http")
     assert sleep_calls == [250]
 
 
@@ -1567,7 +1599,7 @@ def test_runtime_app_spaces_same_host_requests_from_previous_probe_completion():
             break
         app.tick(0.05)
 
-    assert [item[0] for item in started] == ["http", "ftp"]
+    assert [item[0] for item in started] == ["ftp", "http"]
     assert started[1][1] - started[0][1] == pytest.approx(0.35)
     assert sleep_calls == [250]
 

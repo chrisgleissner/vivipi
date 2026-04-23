@@ -40,7 +40,7 @@ def test_normalize_display_config_defaults_to_inferred_oled_geometry_and_font():
     assert config["height_px"] == 64
     assert config["column_offset"] == 32
     assert config["font"] == {"width_px": 8, "height_px": 8}
-    assert config["page_interval_s"] == 15
+    assert config["page_interval_s"] == 20
     assert config["boot_logo_duration_s"] == 4
     assert config["liveness"]["contrast_breathing"]["enabled"] is False
     assert config["liveness"]["per_row_micro"]["enabled"] is False

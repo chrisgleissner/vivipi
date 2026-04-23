@@ -199,6 +199,63 @@ def test_execute_check_maps_ftp_and_telnet_probe_results():
     assert telnet_result.probe_latency_ms == 8.0
 
 
+def test_execute_check_maps_ident_and_dma_probe_results():
+    ident_definition = CheckDefinition(
+        identifier="u64-ident",
+        name="U64 Ident",
+        check_type=CheckType.IDENT,
+        target="ident://u64.example.local:64",
+        interval_s=15,
+        timeout_s=10,
+    )
+    dma_definition = CheckDefinition(
+        identifier="u64-dma",
+        name="U64 DMA",
+        check_type=CheckType.DMA,
+        target="dma://u64.example.local:64",
+        interval_s=15,
+        timeout_s=10,
+        password="secret",
+    )
+    ident_calls = []
+    dma_calls = []
+
+    ident_result = execute_check(
+        ident_definition,
+        observed_at_s=10.0,
+        ping_runner=None,
+        ident_runner=lambda target, timeout_s: (
+            ident_calls.append((target, timeout_s))
+            or PingProbeResult(ok=True, latency_ms=6.0, details="product=U64 hostname=u64")
+        ),
+        dma_runner=None,
+        http_runner=None,
+        ftp_runner=None,
+        telnet_runner=None,
+    )
+    dma_result = execute_check(
+        dma_definition,
+        observed_at_s=11.0,
+        ping_runner=None,
+        ident_runner=None,
+        dma_runner=lambda target, timeout_s, password: (
+            dma_calls.append((target, timeout_s, password))
+            or PingProbeResult(ok=True, latency_ms=9.0, details="title=U64 debug_reg=0x5A")
+        ),
+        http_runner=None,
+        ftp_runner=None,
+        telnet_runner=None,
+    )
+
+    assert ident_calls == [("ident://u64.example.local:64", 10)]
+    assert ident_result.observations[0].status == Status.OK
+    assert ident_result.observations[0].details == "product=U64 hostname=u64"
+    assert dma_calls == [("dma://u64.example.local:64", 10, "secret")]
+    assert dma_result.observations[0].status == Status.OK
+    assert dma_result.observations[0].details == "title=U64 debug_reg=0x5A"
+    assert dma_result.probe_latency_ms == 9.0
+
+
 def test_execute_check_preserves_explicit_telnet_degraded_status():
     telnet_definition = CheckDefinition(
         identifier="switch-console",
@@ -306,6 +363,50 @@ def test_execute_check_reports_ftp_and_telnet_executor_failures_via_diagnostics(
     assert telnet_result.observations[0].details == "executor error"
     assert ftp_result.probe_latency_ms is None
     assert telnet_result.probe_latency_ms is None
+
+
+def test_execute_check_reports_ident_and_dma_executor_failures_via_diagnostics():
+    ident_definition = CheckDefinition(
+        identifier="u64-ident",
+        name="U64 Ident",
+        check_type=CheckType.IDENT,
+        target="ident://u64.example.local:64",
+    )
+    dma_definition = CheckDefinition(
+        identifier="u64-dma",
+        name="U64 DMA",
+        check_type=CheckType.DMA,
+        target="dma://u64.example.local:64",
+        password="secret",
+    )
+
+    ident_result = execute_check(
+        ident_definition,
+        observed_at_s=10.0,
+        ping_runner=None,
+        ident_runner=lambda target, timeout_s: (_ for _ in ()).throw(RuntimeError("boom")),
+        dma_runner=None,
+        http_runner=None,
+        ftp_runner=None,
+        telnet_runner=None,
+    )
+    dma_result = execute_check(
+        dma_definition,
+        observed_at_s=10.0,
+        ping_runner=None,
+        ident_runner=None,
+        dma_runner=lambda target, timeout_s, password: (_ for _ in ()).throw(RuntimeError("boom")),
+        http_runner=None,
+        ftp_runner=None,
+        telnet_runner=None,
+    )
+
+    assert ident_result.diagnostics[0].code == "IDNT"
+    assert ident_result.observations[0].details == "executor error"
+    assert dma_result.diagnostics[0].code == "DMA"
+    assert dma_result.observations[0].details == "executor error"
+    assert ident_result.probe_latency_ms is None
+    assert dma_result.probe_latency_ms is None
 
 
 def test_execute_check_handles_service_request_failures_and_non_2xx_responses():

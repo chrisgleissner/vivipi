@@ -148,6 +148,8 @@ def execute_check(
     observed_at_s: float,
     ping_runner,
     http_runner,
+    ident_runner=None,
+    dma_runner=None,
     ftp_runner=None,
     telnet_runner=None,
 ) -> CheckExecutionResult:
@@ -160,6 +162,32 @@ def execute_check(
             error_detail="probe failed",
             ok_detail="reachable",
             failure_detail="timeout",
+        )
+
+    if definition.check_type == CheckType.IDENT:
+        return _execute_probe_check(
+            definition,
+            observed_at_s,
+            runner=lambda: ident_runner(definition.target, definition.timeout_s),
+            code="IDNT",
+            error_detail="probe failed",
+            ok_detail="device identified",
+            failure_detail="ident failed",
+        )
+
+    if definition.check_type == CheckType.DMA:
+        return _execute_probe_check(
+            definition,
+            observed_at_s,
+            runner=lambda: dma_runner(
+                definition.target,
+                definition.timeout_s,
+                password=definition.password,
+            ),
+            code="DMA",
+            error_detail="probe failed",
+            ok_detail="dma ready",
+            failure_detail="dma failed",
         )
 
     if definition.check_type == CheckType.FTP:

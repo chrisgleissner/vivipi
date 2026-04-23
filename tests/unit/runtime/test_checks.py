@@ -1,5 +1,6 @@
 import sys
 import builtins
+import struct
 from types import SimpleNamespace
 
 import pytest
@@ -26,8 +27,10 @@ from vivipi.runtime.checks import (
     build_executor,
     build_runtime_definitions,
     load_runtime_checks,
+    portable_dma_runner,
     portable_ftp_runner,
     portable_http_runner,
+    portable_ident_runner,
     portable_ping_runner,
     portable_telnet_runner,
 )
@@ -336,6 +339,32 @@ def test_build_runtime_definitions_reads_ftp_telnet_credentials_and_blank_auth()
     assert definitions[1].check_type == CheckType.TELNET
     assert definitions[1].username is None
     assert definitions[1].password is None
+
+
+def test_build_runtime_definitions_reads_ident_and_dma_checks():
+    definitions = build_runtime_definitions(
+        {
+            "checks": [
+                {
+                    "id": "u64-ident",
+                    "name": "U64 Ident",
+                    "type": "IDENT",
+                    "target": "ident://u64.example.local:64",
+                },
+                {
+                    "id": "u64-dma",
+                    "name": "U64 DMA",
+                    "type": "DMA",
+                    "target": "dma://u64.example.local:64",
+                    "password": "secret",
+                },
+            ]
+        }
+    )
+
+    assert definitions[0].check_type == CheckType.IDENT
+    assert definitions[1].check_type == CheckType.DMA
+    assert definitions[1].password == "secret"
 
 
 def test_build_executor_uses_supplied_runners():
@@ -655,6 +684,142 @@ def test_build_executor_uses_supplied_ftp_and_telnet_runners():
         ("ftp", "ftp://nas.example.local", 10, "admin", "secret"),
         ("telnet", "telnet://switch.example.local", 10, None, None),
     ]
+
+
+def test_build_executor_uses_builtin_ident_and_dma_runners(monkeypatch):
+    ident_definition = build_runtime_definitions(
+        {
+            "checks": [
+                {
+                    "id": "u64-ident",
+                    "name": "U64 Ident",
+                    "type": "IDENT",
+                    "target": "ident://u64.example.local:64",
+                }
+            ]
+        }
+    )[0]
+    dma_definition = build_runtime_definitions(
+        {
+            "checks": [
+                {
+                    "id": "u64-dma",
+                    "name": "U64 DMA",
+                    "type": "DMA",
+                    "target": "dma://u64.example.local:64",
+                    "password": "secret",
+                }
+            ]
+        }
+    )[0]
+    calls = []
+
+    monkeypatch.setattr(
+        runtime_checks,
+        "portable_ident_runner",
+        lambda target, timeout_s, trace=None: (
+            calls.append(("ident", target, timeout_s, trace is not None))
+            or PingProbeResult(ok=True, latency_ms=5.0, details="product=U64 hostname=u64")
+        ),
+    )
+    monkeypatch.setattr(
+        runtime_checks,
+        "portable_dma_runner",
+        lambda target, timeout_s, password=None, trace=None: (
+            calls.append(("dma", target, timeout_s, password, trace is not None))
+            or PingProbeResult(ok=True, latency_ms=7.0, details="title=U64 debug_reg=0x5A")
+        ),
+    )
+
+    executor = build_executor(http_runner=None)
+
+    ident_result = executor(ident_definition, 10.0)
+    dma_result = executor(dma_definition, 11.0)
+
+    assert ident_result.observations[0].status == Status.OK
+    assert dma_result.observations[0].status == Status.OK
+    assert calls == [
+        ("ident", "ident://u64.example.local:64", 10, False),
+        ("dma", "dma://u64.example.local:64", 10, "secret", False),
+    ]
+
+
+def test_portable_ident_runner_accepts_valid_json_echo(monkeypatch):
+    calls = []
+
+    class FakeIdentSocket:
+        def settimeout(self, timeout):
+            calls.append(("settimeout", timeout))
+
+        def sendto(self, payload, address):
+            calls.append(("sendto", payload, address))
+
+        def recvfrom(self, size):
+            del size
+            return (
+                b'{"product":"U64","firmware_version":"3.11","hostname":"u64","your_string":"nonce-1"}',
+                ("u64.example.local", 64),
+            )
+
+        def close(self):
+            calls.append("close")
+
+    monkeypatch.setattr(runtime_checks, "_probe_nonce", lambda: "nonce-1")
+    monkeypatch.setattr(runtime_checks.socket, "socket", lambda *args, **kwargs: FakeIdentSocket())
+
+    result = portable_ident_runner("ident://u64.example.local:64", 10)
+
+    assert result.ok is True
+    assert result.details == "product=U64 hostname=u64"
+    assert ("sendto", b"jsonnonce-1", ("u64.example.local", 64)) in calls
+    assert calls[-1] == "close"
+
+
+def test_portable_dma_runner_authenticates_and_reads_metadata(monkeypatch):
+    calls = []
+
+    class FakeDmaSocket:
+        def __init__(self):
+            self.responses = [
+                b"\x01",
+                b"\x03",
+                b"U64",
+                b"\x5A",
+                (256).to_bytes(4, "little"),
+                (4096).to_bytes(4, "little"),
+            ]
+
+        def settimeout(self, timeout):
+            calls.append(("settimeout", timeout))
+
+        def sendall(self, payload):
+            calls.append(("sendall", payload))
+
+        def recv(self, size):
+            response = self.responses.pop(0)
+            assert len(response) == size
+            return response
+
+        def close(self):
+            calls.append("close")
+
+    monkeypatch.setattr(runtime_checks, "_maybe_collect_gc", lambda min_free_bytes=runtime_checks.TELNET_RECV_CHUNK_SIZE * 4: None)
+    monkeypatch.setattr(runtime_checks, "_open_socket_compat", lambda host, port, timeout_s, deadline, trace=None: FakeDmaSocket())
+
+    result = portable_dma_runner("dma://u64.example.local:64", 10, password="secret")
+
+    assert result.ok is True
+    assert result.details == "title=U64 debug_reg=0x5A flash_page_size=256 flash_pages=4096"
+    send_calls = [entry for entry in calls if isinstance(entry, tuple) and entry[0] == "sendall"]
+
+    assert send_calls == [
+        ("sendall", runtime_checks._dma_command_frame(runtime_checks.DMA_SOCKET_CMD_AUTHENTICATE, b"secret")),
+        ("sendall", runtime_checks._dma_command_frame(runtime_checks.DMA_SOCKET_CMD_IDENTIFY)),
+        ("sendall", runtime_checks._dma_command_frame(runtime_checks.DMA_SOCKET_CMD_DEBUG_REG)),
+        ("sendall", runtime_checks._dma_command_frame(runtime_checks.DMA_SOCKET_CMD_READFLASH, b"\x00")),
+        ("sendall", runtime_checks._dma_command_frame(runtime_checks.DMA_SOCKET_CMD_READFLASH, b"\x01")),
+    ]
+    assert "close" in calls
 
 
 def test_portable_http_runner_prefers_urequests_when_available(monkeypatch):
@@ -1677,7 +1842,7 @@ def test_build_executor_preserves_explicit_trace_target(monkeypatch):
     monkeypatch.setattr(
         runtime_checks,
         "execute_check",
-        lambda definition, now_s, ping, http, ftp, telnet: (
+        lambda definition, now_s, ping, http, ident, dma, ftp, telnet: (
             http("GET", definition.target, definition.timeout_s),
             CheckExecutionResult(
                 source_identifier=definition.identifier,
@@ -1708,6 +1873,58 @@ def test_portable_ping_runner_uses_uping_when_available(monkeypatch):
 
     assert result.ok is True
     assert result.details == "reachable"
+
+
+def test_portable_ping_runner_uses_raw_icmp_fallback_on_micropython(monkeypatch):
+    monkeypatch.delitem(sys.modules, "uping", raising=False)
+    monkeypatch.setattr(runtime_checks, "_is_micropython_runtime", lambda: True)
+
+    original_import = builtins.__import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name in {"uping", "subprocess"}:
+            raise ImportError(f"no {name}")
+        return original_import(name, globals, locals, fromlist, level)
+
+    class RawIcmpSocket:
+        def __init__(self, *args):
+            self.args = args
+            self.timeout = None
+            self.sent = []
+            self.closed = False
+
+        def settimeout(self, value):
+            self.timeout = value
+
+        def sendto(self, data, address):
+            self.sent.append((data, address))
+
+        def recvfrom(self, _size):
+            request_packet, _address = self.sent[0]
+            _request_type, _code, _checksum, identifier, sequence = struct.unpack("!BBHHH", request_packet[:8])
+            reply = struct.pack("!BBHHH", runtime_checks.ICMP_ECHO_REPLY_TYPE, 0, 0, identifier, sequence) + b"vivipi"
+            ipv4_header = bytes((0x45,)) + (b"\x00" * 19)
+            return ipv4_header + reply, ("192.168.1.1", 0)
+
+        def close(self):
+            self.closed = True
+
+    raw_socket = RawIcmpSocket()
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    monkeypatch.setattr(runtime_checks.socket, "socket", lambda *args: raw_socket)
+    monkeypatch.setattr(
+        runtime_checks.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [(runtime_checks.socket.AF_INET, runtime_checks.socket.SOCK_RAW, 1, "", ("192.168.1.1", 0))],
+    )
+
+    result = portable_ping_runner("192.168.1.1", 10)
+
+    assert result.ok is True
+    assert result.details == "reachable"
+    assert raw_socket.timeout == 10
+    assert raw_socket.sent[0][1] == ("192.168.1.1", 1)
+    assert raw_socket.closed is True
 
 
 def test_portable_ping_runner_uses_subprocess_fallback(monkeypatch):

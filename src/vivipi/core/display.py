@@ -64,7 +64,7 @@ DISPLAY_TYPES = {
         "colors": ("white", "black"),
         "supports_brightness": True,
         "default_brightness": 128,
-        "default_page_interval_s": 15,
+        "default_page_interval_s": 20,
         "default_column_offset": 32,
         "pins": DEFAULT_SPI_PINS,
     },
@@ -80,7 +80,7 @@ DISPLAY_TYPES = {
         "colors": ("white", "black"),
         "supports_brightness": True,
         "default_brightness": 128,
-        "default_page_interval_s": 15,
+        "default_page_interval_s": 20,
         "pins": DEFAULT_SPI_PINS,
     },
     "waveshare-pico-lcd-0.96": {
@@ -95,7 +95,7 @@ DISPLAY_TYPES = {
         "colors": ("white", "black", "red"),
         "supports_brightness": True,
         "default_brightness": 192,
-        "default_page_interval_s": 15,
+        "default_page_interval_s": 20,
         "pins": LCD_SPI_PINS,
     },
     "waveshare-pico-lcd-1.14": {
@@ -110,7 +110,7 @@ DISPLAY_TYPES = {
         "colors": ("white", "black", "red"),
         "supports_brightness": True,
         "default_brightness": 192,
-        "default_page_interval_s": 15,
+        "default_page_interval_s": 20,
         "pins": LCD_SPI_PINS,
     },
     "waveshare-pico-lcd-1.14-v2": {
@@ -125,7 +125,7 @@ DISPLAY_TYPES = {
         "colors": ("white", "black", "red"),
         "supports_brightness": True,
         "default_brightness": 192,
-        "default_page_interval_s": 15,
+        "default_page_interval_s": 20,
         "pins": LCD_SPI_PINS,
     },
     "waveshare-pico-lcd-1.3": {
@@ -140,7 +140,7 @@ DISPLAY_TYPES = {
         "colors": ("white", "black", "red"),
         "supports_brightness": True,
         "default_brightness": 192,
-        "default_page_interval_s": 15,
+        "default_page_interval_s": 20,
         "pins": LCD_SPI_PINS,
     },
     "waveshare-pico-lcd-1.44": {
@@ -155,7 +155,7 @@ DISPLAY_TYPES = {
         "colors": ("white", "black", "red"),
         "supports_brightness": True,
         "default_brightness": 192,
-        "default_page_interval_s": 15,
+        "default_page_interval_s": 20,
         "pins": LCD_SPI_PINS,
     },
     "waveshare-pico-lcd-1.8": {
@@ -170,7 +170,7 @@ DISPLAY_TYPES = {
         "colors": ("white", "black", "red"),
         "supports_brightness": True,
         "default_brightness": 192,
-        "default_page_interval_s": 15,
+        "default_page_interval_s": 20,
         "pins": LCD_SPI_PINS,
     },
     "waveshare-pico-lcd-2.0": {
@@ -185,7 +185,7 @@ DISPLAY_TYPES = {
         "colors": ("white", "black", "red"),
         "supports_brightness": True,
         "default_brightness": 192,
-        "default_page_interval_s": 15,
+        "default_page_interval_s": 20,
         "pins": LCD_SPI_PINS,
     },
     "waveshare-pico-epaper-2.13-v3": {

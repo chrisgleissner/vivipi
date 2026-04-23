@@ -21,7 +21,8 @@ SOCKET_CMD_IDENTIFY = 0xFF0E
 SOCKET_CMD_AUTHENTICATE = 0xFF1F
 SOCKET_CMD_READFLASH = 0xFF75
 SOCKET_CMD_DEBUG_REG = 0xFF76
-RAW64_TIMEOUT_S = 1.0
+DMA_TIMEOUT_S = 1.0
+RAW64_TIMEOUT_S = DMA_TIMEOUT_S
 FLASH_METADATA_PAGE_SIZE = 0
 FLASH_METADATA_PAGE_COUNT = 1
 
@@ -35,7 +36,7 @@ def recv_exact(sock: socket.socket, size: int) -> bytes:
     while len(chunks) < size:
         chunk = sock.recv(size - len(chunks))
         if not chunk:
-            raise RuntimeError(f"short raw64 read expected={size} got={len(chunks)}")
+            raise RuntimeError(f"short dma read expected={size} got={len(chunks)}")
         chunks.extend(chunk)
     return bytes(chunks)
 
@@ -45,12 +46,12 @@ def authenticate_socket(sock: socket.socket, password: str) -> None:
         return
     sock.sendall(command_frame(SOCKET_CMD_AUTHENTICATE, password.encode("utf-8")))
     if recv_exact(sock, 1) != b"\x01":
-        raise RuntimeError("raw64 authentication failed")
+        raise RuntimeError("dma authentication failed")
 
 
 def open_socket(settings: RuntimeSettings) -> socket.socket:
     sock = socket.create_connection((settings.host, CONTROL_PORT), timeout=2)
-    sock.settimeout(RAW64_TIMEOUT_S)
+    sock.settimeout(DMA_TIMEOUT_S)
     authenticate_socket(sock, settings.network_password)
     return sock
 
@@ -152,20 +153,20 @@ def write_restore_debug_register(settings: RuntimeSettings) -> str:
 
 def surface_operations(surface: ProbeSurface) -> tuple[tuple[str, Callable[[RuntimeSettings], str]], ...]:
     if surface == ProbeSurface.SMOKE:
-        return (("raw64_identify", identify),)
+        return (("dma_identify", identify),)
     if surface == ProbeSurface.READWRITE:
         return (
-            ("raw64_identify", identify),
-            ("raw64_debug_register", read_debug_register),
-            ("raw64_flash_page_size", read_flash_page_size),
-            ("raw64_flash_page_count", read_flash_page_count),
-            ("raw64_debug_register_write_restore", write_restore_debug_register),
+            ("dma_identify", identify),
+            ("dma_debug_register", read_debug_register),
+            ("dma_flash_page_size", read_flash_page_size),
+            ("dma_flash_page_count", read_flash_page_count),
+            ("dma_debug_register_write_restore", write_restore_debug_register),
         )
     return (
-        ("raw64_identify", identify),
-        ("raw64_debug_register", read_debug_register),
-        ("raw64_flash_page_size", read_flash_page_size),
-        ("raw64_flash_page_count", read_flash_page_count),
+        ("dma_identify", identify),
+        ("dma_debug_register", read_debug_register),
+        ("dma_flash_page_size", read_flash_page_size),
+        ("dma_flash_page_count", read_flash_page_count),
     )
 
 
@@ -177,7 +178,7 @@ def run_probe(settings: RuntimeSettings, correctness, *, context: ProbeExecution
         op_name, operation = operations[index]
         started_at = time.perf_counter_ns()
         try:
-            detail = run_surface_operation("raw64", operation, settings)
+            detail = run_surface_operation("dma", operation, settings)
             elapsed_ms = (time.perf_counter_ns() - started_at) / 1_000_000.0
             return ProbeOutcome("OK", surface_detail(context.surface, op_name, detail), elapsed_ms)
         except Exception as error:
@@ -196,4 +197,4 @@ def run_probe(settings: RuntimeSettings, correctness, *, context: ProbeExecution
         return ProbeOutcome("OK", f"{identify_detail} {debug_detail}", elapsed_ms)
     except Exception as error:
         elapsed_ms = (time.perf_counter_ns() - started_at) / 1_000_000.0
-        return ProbeOutcome("FAIL", f"raw64 failed: {error}", elapsed_ms)
+        return ProbeOutcome("FAIL", f"dma failed: {error}", elapsed_ms)

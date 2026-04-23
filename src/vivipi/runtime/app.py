@@ -79,10 +79,12 @@ def _monotonic_now_s() -> float:
 def _network_priority(definition: CheckDefinition) -> tuple[int, str]:
     check_order = {
         "PING": 0,
-        "HTTP": 1,
-        "SERVICE": 2,
+        "IDENT": 1,
+        "DMA": 2,
         "TELNET": 3,
         "FTP": 4,
+        "HTTP": 5,
+        "SERVICE": 6,
     }
     return (check_order.get(_enum_text(definition.check_type), 99), definition.identifier)
 
@@ -922,7 +924,7 @@ class RuntimeApp:
         self.state = record_diagnostic_events(self.state, events, activate=activate)
 
     def _apply_button_events(self, button_events: tuple[ButtonEvent, ...], now_s: float | None = None):
-        event_now_s = self._probe_now_s() if now_s is None else float(now_s)
+        del now_s
         for event in button_events:
             button = event.button
             if isinstance(button, str):
@@ -943,8 +945,6 @@ class RuntimeApp:
             previous_mode = self.state.mode
             previous_selection = self.state.selected_id
             self.state = self.input_controller.apply(self.state, button, held_ms=event.held_ms)
-            if button in (Button.A, Button.B):
-                self._set_press_feedback(button, event_now_s)
             if self.state.mode == previous_mode and self.state.selected_id == previous_selection:
                 self.logger.debug(
                     "BTN",
@@ -1422,9 +1422,9 @@ class RuntimeApp:
         self.feedback_until_s = now_s + feedback_duration_s
 
     def _set_press_feedback(self, button: object, now_s: float, duration_s: float | None = None):
-        self.press_feedback_message = bound_text(f"BTN {_button_text(button)}", self.state.row_width)
-        feedback_duration_s = self.press_feedback_duration_s if duration_s is None else max(0.0, float(duration_s))
-        self.press_feedback_until_s = now_s + feedback_duration_s
+        del button, now_s, duration_s
+        self.press_feedback_message = ""
+        self.press_feedback_until_s = None
 
     def _feedback_text(self, now_s: float) -> str | None:
         if self.feedback_until_s is None or now_s > self.feedback_until_s or not self.feedback_message:

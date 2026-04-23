@@ -1,4 +1,23 @@
 checks:
+  - name: C64U PING
+    type: ping
+    target: 192.168.1.167
+    interval_s: 10
+    timeout_s: 8
+
+  - name: C64U IDENT
+    type: ident
+    target: ident://192.168.1.167:64
+    interval_s: 10
+    timeout_s: 8
+
+  - name: C64U DMA
+    type: dma
+    target: dma://192.168.1.167:64
+    password: ${VIVIPI_NETWORK_PASSWORD}
+    interval_s: 10
+    timeout_s: 8
+
   - name: C64U REST
     type: http
     target: http://192.168.1.167/v1/version
@@ -27,6 +46,25 @@ checks:
     type: http
     target: http://mickey:8081/vivipi/probe/adb/9B081FFAZ001WX
     method: GET
+    interval_s: 10
+    timeout_s: 8
+
+  - name: U64 PING
+    type: ping
+    target: 192.168.1.13
+    interval_s: 10
+    timeout_s: 8
+
+  - name: U64 IDENT
+    type: ident
+    target: ident://192.168.1.13:64
+    interval_s: 10
+    timeout_s: 8
+
+  - name: U64 DMA
+    type: dma
+    target: dma://192.168.1.13:64
+    password: ${VIVIPI_NETWORK_PASSWORD}
     interval_s: 10
     timeout_s: 8
 

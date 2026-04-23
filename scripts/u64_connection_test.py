@@ -48,7 +48,8 @@ MODEM_PORT = int(os.getenv("MODEM_PORT", "3000"))
 INTER_CALL_DELAY_MS = int(os.getenv("INTER_CALL_DELAY_MS", "0"))
 LOG_EVERY_N_ITERATIONS = int(os.getenv("LOG_EVERY_N_ITERATIONS", "10"))
 VERBOSE = os.getenv("VERBOSE", "").strip().lower() not in {"", "0", "false", "no"}
-DEFAULT_PROBES = ("ping", "http", "ftp", "telnet", "ident", "raw64")
+LEGACY_PROBE_ALIASES = {"raw64": "dma"}
+DEFAULT_PROBES = ("ping", "ident", "dma", "telnet", "ftp", "http")
 OPTIONAL_PROBES = ("modem",)
 PROBE_CHOICES = DEFAULT_PROBES + OPTIONAL_PROBES
 DEFAULT_SCHEDULE = "sequential"
@@ -66,11 +67,11 @@ PROBE_RANDOM_SEED_ENV = "VIVIPI_CONNECTION_TEST_RANDOM_SEED"
 
 PROBE_SURFACE_CHOICES = {
     "ping": (ProbeSurface.SMOKE,),
-    "http": (ProbeSurface.SMOKE, ProbeSurface.READ, ProbeSurface.READWRITE),
-    "ftp": (ProbeSurface.SMOKE, ProbeSurface.READ, ProbeSurface.READWRITE),
-    "telnet": (ProbeSurface.SMOKE, ProbeSurface.READ, ProbeSurface.READWRITE),
     "ident": (ProbeSurface.SMOKE,),
-    "raw64": (ProbeSurface.SMOKE, ProbeSurface.READ, ProbeSurface.READWRITE),
+    "dma": (ProbeSurface.SMOKE, ProbeSurface.READ, ProbeSurface.READWRITE),
+    "telnet": (ProbeSurface.SMOKE, ProbeSurface.READ, ProbeSurface.READWRITE),
+    "ftp": (ProbeSurface.SMOKE, ProbeSurface.READ, ProbeSurface.READWRITE),
+    "http": (ProbeSurface.SMOKE, ProbeSurface.READ, ProbeSurface.READWRITE),
     "modem": (ProbeSurface.SMOKE,),
 }
 PROBE_SURFACE_ORDER = (ProbeSurface.SMOKE, ProbeSurface.READ, ProbeSurface.READWRITE)
@@ -82,11 +83,11 @@ PROBE_CORRECTNESS_ORDER = (
 )
 PROBE_CORRECTNESS_CHOICES = {
     "ping": (ProbeCorrectness.COMPLETE,),
-    "http": (ProbeCorrectness.COMPLETE,),
-    "ftp": (ProbeCorrectness.COMPLETE, ProbeCorrectness.OPEN, ProbeCorrectness.INCOMPLETE, ProbeCorrectness.INVALID),
-    "telnet": (ProbeCorrectness.COMPLETE, ProbeCorrectness.OPEN, ProbeCorrectness.INCOMPLETE),
     "ident": (ProbeCorrectness.COMPLETE,),
-    "raw64": (ProbeCorrectness.COMPLETE,),
+    "dma": (ProbeCorrectness.COMPLETE,),
+    "telnet": (ProbeCorrectness.COMPLETE, ProbeCorrectness.OPEN, ProbeCorrectness.INCOMPLETE),
+    "ftp": (ProbeCorrectness.COMPLETE, ProbeCorrectness.OPEN, ProbeCorrectness.INCOMPLETE, ProbeCorrectness.INVALID),
+    "http": (ProbeCorrectness.COMPLETE,),
     "modem": (ProbeCorrectness.COMPLETE,),
 }
 CORRECTNESS_DEGRADATION_HELP = (
@@ -125,11 +126,11 @@ HISTORICAL_CORRECTNESS_EVIDENCE = {
 
 PROBE_RUNNERS = {
     "ping": u64_ping.run_probe,
-    "http": u64_http.run_probe,
-    "ftp": u64_ftp.run_probe,
-    "telnet": u64_telnet.run_probe,
     "ident": u64_ident.run_probe,
-    "raw64": u64_raw64.run_probe,
+    "dma": u64_raw64.run_probe,
+    "telnet": u64_telnet.run_probe,
+    "ftp": u64_ftp.run_probe,
+    "http": u64_http.run_probe,
     "modem": u64_modem.run_probe,
 }
 
@@ -285,7 +286,7 @@ def parse_probes(value: str) -> tuple[str, ...]:
     raw_value = value.strip()
     if not raw_value:
         raise argparse.ArgumentTypeError("--probes must be a non-empty comma-separated list")
-    probes = tuple(part.strip() for part in raw_value.split(","))
+    probes = tuple(LEGACY_PROBE_ALIASES.get(part.strip(), part.strip()) for part in raw_value.split(","))
     if any(not probe for probe in probes):
         raise argparse.ArgumentTypeError("--probes must not contain empty entries")
     invalid = [probe for probe in probes if probe not in PROBE_CHOICES]
@@ -350,7 +351,7 @@ def profile_overrides_help() -> str:
         f"  ./u64_connection_test.py --surface {ProbeSurface.READWRITE.value}\n"
         f"  ./u64_connection_test.py --mode {ProbeCorrectness.OPEN.value}\n"
         f"  ./u64_connection_test.py --mode {ProbeCorrectness.INCOMPLETE.value}\n"
-        "  ./u64_connection_test.py --probes ping,http,ftp,telnet,ident,raw64\n"
+        "  ./u64_connection_test.py --probes ping,ident,dma,telnet,ftp,http\n"
         "  ./u64_connection_test.py --schedule concurrent --runners 3\n"
         f"  ./u64_connection_test.py --http-surface {ProbeSurface.READ.value}\n"
         f"  ./u64_connection_test.py --ftp-surface {ProbeSurface.READWRITE.value} --telnet-surface {ProbeSurface.READ.value}\n"
@@ -365,7 +366,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Repeated U64 connectivity checks. Default: 12h soak with concurrent readwrite probes and audio+video streams. "
-            "ident targets UDP port 64 JSON discovery; raw64 targets the DMA-capable TCP port 64 command endpoint."
+            "ident targets UDP port 64 JSON discovery; dma targets the DMA-capable TCP port 64 command endpoint."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=profile_overrides_help(),
@@ -375,7 +376,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-n", "--log-every", type=int, default=LOG_EVERY_N_ITERATIONS, help="Log every Nth successful iteration")
     parser.add_argument("-u", "--ftp-user", default=FTP_USER, help="FTP username")
     parser.add_argument("-P", "--ftp-pass", default=FTP_PASS, help="Legacy alias for the shared device network password.")
-    parser.add_argument("--network-password", default=NETWORK_PASSWORD, help="Shared device network password used for HTTP, Telnet, FTP, and raw64.")
+    parser.add_argument("--network-password", default=NETWORK_PASSWORD, help="Shared device network password used for HTTP, Telnet, FTP, and dma.")
     parser.add_argument("--http-path", default=HTTP_PATH, help="HTTP path")
     parser.add_argument("--http-port", type=int, default=HTTP_PORT, help="HTTP port")
     parser.add_argument("--ftp-port", type=int, default=FTP_PORT, help="FTP port")
@@ -393,8 +394,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=parse_probes,
         default=None,
         help=(
-            "Ordered non-empty comma-separated probe list using ping,http,ftp,telnet,ident,raw64,modem; "
-            "ident is UDP/64 and raw64 is TCP/64. When set without --stream, profile-default streams are disabled."
+            "Ordered non-empty comma-separated probe list using ping,ident,dma,telnet,ftp,http,modem; "
+            "ident is UDP/64 and dma is TCP/64. When set without --stream, profile-default streams are disabled."
         ),
     )
     parser.add_argument("--schedule", choices=(SCHEDULE_SEQUENTIAL, SCHEDULE_CONCURRENT), default=None, help="Per-runner scheduling mode.")
@@ -405,7 +406,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--http-surface", choices=[value.value for value in ProbeSurface], default=None, help="HTTP probe surface.")
     parser.add_argument("--ftp-surface", choices=[value.value for value in ProbeSurface], default=None, help="FTP probe surface.")
     parser.add_argument("--telnet-surface", choices=[value.value for value in ProbeSurface], default=None, help="Telnet probe surface.")
-    parser.add_argument("--raw64-surface", choices=[value.value for value in ProbeSurface], default=None, help="Raw64 TCP/64 probe surface.")
+    parser.add_argument("--dma-surface", dest="dma_surface", choices=[value.value for value in ProbeSurface], default=None, help="DMA TCP/64 probe surface.")
+    parser.add_argument("--raw64-surface", dest="dma_surface", choices=[value.value for value in ProbeSurface], help=argparse.SUPPRESS)
     parser.add_argument("--ping-mode", choices=[value.value for value in ProbeCorrectness], default=None, help="Ping probe correctness.")
     parser.add_argument("--http-mode", choices=[value.value for value in ProbeCorrectness], default=None, help="HTTP probe correctness.")
     parser.add_argument("--ftp-mode", choices=[value.value for value in ProbeCorrectness], default=None, help="FTP probe correctness.")
@@ -468,17 +470,17 @@ def profile_execution_config(profile: str) -> ExecutionConfig:
     if profile == PROFILE_STRESS:
         return ExecutionConfig(
             profile=PROFILE_STRESS,
-            probes=("raw64", "ftp", "telnet", "http", "ftp", "telnet", "ping", "ident"),
+            probes=("dma", "ftp", "telnet", "http", "ftp", "telnet", "ping", "ident"),
             schedule=SCHEDULE_CONCURRENT,
             runners=5,
             duration_s=DEFAULT_PROFILE_DURATION_S,
             probe_correctness={
                 "ping": ProbeCorrectness.COMPLETE,
-                "http": ProbeCorrectness.COMPLETE,
-                "ftp": ProbeCorrectness.INCOMPLETE,
-                "telnet": ProbeCorrectness.INCOMPLETE,
                 "ident": ProbeCorrectness.COMPLETE,
-                "raw64": ProbeCorrectness.COMPLETE,
+                "dma": ProbeCorrectness.COMPLETE,
+                "telnet": ProbeCorrectness.INCOMPLETE,
+                "ftp": ProbeCorrectness.INCOMPLETE,
+                "http": ProbeCorrectness.COMPLETE,
                 "modem": ProbeCorrectness.COMPLETE,
             },
             uses_extended_flags=True,
@@ -534,7 +536,7 @@ def resolve_execution_config(args: argparse.Namespace) -> ExecutionConfig:
             probe_correctness[protocol] = _fallback_correctness(protocol, requested_mode)
         overrides.append("mode")
 
-    for protocol, raw_value in {"http": args.http_surface, "ftp": args.ftp_surface, "telnet": args.telnet_surface, "raw64": args.raw64_surface}.items():
+    for protocol, raw_value in {"http": args.http_surface, "ftp": args.ftp_surface, "telnet": args.telnet_surface, "dma": args.dma_surface}.items():
         if raw_value is None:
             continue
         probe_surfaces[protocol] = _fallback_surface(protocol, ProbeSurface(raw_value))

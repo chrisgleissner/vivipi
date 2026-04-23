@@ -23,7 +23,7 @@ device:
     mode: standard
     columns: 1
     column_separator: " "
-    page_interval: 15s
+    page_interval: 20s
     liveness:
       contrast_breathing:
         enabled: false

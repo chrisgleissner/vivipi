@@ -338,6 +338,10 @@ Status: COMPLETED
 Phase 3: Validation and hardware proof  
 Status: IN PROGRESS
 
+## Current Execution TODOs
+
+- TODO: Harden Pico button handling so short debounced presses are latched across probe work, each physical press advances navigation at most once, and the transient bottom-row `BTN ...` overlay is removed without slowing probe execution.
+
 - Run focused tests and full `./build`.
 - Redeploy to the attached Pico.
 - Prove live syslog receipt for boot, probes, heartbeat progress, and button/navigation events.

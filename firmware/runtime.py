@@ -699,7 +699,7 @@ def build_runtime_app(
         display=display,
         button_reader=button_reader,
         input_controller=input_controller,
-        page_interval_s=int(display_config.get("page_interval_s", 15)),
+        page_interval_s=int(display_config.get("page_interval_s", 20)),
         page_size=page_size,
         row_width=row_width,
         display_mode=DisplayMode(str(display_config.get("mode", str(DisplayMode.STANDARD)))),

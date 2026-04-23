@@ -29,7 +29,7 @@ def load_modem():
     return load_script_module("u64_modem")
 
 
-def load_raw64():
+def load_dma():
     return load_script_module("u64_raw64")
 
 
@@ -206,9 +206,9 @@ def test_ident_probe_requires_json_reply_with_echo(monkeypatch):
     assert calls[-1] == "close"
 
 
-def test_raw64_probe_authenticates_identifies_and_reads_debug_register(monkeypatch):
+def test_dma_probe_authenticates_identifies_and_reads_debug_register(monkeypatch):
     runtime = load_runtime()
-    module = load_raw64()
+    module = load_dma()
     settings = runtime.RuntimeSettings("host", "v1/version", 80, 23, 21, "anonymous", "", 0, 1, True, network_password="secret")
     calls = []
 
@@ -240,9 +240,9 @@ def test_raw64_probe_authenticates_identifies_and_reads_debug_register(monkeypat
     assert calls.count("close") == 1
 
 
-def test_raw64_readwrite_surface_restores_debug_register(monkeypatch):
+def test_dma_readwrite_surface_restores_debug_register(monkeypatch):
     runtime = load_runtime()
-    module = load_raw64()
+    module = load_dma()
     calls = []
 
     class WriteRestoreState:
@@ -271,7 +271,7 @@ def test_raw64_readwrite_surface_restores_debug_register(monkeypatch):
     monkeypatch.setattr(module.socket, "create_connection", lambda address, timeout: FakeSocket())
 
     context = runtime.ProbeExecutionContext(
-        protocol="raw64",
+        protocol="dma",
         runner_id=1,
         iteration=5,
         surface=runtime.ProbeSurface.READWRITE,
@@ -281,9 +281,9 @@ def test_raw64_readwrite_surface_restores_debug_register(monkeypatch):
     outcome = module.run_probe(make_settings(runtime), runtime.ProbeCorrectness.COMPLETE, context=context)
 
     assert outcome.result == "OK"
-    assert outcome.detail == "surface=readwrite op=raw64_debug_register_write_restore debug_reg_restored=0xAA temporary=0xAB"
+    assert outcome.detail == "surface=readwrite op=dma_debug_register_write_restore debug_reg_restored=0xAA temporary=0xAB"
     assert calls == [
-        ("settimeout", module.RAW64_TIMEOUT_S),
+        ("settimeout", module.DMA_TIMEOUT_S),
         ("sendall", module.command_frame(module.SOCKET_CMD_DEBUG_REG)),
         ("sendall", module.command_frame(module.SOCKET_CMD_DEBUG_REG, b"\xAB")),
         ("sendall", module.command_frame(module.SOCKET_CMD_DEBUG_REG)),
