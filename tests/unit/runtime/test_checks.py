@@ -4216,3 +4216,337 @@ def test_read_telnet_until_idle_continues_after_handshake_only_chunks(monkeypatc
     assert session["close_reason"] == "remote-close"
     assert session["handshake_detected"] is True
     assert session["has_visible_text"] is False
+
+
+# ---------------------------------------------------------------------------
+# _icmp_checksum
+# ---------------------------------------------------------------------------
+
+def test_icmp_checksum_pads_odd_length_payload():
+    # An odd-length payload must be zero-padded before folding
+    result = runtime_checks._icmp_checksum(b"\x01")
+    assert isinstance(result, int)
+    assert 0 <= result <= 0xFFFF
+
+
+def test_icmp_checksum_even_length_payload():
+    result = runtime_checks._icmp_checksum(b"\x01\x02")
+    assert isinstance(result, int)
+    assert 0 <= result <= 0xFFFF
+
+
+# ---------------------------------------------------------------------------
+# _icmp_reply_offset
+# ---------------------------------------------------------------------------
+
+def test_icmp_reply_offset_returns_zero_for_raw_icmp_packet():
+    # First byte is ICMP_ECHO_REPLY_TYPE (0) — raw socket that already stripped IP header
+    packet = bytes([0, 0, 0, 0, 0, 0, 0, 0])
+    assert runtime_checks._icmp_reply_offset(packet) == 0
+
+
+def test_icmp_reply_offset_returns_none_for_unrecognised_packet():
+    # Packet too short and no recognisable format
+    assert runtime_checks._icmp_reply_offset(b"\x99\x00") is None
+
+
+def test_icmp_reply_offset_returns_none_for_empty_packet():
+    assert runtime_checks._icmp_reply_offset(b"") is None
+
+
+# ---------------------------------------------------------------------------
+# _raw_icmp_ping — socket creation failure path
+# ---------------------------------------------------------------------------
+
+def test_raw_icmp_ping_returns_none_when_socket_creation_fails(monkeypatch):
+    def _fail(*args, **kwargs):
+        raise PermissionError("operation not permitted")
+
+    monkeypatch.setattr(runtime_checks.socket, "socket", _fail)
+    result = runtime_checks._raw_icmp_ping("192.0.2.1", 1)
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# _parse_socket_target_with_schemes
+# ---------------------------------------------------------------------------
+
+def test_parse_socket_target_with_schemes_rejects_wrong_scheme():
+    with pytest.raises(ValueError, match="expected"):
+        runtime_checks._parse_socket_target_with_schemes(
+            "ftp://host:21", 64, expected_schemes=("ident", "dma")
+        )
+
+
+def test_parse_socket_target_with_schemes_rejects_url_without_hostname():
+    with pytest.raises(ValueError, match="host"):
+        runtime_checks._parse_socket_target_with_schemes(
+            "ident://:64", 64, expected_schemes=("ident",)
+        )
+
+
+def test_parse_socket_target_with_schemes_parses_host_colon_port():
+    host, port = runtime_checks._parse_socket_target_with_schemes("myhost:1234", 64)
+    assert host == "myhost"
+    assert port == 1234
+
+
+def test_parse_socket_target_with_schemes_returns_default_port_for_plain_hostname():
+    host, port = runtime_checks._parse_socket_target_with_schemes("myhost", 64)
+    assert host == "myhost"
+    assert port == 64
+
+
+def test_parse_socket_target_with_schemes_raises_for_empty_target():
+    with pytest.raises(ValueError, match="host"):
+        runtime_checks._parse_socket_target_with_schemes("", 64)
+
+
+# ---------------------------------------------------------------------------
+# portable_ident_runner — validation failure paths
+# ---------------------------------------------------------------------------
+
+def test_portable_ident_runner_fails_on_non_dict_json(monkeypatch):
+    class ListResponseSocket:
+        def settimeout(self, t):
+            pass
+
+        def sendto(self, payload, addr):
+            pass
+
+        def recvfrom(self, size):
+            return (b"[1, 2, 3]", ("host", 64))
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(runtime_checks, "_probe_nonce", lambda: "nonce-1")
+    monkeypatch.setattr(runtime_checks.socket, "socket", lambda *a, **kw: ListResponseSocket())
+
+    result = portable_ident_runner("ident://host:64", 10)
+
+    assert result.ok is False
+    assert "invalid ident payload" in result.details
+
+
+def test_portable_ident_runner_fails_on_missing_required_field(monkeypatch):
+    class MissingFieldSocket:
+        def settimeout(self, t):
+            pass
+
+        def sendto(self, payload, addr):
+            pass
+
+        def recvfrom(self, size):
+            # Missing "firmware_version"
+            return (
+                b'{"product":"U64","hostname":"u64","your_string":"nonce-1"}',
+                ("host", 64),
+            )
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(runtime_checks, "_probe_nonce", lambda: "nonce-1")
+    monkeypatch.setattr(runtime_checks.socket, "socket", lambda *a, **kw: MissingFieldSocket())
+
+    result = portable_ident_runner("ident://host:64", 10)
+
+    assert result.ok is False
+    assert "missing ident field" in result.details
+
+
+def test_portable_ident_runner_fails_on_echo_mismatch(monkeypatch):
+    class BadEchoSocket:
+        def settimeout(self, t):
+            pass
+
+        def sendto(self, payload, addr):
+            pass
+
+        def recvfrom(self, size):
+            return (
+                b'{"product":"U64","firmware_version":"1.0","hostname":"u64","your_string":"wrong"}',
+                ("host", 64),
+            )
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(runtime_checks, "_probe_nonce", lambda: "nonce-1")
+    monkeypatch.setattr(runtime_checks.socket, "socket", lambda *a, **kw: BadEchoSocket())
+
+    result = portable_ident_runner("ident://host:64", 10)
+
+    assert result.ok is False
+    assert "ident echo mismatch" in result.details
+
+
+# ---------------------------------------------------------------------------
+# _dma_authenticate — no-password early return and auth failure
+# ---------------------------------------------------------------------------
+
+def test_dma_authenticate_skips_when_no_password(monkeypatch):
+    calls = []
+
+    class SpySocket:
+        def sendall(self, data):
+            calls.append(data)
+
+        def recv(self, n):
+            return b"\x00"
+
+    import io
+    deadline = runtime_checks._deadline_after_s(10)
+    # Should return without sending anything
+    runtime_checks._dma_authenticate(SpySocket(), None, deadline, target="host:64")
+    assert calls == []
+
+    runtime_checks._dma_authenticate(SpySocket(), "", deadline, target="host:64")
+    assert calls == []
+
+
+def test_dma_authenticate_raises_on_rejection(monkeypatch):
+    class RejectSocket:
+        def sendall(self, data):
+            pass
+
+        def recv(self, n):
+            return b"\x00"  # not b"\x01" — auth rejected
+
+    deadline = runtime_checks._deadline_after_s(10)
+    with pytest.raises(RuntimeError, match="authentication failed"):
+        runtime_checks._dma_authenticate(RejectSocket(), "wrong", deadline, target="host:64")
+
+
+# ---------------------------------------------------------------------------
+# _dma_recv_exact — short read
+# ---------------------------------------------------------------------------
+
+def test_dma_recv_exact_raises_on_short_read(monkeypatch):
+    class EmptySocket:
+        def recv(self, n):
+            return b""  # EOF immediately
+
+    deadline = runtime_checks._deadline_after_s(10)
+    with pytest.raises(RuntimeError, match="short dma read"):
+        runtime_checks._dma_recv_exact(EmptySocket(), 4, deadline, operation="test", target="host:64")
+
+
+# ---------------------------------------------------------------------------
+# _dma_identify — empty title
+# ---------------------------------------------------------------------------
+
+def test_dma_identify_raises_on_zero_length_title(monkeypatch):
+    class ZeroLenSocket:
+        def sendall(self, data):
+            pass
+
+        def recv(self, n):
+            return b"\x00"  # title_length == 0
+
+    deadline = runtime_checks._deadline_after_s(10)
+    with pytest.raises(RuntimeError, match="empty identify title"):
+        runtime_checks._dma_identify(ZeroLenSocket(), deadline, target="host:64")
+
+
+def test_dma_identify_raises_on_whitespace_only_title(monkeypatch):
+    responses = iter([b"\x03", b"   "])  # 3-byte title that is all spaces
+
+    class WhitespaceSocket:
+        def sendall(self, data):
+            pass
+
+        def recv(self, n):
+            return next(responses)
+
+    deadline = runtime_checks._deadline_after_s(10)
+    with pytest.raises(RuntimeError, match="empty identify title"):
+        runtime_checks._dma_identify(WhitespaceSocket(), deadline, target="host:64")
+
+
+# ---------------------------------------------------------------------------
+# portable_dma_runner — flash validation and exception path
+# ---------------------------------------------------------------------------
+
+def test_portable_dma_runner_fails_on_zero_flash_page_size(monkeypatch):
+    class ZeroPageSizeSocket:
+        def __init__(self):
+            self.responses = [
+                b"\x01",              # auth OK
+                b"\x03", b"U64",      # identify: len=3, title="U64"
+                b"\x00",              # debug_reg
+                (0).to_bytes(4, "little"),    # page_size = 0 (invalid)
+                (4096).to_bytes(4, "little"),
+            ]
+
+        def settimeout(self, t):
+            pass
+
+        def sendall(self, data):
+            pass
+
+        def recv(self, n):
+            return self.responses.pop(0)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(runtime_checks, "_maybe_collect_gc", lambda **kw: None)
+    monkeypatch.setattr(
+        runtime_checks, "_open_socket_compat",
+        lambda host, port, timeout_s, deadline, trace=None: ZeroPageSizeSocket()
+    )
+
+    result = portable_dma_runner("dma://host:64", 10, password="p")
+
+    assert result.ok is False
+    assert "flash page size" in result.details
+
+
+def test_portable_dma_runner_fails_on_zero_flash_page_count(monkeypatch):
+    class ZeroPageCountSocket:
+        def __init__(self):
+            self.responses = [
+                b"\x01",
+                b"\x03", b"U64",
+                b"\x00",
+                (256).to_bytes(4, "little"),
+                (0).to_bytes(4, "little"),  # page_count = 0 (invalid)
+            ]
+
+        def settimeout(self, t):
+            pass
+
+        def sendall(self, data):
+            pass
+
+        def recv(self, n):
+            return self.responses.pop(0)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(runtime_checks, "_maybe_collect_gc", lambda **kw: None)
+    monkeypatch.setattr(
+        runtime_checks, "_open_socket_compat",
+        lambda host, port, timeout_s, deadline, trace=None: ZeroPageCountSocket()
+    )
+
+    result = portable_dma_runner("dma://host:64", 10, password="p")
+
+    assert result.ok is False
+    assert "flash page count" in result.details
+
+
+def test_portable_dma_runner_returns_fail_on_connection_error(monkeypatch):
+    monkeypatch.setattr(runtime_checks, "_maybe_collect_gc", lambda **kw: None)
+    monkeypatch.setattr(
+        runtime_checks, "_open_socket_compat",
+        lambda host, port, timeout_s, deadline, trace=None: (_ for _ in ()).throw(OSError("refused"))
+    )
+
+    result = portable_dma_runner("dma://host:64", 10)
+
+    assert result.ok is False
+    assert result.details != ""
