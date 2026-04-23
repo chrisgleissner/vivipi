@@ -4396,7 +4396,6 @@ def test_dma_authenticate_skips_when_no_password(monkeypatch):
         def recv(self, n):
             return b"\x00"
 
-    import io
     deadline = runtime_checks._deadline_after_s(10)
     # Should return without sending anything
     runtime_checks._dma_authenticate(SpySocket(), None, deadline, target="host:64")
