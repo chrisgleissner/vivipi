@@ -479,6 +479,15 @@ def _resolve_target_alias(target: object, host_aliases: object) -> str:
 
     alias = host_aliases.get(raw_target)
     if alias is None:
+        host, separator, suffix = raw_target.rpartition(":")
+        if separator and host:
+            alias = host_aliases.get(host)
+            if alias is None:
+                return raw_target
+            normalized_alias = str(alias).strip()
+            if not normalized_alias:
+                return raw_target
+            return f"{normalized_alias}:{suffix}"
         return raw_target
     return str(alias).strip() or raw_target
 

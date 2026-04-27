@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from vivipi.core.models import CheckDefinition, CheckType
+from vivipi.runtime.checks import build_runtime_definitions
 from vivipi.tooling import build_deploy
 from vivipi.tooling.build_deploy import (
     _clear_generated_release_assets,
@@ -1011,6 +1012,58 @@ checks:
 
     assert [check["id"] for check in rendered["checks"]] == ["router", "nas-api"]
     assert rendered["service"] == {}
+
+
+def test_write_runtime_config_keeps_alias_targets_for_runtime_host_resolution(tmp_path: Path):
+    checks_path = tmp_path / "checks.local.yaml"
+    checks_path.write_text(
+        """
+checks:
+  - name: C64U REST
+    type: http
+    target: http://c64/v1/version
+    interval_s: 10
+    timeout_s: 8
+  - name: U64 TELNET
+    type: telnet
+    target: u64:23
+    interval_s: 10
+    timeout_s: 8
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "build-deploy.local.yaml"
+    config_path.write_text(
+        """
+device:
+  board: pico2w
+wifi:
+  ssid: ${VIVIPI_WIFI_SSID}
+  password: ${VIVIPI_WIFI_PASSWORD}
+  host_aliases:
+    c64: 192.168.1.25
+    u64: 192.168.1.13
+checks_config: checks.local.yaml
+""".strip(),
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "config.json"
+
+    write_runtime_config(
+        config_path,
+        output_path,
+        env={"VIVIPI_WIFI_SSID": "TestWifi", "VIVIPI_WIFI_PASSWORD": "TestPassword"},
+    )
+
+    rendered = json.loads(output_path.read_text(encoding="utf-8"))
+
+    assert rendered["wifi"]["host_aliases"] == {"c64": "192.168.1.25", "u64": "192.168.1.13"}
+    assert [check["target"] for check in rendered["checks"]] == ["http://c64/v1/version", "u64:23"]
+    assert [definition.target for definition in build_runtime_definitions(rendered)] == [
+        "http://192.168.1.25/v1/version",
+        "192.168.1.13:23",
+    ]
 
 
 def test_write_runtime_config_requires_checks_config_key(tmp_path: Path):

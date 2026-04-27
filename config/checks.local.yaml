@@ -1,7 +1,9 @@
+# Local targets should use host aliases from build-deploy.local.yaml so IP changes
+# only require a single config edit before ./build deploy.
 checks:
   - name: C64U REST
     type: http
-    target: http://192.168.1.167/v1/version
+    target: http://c64/v1/version
     method: GET
     password: ${VIVIPI_NETWORK_PASSWORD}
     interval_s: 10
@@ -9,7 +11,7 @@ checks:
 
   - name: C64U FTP
     type: ftp
-    target: 192.168.1.167
+    target: c64
     username: ${VIVIPI_NETWORK_USERNAME}
     password: ${VIVIPI_NETWORK_PASSWORD}
     interval_s: 10
@@ -17,7 +19,7 @@ checks:
 
   - name: C64U TELNET
     type: telnet
-    target: 192.168.1.167:23
+    target: c64:23
     username: ${VIVIPI_NETWORK_USERNAME}
     password: ${VIVIPI_NETWORK_PASSWORD}
     interval_s: 10
@@ -32,7 +34,7 @@ checks:
 
   - name: U64 REST
     type: http
-    target: http://192.168.1.13/v1/version
+    target: http://u64/v1/version
     method: GET
     password: ${VIVIPI_NETWORK_PASSWORD}
     interval_s: 10
@@ -40,7 +42,7 @@ checks:
 
   - name: U64 FTP
     type: ftp
-    target: 192.168.1.13
+    target: u64
     username: ${VIVIPI_NETWORK_USERNAME}
     password: ${VIVIPI_NETWORK_PASSWORD}
     interval_s: 10
@@ -48,7 +50,7 @@ checks:
 
   - name: U64 TELNET
     type: telnet
-    target: 192.168.1.13:23
+    target: u64:23
     username: ${VIVIPI_NETWORK_USERNAME}
     password: ${VIVIPI_NETWORK_PASSWORD}
     interval_s: 10

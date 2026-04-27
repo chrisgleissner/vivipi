@@ -2520,6 +2520,10 @@ def test_runtime_target_alias_resolution_rewrites_matching_hosts_only():
         == "192.0.2.10"
     )
     assert (
+        runtime_checks._resolve_target_alias("router.local:23", {"router.local": "192.0.2.10"})
+        == "192.0.2.10:23"
+    )
+    assert (
         runtime_checks._resolve_target_alias(
             "http://router.local/health",
             {"router.local": "192.0.2.10"},
