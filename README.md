@@ -119,7 +119,7 @@ Requirements:
 - `adb` only if you want the default service against connected Android devices
 - `mpremote` only if you want `./build deploy` to copy files onto a Pico 2W
 
-For day-to-day editor workflows, copy `config/build-deploy.local.example.yaml` to `config/build-deploy.local.yaml` and put your Wi-Fi credentials there. `./build render-config`, `./build build-firmware`, and `./build deploy` automatically prefer that local file when it exists. Pass `--config config/build-deploy.yaml` when you need to bypass a sibling local override.
+For day-to-day editor workflows, copy `config/build-deploy.local.example.yaml` to `config/build-deploy.local.yaml` and put your Wi-Fi credentials there. `./build render-config`, `./build build-firmware`, and `./build deploy` automatically prefer that local file when it exists. Pass `--config config/build-deploy.yaml` when you need to bypass a sibling local override. If a local target such as a C64U moves to a new IP address, update `wifi.host_aliases` in `config/build-deploy.local.yaml`; the checked-in `config/checks.local.yaml` targets are written against those aliases so you only need one config edit before rebuilding and deploying.
 
 1. Set Wi-Fi credentials. Add `VIVIPI_SERVICE_BASE_URL` only if you want `SERVICE` checks.
 
