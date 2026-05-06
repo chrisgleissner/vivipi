@@ -6,6 +6,7 @@ import argparse
 import os
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -34,6 +35,7 @@ PROBE_ORDER = {
     CheckType.TELNET: 3,
 }
 REQUIRED_CHECK_TYPES = (CheckType.HTTP, CheckType.FTP, CheckType.TELNET)
+HEALTH_CHECK_TIMEOUT_CAP_S = 2
 
 
 def preferred_build_config_path(repo_root: Path = REPO_ROOT) -> Path:
@@ -116,6 +118,13 @@ def _runtime_item(definition: CheckDefinition) -> dict[str, object]:
     }
 
 
+def _health_check_definition(definition: CheckDefinition) -> CheckDefinition:
+    return replace(
+        definition,
+        timeout_s=min(definition.timeout_s, HEALTH_CHECK_TIMEOUT_CAP_S),
+    )
+
+
 def load_target_definitions(
     target_name: str,
     *,
@@ -139,12 +148,17 @@ def load_target_definitions(
     if missing:
         raise ValueError(f"missing {label} checks: {', '.join(missing)}")
 
-    reference = checks_by_type[CheckType.HTTP]
+    reference = _health_check_definition(checks_by_type[CheckType.HTTP])
     selected = [
-        _ping_definition(label, _target_host(reference.target), reference.timeout_s, reference.interval_s),
-        checks_by_type[CheckType.HTTP],
-        checks_by_type[CheckType.FTP],
-        checks_by_type[CheckType.TELNET],
+        _ping_definition(
+            label,
+            _target_host(reference.target),
+            reference.timeout_s,
+            reference.interval_s,
+        ),
+        reference,
+        _health_check_definition(checks_by_type[CheckType.FTP]),
+        _health_check_definition(checks_by_type[CheckType.TELNET]),
     ]
     runtime_config = {
         "wifi": {"host_aliases": _host_aliases(settings)},

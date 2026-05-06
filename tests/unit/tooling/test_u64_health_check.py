@@ -133,6 +133,19 @@ def test_run_target_orders_checks_formats_like_overview_and_resolves_aliases(tmp
     ]
 
 
+def test_load_target_definitions_caps_each_probe_timeout_to_two_seconds(tmp_path):
+    module = load_module()
+    build_config, _checks_config = make_configs(tmp_path)
+
+    definitions = module.load_target_definitions(
+        "u64",
+        build_config_path=build_config,
+        env={"VIVIPI_NETWORK_USERNAME": "user", "VIVIPI_NETWORK_PASSWORD": "secret"},
+    )
+
+    assert [definition.timeout_s for definition in definitions] == [2, 2, 2, 2]
+
+
 def test_main_returns_error_when_required_target_checks_are_missing(tmp_path, capsys):
     module = load_module()
     build_config = tmp_path / "build-deploy.yaml"
