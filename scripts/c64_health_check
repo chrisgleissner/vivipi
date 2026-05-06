@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+
+set -uo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+VENV_DIR="${VENV_DIR:-$ROOT_DIR/.venv}"
+
+if [[ -x "$VENV_DIR/bin/python" ]]; then
+    PYTHON="$VENV_DIR/bin/python"
+else
+    PYTHON="$PYTHON_BIN"
+fi
+
+export PYTHONPATH="$ROOT_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
+
+status=0
+"$PYTHON" "$ROOT_DIR/scripts/u64_health_check.py" c64u "$@"
+rc=$?
+if [[ "$rc" -ne 0 && "$status" -eq 0 ]]; then
+    status=$rc
+fi
+
+"$PYTHON" "$ROOT_DIR/scripts/u64_health_check.py" u64 "$@"
+rc=$?
+if [[ "$rc" -ne 0 && "$status" -eq 0 ]]; then
+    status=$rc
+fi
+
+exit "$status"
