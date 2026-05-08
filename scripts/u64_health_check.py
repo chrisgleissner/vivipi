@@ -31,8 +31,10 @@ TARGET_LABELS = {
 PROBE_ORDER = {
     CheckType.PING: 0,
     CheckType.HTTP: 1,
-    CheckType.FTP: 2,
-    CheckType.TELNET: 3,
+    CheckType.IDENT: 2,
+    CheckType.DMA: 3,
+    CheckType.FTP: 4,
+    CheckType.TELNET: 5,
 }
 REQUIRED_CHECK_TYPES = (CheckType.HTTP, CheckType.FTP, CheckType.TELNET)
 HEALTH_CHECK_TIMEOUT_CAP_S = 2
@@ -103,6 +105,26 @@ def _ping_definition(label: str, host: str, timeout_s: int, interval_s: int) -> 
     )
 
 
+def _direct_listener_definition(
+    label: str,
+    host: str,
+    check_type: CheckType,
+    timeout_s: int,
+    interval_s: int,
+    *,
+    password: str | None = None,
+) -> CheckDefinition:
+    return CheckDefinition(
+        identifier=f"{slugify(label)}-{check_type.value.lower()}",
+        name=f"{label} {check_type.value}",
+        check_type=check_type,
+        target=host,
+        interval_s=interval_s,
+        timeout_s=timeout_s,
+        password=password,
+    )
+
+
 def _runtime_item(definition: CheckDefinition) -> dict[str, object]:
     return {
         "id": definition.identifier,
@@ -149,14 +171,30 @@ def load_target_definitions(
         raise ValueError(f"missing {label} checks: {', '.join(missing)}")
 
     reference = _health_check_definition(checks_by_type[CheckType.HTTP])
+    host = _target_host(reference.target)
     selected = [
         _ping_definition(
             label,
-            _target_host(reference.target),
+            host,
             reference.timeout_s,
             reference.interval_s,
         ),
         reference,
+        _direct_listener_definition(
+            label,
+            host,
+            CheckType.IDENT,
+            reference.timeout_s,
+            reference.interval_s,
+        ),
+        _direct_listener_definition(
+            label,
+            host,
+            CheckType.DMA,
+            reference.timeout_s,
+            reference.interval_s,
+            password=reference.password,
+        ),
         _health_check_definition(checks_by_type[CheckType.FTP]),
         _health_check_definition(checks_by_type[CheckType.TELNET]),
     ]

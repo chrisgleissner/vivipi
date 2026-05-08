@@ -259,6 +259,10 @@ Status: COMPLETED
 - Validation completed with:
 	- focused TELNET/execution/runtime/service slice passing
 
+## Active Steering TODOs
+
+- [x] Extend the one-off `scripts/c64_health_check` flow so each target also probes the `IDENT` and `DMA` listeners, using the same host/build-config resolution as the existing `PING`/`REST`/`FTP`/`TELNET` checks; `c64u` listener failures remain acceptable when that device is powered off.
+
 ## U64 Raw64 Default Surface and Audio Startup Hardening Plan
 
 Authoritative execution plan for the residual U64 direct-tool follow-up: ensure newly added probes default to the largest supported surface, and harden the intermittent early audio stream startup miss without widening scope.
