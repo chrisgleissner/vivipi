@@ -222,7 +222,7 @@ def test_ident_probe_accepts_valid_echo_from_alternate_source_address(monkeypatc
             del size
             return (
                 b'{"product":"U64","firmware_version":"1.0","hostname":"u64","your_string":"nonce-1"}',
-                ("192.168.1.70", 64),
+                ("192.0.2.99", 64),
             )
 
         def close(self):
@@ -237,6 +237,45 @@ def test_ident_probe_accepts_valid_echo_from_alternate_source_address(monkeypatc
     assert outcome.detail == "product=U64 hostname=u64"
 
 
+def test_ident_probe_ignores_invalid_and_mismatched_packets_until_valid_reply(monkeypatch):
+    runtime = load_runtime()
+    module = load_ident()
+    recvfrom_call_count = {"count": 0}
+
+    class FakeSocket:
+        def settimeout(self, timeout):
+            del timeout
+
+        def sendto(self, payload, address):
+            assert payload == b"jsonnonce-1"
+            assert address == ("host", 64)
+
+        def recvfrom(self, size):
+            del size
+            recvfrom_call_count["count"] += 1
+            if recvfrom_call_count["count"] == 1:
+                return (b"not-json", ("host", 64))
+            if recvfrom_call_count["count"] == 2:
+                return (
+                    b'{"product":"U64","firmware_version":"1.0","hostname":"u64","your_string":"wrong-nonce"}',
+                    ("host", 64),
+                )
+            return (
+                b'{"product":"U64","firmware_version":"1.0","hostname":"u64","your_string":"nonce-1"}',
+                ("host", 64),
+            )
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(module, "ident_nonce", lambda: "nonce-1")
+    monkeypatch.setattr(module.socket, "socket", lambda *args, **kwargs: FakeSocket())
+
+    outcome = module.run_probe(make_settings(runtime), runtime.ProbeCorrectness.COMPLETE)
+
+    assert outcome.result == "OK"
+    assert outcome.detail == "product=U64 hostname=u64"
+    assert recvfrom_call_count["count"] == 3
 def test_dma_probe_authenticates_identifies_and_reads_debug_register(monkeypatch):
     runtime = load_runtime()
     module = load_dma()

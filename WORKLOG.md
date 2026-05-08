@@ -1,5 +1,35 @@
 # ViviPi Work Log
 
+## 2026-05-08T14:28:36Z
+
+- Investigated and fixed the early `ident_json` timeout that was aborting the default U64 soak run almost immediately even though the live identify service was reachable.
+- What changed:
+  - updated `scripts/u64_ident.py` so the host-side soak probe now accepts a valid JSON reply based on payload validation and nonce echo, without discarding it solely because the UDP source IP differs from the configured target host
+  - added focused regression coverage in `tests/unit/tooling/test_u64_connection_protocols.py` proving a correct ident reply from an alternate source address is accepted
+- Why it changed:
+  - live reproduction showed the U64 answered `json<nonce>` requests correctly, but from `192.168.1.70` while the configured host alias resolved to `192.168.1.13`; the old client threw away that valid reply and then timed out
+  - the nonce echo plus strict JSON field validation already proves the reply belongs to the active probe, so the extra source-IP equality check was both unnecessary and wrong for this device topology
+- Validation:
+  - `python -m pytest -o addopts='' tests/unit/tooling/test_u64_connection_protocols.py` -> `26 passed`
+  - live repro check: raw UDP ident request to `192.168.1.13:64` returned a valid nonce-echoing JSON payload from `192.168.1.70`
+  - live soak: `python scripts/u64_connection_test.py --profile soak --duration-s 60 --log-every 10` -> clean 1-minute pass with repeated `ident` `OK`
+  - live soak: `python scripts/u64_connection_test.py --profile soak --duration-s 600 --log-every 10` -> clean 10-minute pass with no `FAIL` lines and normal stream shutdown
+  - final repo gate: `./build` -> `783 passed`, total coverage `97.81%`
+
+## 2026-05-08T14:05:07Z
+
+- Applied the steering refinement for the one-off host health check while preserving the in-flight U64 soak investigation.
+- What changed:
+  - extended `scripts/u64_health_check.py` so each target now synthesizes direct `IDENT` and `DMA` probes from the same resolved host used for the existing `PING`/`REST`/`FTP`/`TELNET` checks
+  - kept the wrapper `scripts/c64_health_check` unchanged, so it still runs `c64u` first and `u64` second through the same build-config path
+  - added focused regression coverage in `tests/unit/tooling/test_u64_health_check.py` for ordering, alias resolution, timeout capping, and DMA password propagation
+- Why it changed:
+  - the one-off health command needed to cover the U64/C64U TCP/UDP port-64 listeners as well as the higher-level REST/FTP/TELNET surfaces
+  - the active local checks config no longer carries direct `IDENT`/`DMA` entries, so the health check now synthesizes those listener probes from the existing target host instead of requiring config duplication
+- Validation:
+  - `python -m pytest -o addopts='' tests/unit/tooling/test_u64_health_check.py tests/unit/tooling/test_c64_health_check_entrypoint.py` -> `4 passed`
+  - `scripts/c64_health_check` -> printed `IDENT` and `DMA` lines for both targets; `u64` reported `OK` for both and the powered-off `c64u` reported expected failures
+
 ## 2026-04-23T16:41:55Z
 
 - Investigated the report that Pico-side `PING` and `IDENT` were failing while the host-side `scripts/u64_connection_test.py` surfaces still passed.
