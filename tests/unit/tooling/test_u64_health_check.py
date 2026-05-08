@@ -98,6 +98,8 @@ def test_run_target_orders_checks_formats_like_overview_and_resolves_aliases(tmp
     results = {
         CheckType.PING: (Status.OK, 7.2, "reachable"),
         CheckType.HTTP: (Status.OK, 15.4, "HTTP 200"),
+        CheckType.IDENT: (Status.OK, 18.3, "device identified"),
+        CheckType.DMA: (Status.OK, 19.1, "dma ready"),
         CheckType.FTP: (Status.FAIL, 20.2, "timed out"),
         CheckType.TELNET: (Status.OK, 31.0, "session ready"),
     }
@@ -122,12 +124,16 @@ def test_run_target_orders_checks_formats_like_overview_and_resolves_aliases(tmp
     assert seen == [
         ("C64U PING", "192.0.2.10", CheckType.PING),
         ("C64U REST", "http://192.0.2.10/v1/version", CheckType.HTTP),
+        ("C64U IDENT", "192.0.2.10", CheckType.IDENT),
+        ("C64U DMA", "192.0.2.10", CheckType.DMA),
         ("C64U FTP", "192.0.2.10", CheckType.FTP),
         ("C64U TELNET", "192.0.2.10:23", CheckType.TELNET),
     ]
     assert capsys.readouterr().out.splitlines() == [
         overview_row_layout("C64U PING", "OK").text + " (7ms)",
         overview_row_layout("C64U REST", "OK").text + " (15ms)",
+        overview_row_layout("C64U IDENT", "OK").text + " (18ms)",
+        overview_row_layout("C64U DMA", "OK").text + " (19ms)",
         overview_row_layout("C64U FTP", "FAIL").text + " (20ms) timed out",
         overview_row_layout("C64U TELNET", "OK").text + " (31ms)",
     ]
@@ -143,7 +149,16 @@ def test_load_target_definitions_caps_each_probe_timeout_to_two_seconds(tmp_path
         env={"VIVIPI_NETWORK_USERNAME": "user", "VIVIPI_NETWORK_PASSWORD": "secret"},
     )
 
-    assert [definition.timeout_s for definition in definitions] == [2, 2, 2, 2]
+    assert [definition.timeout_s for definition in definitions] == [2, 2, 2, 2, 2, 2]
+    assert [definition.name for definition in definitions] == [
+        "U64 PING",
+        "U64 REST",
+        "U64 IDENT",
+        "U64 DMA",
+        "U64 FTP",
+        "U64 TELNET",
+    ]
+    assert definitions[3].password == "secret"
 
 
 def test_main_returns_error_when_required_target_checks_are_missing(tmp_path, capsys):
