@@ -996,18 +996,21 @@ def test_delete_readable_self_files_forgets_deleted_paths(monkeypatch):
     module = load_ftp()
     deleted = []
     forgotten = []
+    current_path = f"/Temp/{module.FTP_SELF_FILE_PREFIX}tiny_1b_{module.os.getpid()}_1.bin"
+    foreign_path = "/Temp/u64test_tiny_1b_50651_1.bin"
 
     class FakeFTP:
         def delete(self, path):
             deleted.append(path)
 
+    monkeypatch.setattr(module, "known_self_files", lambda file_prefix=module.FTP_SELF_FILE_PREFIX: (current_path,))
     monkeypatch.setattr(module, "forget_self_file", lambda path: forgotten.append(path))
 
-    removed = module.delete_readable_self_files(FakeFTP(), ("/Temp/u64test_old.txt", "/Temp/keep.txt"))
+    removed = module.delete_readable_self_files(FakeFTP(), (foreign_path, current_path, "/Temp/keep.txt"))
 
-    assert removed == ("/Temp/u64test_old.txt",)
-    assert deleted == ["/Temp/u64test_old.txt"]
-    assert forgotten == ["/Temp/u64test_old.txt"]
+    assert removed == (current_path,)
+    assert deleted == [current_path]
+    assert forgotten == [current_path]
 
 
 def test_readable_self_files_ignore_foreign_process_leftovers(monkeypatch):
@@ -1018,3 +1021,41 @@ def test_readable_self_files_ignore_foreign_process_leftovers(monkeypatch):
     monkeypatch.setattr(module, "known_self_files", lambda file_prefix=module.FTP_SELF_FILE_PREFIX: (current_path,))
 
     assert module.readable_self_files((foreign_path, current_path)) == (current_path,)
+
+
+def test_download_self_file_retry_forgets_local_reuse_without_shared_state(monkeypatch):
+    runtime = load_runtime()
+    module = load_ftp()
+    settings = make_settings(runtime)
+    first_path = f"/Temp/{module.FTP_SELF_FILE_PREFIX}tiny_1b_{module.os.getpid()}_1.bin"
+    second_path = f"/Temp/{module.FTP_SELF_FILE_PREFIX}tiny_1b_{module.os.getpid()}_2.bin"
+    paths = iter((first_path, second_path))
+    calls = []
+
+    monkeypatch.setattr(
+        module,
+        "ensure_self_file",
+        lambda current_settings, ftp, size_bytes, *, file_prefix=module.FTP_SELF_FILE_PREFIX, shared_state=None: next(paths),
+    )
+
+    def fake_retr_binary(ftp, path):
+        del ftp
+        if path == first_path:
+            raise ConnectionResetError(104, "Connection reset by peer")
+        return module.FTP_TINY_FILE_SIZE_BYTES
+
+    monkeypatch.setattr(module, "retr_binary", fake_retr_binary)
+    monkeypatch.setattr(module, "forget_shared_self_file", lambda shared_state, path: calls.append(("forget_shared", shared_state, path)))
+    monkeypatch.setattr(module, "forget_self_file", lambda path: calls.append(("forget_local", path)))
+    monkeypatch.setattr(module.time, "sleep", lambda delay: calls.append(("sleep", delay)))
+    monkeypatch.setattr(module, "confirm_shared_self_file", lambda shared_state, path, size_bytes: calls.append(("confirm", shared_state, path, size_bytes)))
+
+    detail = module.download_self_file(settings, object(), module.FTP_TINY_FILE_SIZE_BYTES)
+
+    assert detail == f"path={second_path} bytes={module.FTP_TINY_FILE_SIZE_BYTES}"
+    assert calls == [
+        ("forget_shared", None, first_path),
+        ("forget_local", first_path),
+        ("sleep", module.FTP_VERIFY_RETRY_DELAYS_S[0]),
+        ("confirm", None, second_path, module.FTP_TINY_FILE_SIZE_BYTES),
+    ]

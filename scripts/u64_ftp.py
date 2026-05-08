@@ -294,10 +294,6 @@ def reusable_self_file_path(shared_state, size_bytes: int, *, file_prefix: str =
     for path in confirmed_self_files(shared_state, file_prefix=file_prefix):
         if matches_self_file_size(shared_state, path, size_bytes):
             return path
-    if shared_state is None:
-        for path in known_self_files(file_prefix=file_prefix):
-            if matches_self_file_size(shared_state, path, size_bytes):
-                return path
     return None
 
 
@@ -411,7 +407,7 @@ def readable_self_files(entries: tuple[str, ...], file_prefix: str = FTP_SELF_FI
 
 def delete_readable_self_files(ftp: ftplib.FTP, entries: tuple[str, ...], file_prefix: str = FTP_SELF_FILE_PREFIX) -> tuple[str, ...]:
     deleted = []
-    for path in managed_self_files(entries, file_prefix=file_prefix):
+    for path in readable_self_files(entries, file_prefix=file_prefix):
         ftp.delete(path)
         forget_self_file(path)
         deleted.append(path)
@@ -559,6 +555,8 @@ def download_self_file(settings: RuntimeSettings, ftp: ftplib.FTP, size_bytes: i
             if attempt + 1 >= attempts or not is_retryable_ftp_verification_error(error):
                 raise
             forget_shared_self_file(shared_state, path)
+            if shared_state is None:
+                forget_self_file(path)
             time.sleep(FTP_VERIFY_RETRY_DELAYS_S[attempt])
     else:
         raise RuntimeError(f"download failed without terminal error: {last_error}")
