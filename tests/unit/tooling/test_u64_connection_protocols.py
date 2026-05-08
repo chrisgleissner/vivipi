@@ -737,6 +737,108 @@ def test_ftp_readwrite_surface_uploads_and_downloads_tiny_and_large_files(monkey
     assert sorted(len(payload) for payload in stored_payloads.values()) == [1, module.FTP_LARGE_FILE_SIZE_BYTES]
 
 
+def test_ftp_upload_reuses_existing_managed_path_per_size(monkeypatch):
+    runtime = load_runtime()
+    connection_test = load_connection_test()
+    module = load_ftp()
+    settings = make_settings(runtime)
+    state = connection_test.ExecutionState(settings=settings, include_runner_context=False, random_seed=1)
+    stored_payloads: dict[str, bytes] = {}
+    stored_paths: list[str] = []
+
+    class FakeFTP:
+        def storbinary(self, command, payload):
+            path = command.removeprefix("STOR ")
+            stored_paths.append(path)
+            stored_payloads[path] = payload.read()
+
+        def nlst(self, path):
+            assert path == module.FTP_TEMP_DIR
+            return list(stored_payloads)
+
+    monkeypatch.setattr(module, "track_self_file", lambda current_settings, path: None)
+
+    ftp = FakeFTP()
+
+    first = module.upload_self_file(settings, ftp, module.FTP_TINY_FILE_SIZE_BYTES, shared_state=state)
+    second = module.upload_self_file(settings, ftp, module.FTP_TINY_FILE_SIZE_BYTES, shared_state=state)
+    third = module.upload_self_file(settings, ftp, module.FTP_LARGE_FILE_SIZE_BYTES, shared_state=state)
+    fourth = module.upload_self_file(settings, ftp, module.FTP_LARGE_FILE_SIZE_BYTES, shared_state=state)
+
+    assert first == second
+    assert third == fourth
+    assert len(stored_payloads) == 2
+    assert stored_paths[0] == stored_paths[1]
+    assert stored_paths[2] == stored_paths[3]
+    assert stored_paths[0] != stored_paths[2]
+
+
+def test_ftp_verify_self_file_state_prefers_fresh_session_when_available(monkeypatch):
+    runtime = load_runtime()
+    module = load_ftp()
+    settings = make_settings(runtime)
+    expected_path = f"/Temp/u64test_large_262144b_{module.os.getpid()}_1.bin"
+    events = []
+
+    class PrimaryFTP:
+        def nlst(self, path):
+            assert path == module.FTP_TEMP_DIR
+            events.append(("primary", path))
+            return []
+
+    class VerifierFTP:
+        def nlst(self, path):
+            assert path == module.FTP_TEMP_DIR
+            events.append(("verifier", path))
+            return [expected_path]
+
+    verifier = VerifierFTP()
+    monkeypatch.setattr(module, "connect", lambda current_settings: events.append(("connect", current_settings.host)) or verifier)
+    monkeypatch.setattr(module, "close", lambda current_ftp: events.append(("close", current_ftp is verifier)))
+
+    observed = module.verify_self_file_state(
+        PrimaryFTP(),
+        settings=settings,
+        expect_present=((expected_path, module.FTP_LARGE_FILE_SIZE_BYTES),),
+    )
+
+    assert observed == (expected_path,)
+    assert events == [
+        ("connect", settings.host),
+        ("verifier", module.FTP_TEMP_DIR),
+        ("close", True),
+    ]
+
+
+def test_ftp_verify_self_file_state_falls_back_to_existing_session_when_reconnect_fails(monkeypatch):
+    runtime = load_runtime()
+    module = load_ftp()
+    settings = make_settings(runtime)
+    expected_path = f"/Temp/u64test_large_262144b_{module.os.getpid()}_1.bin"
+    events = []
+
+    class PrimaryFTP:
+        def __init__(self):
+            self.calls = 0
+
+        def nlst(self, path):
+            assert path == module.FTP_TEMP_DIR
+            self.calls += 1
+            events.append(("primary", self.calls))
+            return [expected_path]
+
+    monkeypatch.setattr(module, "connect", lambda current_settings: (_ for _ in ()).throw(ConnectionRefusedError(current_settings.host)))
+
+    observed = module.verify_self_file_state(
+        PrimaryFTP(),
+        settings=settings,
+        expect_present=((expected_path, module.FTP_LARGE_FILE_SIZE_BYTES),),
+    )
+
+    assert observed == (expected_path,)
+    assert events == [("primary", 1)]
+
+
 def test_ftp_rename_provisions_confirmed_file_instead_of_skipping(monkeypatch):
     runtime = load_runtime()
     connection_test = load_connection_test()
@@ -837,3 +939,13 @@ def test_delete_readable_self_files_forgets_deleted_paths(monkeypatch):
     assert removed == ("/Temp/u64test_old.txt",)
     assert deleted == ["/Temp/u64test_old.txt"]
     assert forgotten == ["/Temp/u64test_old.txt"]
+
+
+def test_readable_self_files_ignore_foreign_process_leftovers(monkeypatch):
+    module = load_ftp()
+    current_path = f"/Temp/{module.FTP_SELF_FILE_PREFIX}tiny_1b_{module.os.getpid()}_1.bin"
+    foreign_path = "/Temp/u64test_tiny_1b_50651_1.bin"
+
+    monkeypatch.setattr(module, "known_self_files", lambda file_prefix=module.FTP_SELF_FILE_PREFIX: (current_path,))
+
+    assert module.readable_self_files((foreign_path, current_path)) == (current_path,)
