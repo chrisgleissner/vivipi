@@ -197,7 +197,6 @@ def test_ident_probe_requires_json_reply_with_echo(monkeypatch):
             calls.append("close")
 
     monkeypatch.setattr(module, "ident_nonce", lambda: "nonce-1")
-    monkeypatch.setattr(module, "_expected_ident_addresses", lambda host: {"host"})
     monkeypatch.setattr(module.socket, "socket", lambda *args, **kwargs: FakeSocket())
 
     outcome = module.run_probe(make_settings(runtime), runtime.ProbeCorrectness.COMPLETE)
@@ -205,6 +204,37 @@ def test_ident_probe_requires_json_reply_with_echo(monkeypatch):
     assert outcome.result == "OK"
     assert ("sendto", b"jsonnonce-1", ("host", 64)) in calls
     assert calls[-1] == "close"
+
+
+def test_ident_probe_accepts_valid_echo_from_alternate_source_address(monkeypatch):
+    runtime = load_runtime()
+    module = load_ident()
+
+    class FakeSocket:
+        def settimeout(self, timeout):
+            del timeout
+
+        def sendto(self, payload, address):
+            assert payload == b"jsonnonce-1"
+            assert address == ("host", 64)
+
+        def recvfrom(self, size):
+            del size
+            return (
+                b'{"product":"U64","firmware_version":"1.0","hostname":"u64","your_string":"nonce-1"}',
+                ("192.168.1.70", 64),
+            )
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(module, "ident_nonce", lambda: "nonce-1")
+    monkeypatch.setattr(module.socket, "socket", lambda *args, **kwargs: FakeSocket())
+
+    outcome = module.run_probe(make_settings(runtime), runtime.ProbeCorrectness.COMPLETE)
+
+    assert outcome.result == "OK"
+    assert outcome.detail == "product=U64 hostname=u64"
 
 
 def test_dma_probe_authenticates_identifies_and_reads_debug_register(monkeypatch):

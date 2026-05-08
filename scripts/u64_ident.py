@@ -26,21 +26,8 @@ def ident_nonce() -> str:
     return f"vivipi-{os.getpid()}-{time.monotonic_ns()}"
 
 
-def _expected_ident_addresses(host: str) -> set[str]:
-    try:
-        return {
-            sockaddr[0]
-            for _family, _socktype, _proto, _canonname, sockaddr in socket.getaddrinfo(
-                host, IDENT_PORT, socket.AF_INET, socket.SOCK_DGRAM
-            )
-        }
-    except socket.gaierror as error:
-        raise RuntimeError(f"unable to resolve ident host {host!r}: {error}") from error
-
-
 def identify_json(settings: RuntimeSettings) -> str:
     nonce = ident_nonce()
-    expected_addresses = _expected_ident_addresses(settings.host)
     payload: bytes | None = None
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -53,11 +40,9 @@ def identify_json(settings: RuntimeSettings) -> str:
                     break
                 sock.settimeout(remaining)
                 try:
-                    candidate_payload, address = sock.recvfrom(4096)
+                    candidate_payload, _address = sock.recvfrom(4096)
                 except socket.timeout:
                     break
-                if address[0] not in expected_addresses:
-                    continue
                 payload = candidate_payload
                 break
             if payload is not None:
