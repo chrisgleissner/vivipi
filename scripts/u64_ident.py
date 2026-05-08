@@ -26,9 +26,26 @@ def ident_nonce() -> str:
     return f"vivipi-{os.getpid()}-{time.monotonic_ns()}"
 
 
+def _parse_ident_payload(payload: bytes, nonce: str) -> dict[str, str]:
+    try:
+        response = json.loads(payload.decode("utf-8"))
+    except Exception as error:
+        raise RuntimeError(f"invalid ident JSON: {error}") from error
+    if not isinstance(response, dict):
+        raise RuntimeError("invalid ident payload")
+    for key in ("product", "firmware_version", "hostname", "your_string"):
+        value = response.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise RuntimeError(f"missing ident field: {key}")
+    if response["your_string"] != nonce:
+        raise RuntimeError("ident echo mismatch")
+    return response
+
+
 def identify_json(settings: RuntimeSettings) -> str:
     nonce = ident_nonce()
-    payload: bytes | None = None
+    response: dict[str, str] | None = None
+    last_error: RuntimeError | None = None
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         for _attempt in range(IDENT_RETRY_COUNT):
@@ -43,26 +60,20 @@ def identify_json(settings: RuntimeSettings) -> str:
                     candidate_payload, _address = sock.recvfrom(4096)
                 except socket.timeout:
                     break
-                payload = candidate_payload
+                try:
+                    response = _parse_ident_payload(candidate_payload, nonce)
+                except RuntimeError as error:
+                    last_error = error
+                    continue
                 break
-            if payload is not None:
+            if response is not None:
                 break
     finally:
         sock.close()
-    if payload is None:
+    if response is None:
+        if last_error is not None:
+            raise last_error
         raise RuntimeError("ident request timed out")
-    try:
-        response = json.loads(payload.decode("utf-8"))
-    except Exception as error:
-        raise RuntimeError(f"invalid ident JSON: {error}") from error
-    if not isinstance(response, dict):
-        raise RuntimeError("invalid ident payload")
-    for key in ("product", "firmware_version", "hostname", "your_string"):
-        value = response.get(key)
-        if not isinstance(value, str) or not value.strip():
-            raise RuntimeError(f"missing ident field: {key}")
-    if response["your_string"] != nonce:
-        raise RuntimeError("ident echo mismatch")
     return f"product={response['product']} hostname={response['hostname']}"
 
 
