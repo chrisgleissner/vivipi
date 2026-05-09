@@ -125,7 +125,7 @@ class ButtonReader:
         now_ms = time.ticks_ms()
         raw_value = state["pin"].value()
         self._update_raw_transition(state, button, raw_value, now_ms, log=False)
-        self._update_press_state(state, raw_value, now_ms)
+        self._update_press_state(state, button, raw_value, now_ms)
 
     def _update_raw_transition(self, state, button, raw_value, now_ms, log=True):
         if raw_value == state["raw_value"]:
@@ -140,7 +140,15 @@ class ButtonReader:
                 _button_fields(state, button, edge=edge),
             )
 
-    def _update_press_state(self, state, raw_value, now_ms):
+    def _queue_due_steps(self, state, button, held_ms):
+        target_steps = self.input_controller.step_count(button, held_ms)
+        if target_steps <= state["emitted_steps"]:
+            return
+        state["pending_presses"] += target_steps - state["emitted_steps"]
+        state["emitted_steps"] = target_steps
+        state["press_emitted"] = target_steps > 0
+
+    def _update_press_state(self, state, button, raw_value, now_ms):
         pressed = raw_value != state["idle_value"]
         if pressed:
             if state["pressed_since_ms"] is None:
@@ -153,32 +161,38 @@ class ButtonReader:
         if pressed_since_ms is None:
             return
         held_ms = max(0, time.ticks_diff(now_ms, pressed_since_ms))
-        if held_ms >= self.input_controller.debounce_ms and not state["press_emitted"]:
-            state["pending_presses"] += 1
+        self._queue_due_steps(state, button, held_ms)
         state["pressed_since_ms"] = None
+
+    def _reset_press_tracking_if_idle(self, state):
+        if state["pressed_since_ms"] is not None or state["pending_presses"] > 0:
+            return
         state["press_emitted"] = False
         state["emitted_steps"] = 0
 
-    def _queue_live_press_if_due(self, state, now_ms):
+    def _queue_live_press_if_due(self, state, button, now_ms):
         pressed_since_ms = state["pressed_since_ms"]
-        if pressed_since_ms is None or state["press_emitted"]:
+        if pressed_since_ms is None:
             return
         held_ms = max(0, time.ticks_diff(now_ms, pressed_since_ms))
-        if held_ms < self.input_controller.debounce_ms:
-            return
-        state["pending_presses"] += 1
-        state["press_emitted"] = True
+        self._queue_due_steps(state, button, held_ms)
 
     def _drain_pending_presses(self, state, button, events):
         while state["pending_presses"] > 0:
             state["pending_presses"] -= 1
-            state["emitted_steps"] = 1
             events.append(ButtonEvent(button=button, held_ms=self.input_controller.debounce_ms))
             self._log(
                 "info",
                 "event",
-                _button_fields(state, button, held_ms=self.input_controller.debounce_ms, step=state["emitted_steps"], pressed=True),
+                _button_fields(
+                    state,
+                    button,
+                    held_ms=self.input_controller.debounce_ms,
+                    step=state["emitted_steps"] - state["pending_presses"],
+                    pressed=True,
+                ),
             )
+        self._reset_press_tracking_if_idle(state)
 
     def _log(self, method, message, fields=()):
         if self.logger is None:
@@ -208,7 +222,7 @@ class ButtonReader:
                     state["press_emitted"] = False
                     state["emitted_steps"] = 0
                 else:
-                    self._update_press_state(state, raw_value, now_ms)
+                    self._update_press_state(state, button, raw_value, now_ms)
                 self._log(
                     "info",
                     "debounced",
@@ -224,7 +238,7 @@ class ButtonReader:
                 self._drain_pending_presses(state, button, events)
                 continue
 
-            self._queue_live_press_if_due(state, now_ms)
+            self._queue_live_press_if_due(state, button, now_ms)
             self._drain_pending_presses(state, button, events)
 
         return tuple(events)

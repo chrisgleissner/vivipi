@@ -24,23 +24,27 @@ class InputController:
     def _accepted(self, held_ms: int) -> bool:
         return held_ms >= self.debounce_ms
 
-    def _step_count(self, held_ms: int) -> int:
+    def step_count(self, button: Button | str, held_ms: int) -> int:
         if not self._accepted(held_ms):
             return 0
+        if button != Button.A:
+            return 1
         return 1 + max(0, (held_ms - self.debounce_ms) // self.repeat_ms)
 
-    def apply(self, state: AppState, button: Button, held_ms: int = 0) -> AppState:
+    def apply(self, state: AppState, button: Button | str, held_ms: int = 0) -> AppState:
         if not self._accepted(held_ms):
             return state
+
+        step_count = self.step_count(button, held_ms)
 
         if button == Button.A:
             if state.mode == AppMode.ABOUT:
                 checks = overview_checks(state)
                 first_id = checks[0].identifier if checks else None
                 return replace(state, mode=AppMode.DETAIL, selected_id=first_id, page_index=0)
-            if state.mode == AppMode.DETAIL and would_wrap_selection(state, self._step_count(held_ms)):
+            if state.mode == AppMode.DETAIL and would_wrap_selection(state, step_count):
                 return replace(state, mode=AppMode.ABOUT)
-            return move_selection(state, self._step_count(held_ms))
+            return move_selection(state, step_count)
 
         if button == Button.B:
             if state.mode == AppMode.DETAIL:

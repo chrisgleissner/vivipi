@@ -8,15 +8,17 @@ See your device health at a glance.
 [![Hardware](https://img.shields.io/badge/hardware-Raspberry%20Pi%20Pico-blue)](https://github.com/chrisgleissner/vivipi/releases)
 [![Runtime](https://img.shields.io/badge/runtime-MicroPython%20%7C%20Python-blue)](https://github.com/chrisgleissner/vivipi)
 
-ViviPi (pronounced "VEE-vee-pie", from the Latin *viv-* in *vivere*, "to live") is a minimal, glanceable monitoring system for Raspberry Pi Pico display modules. The default target is a Pico 2W with a 128x64 SH1107 OLED, but the runtime and build pipeline also support Waveshare Pico OLED, LCD, and e-paper modules.
+ViviPi (pronounced "VEE-vee-pie", from the Latin *viv-* in *vivere*, "to live") is a minimal, glanceable monitoring system for Raspberry Pi Pico display modules. It is built around a deterministic fixed-width UI that lets you read health state at a glance and inspect details with two hardware buttons. The default target is a Pico 2W with a 128x64 SH1107 OLED, but the runtime and build pipeline also support Waveshare Pico OLED, LCD, and e-paper modules.
 
 ## Features
 
-- Display support includes Pico OLED, LCD, and e-paper modules; verified on the Waveshare Pico OLED 1.3.
-- Supports `PING`, `TELNET`, `FTP`, `HTTP`, and `SERVICE` health checks.
-- Dedicated `IDENT` and `DMA` probes specific for the Ultimate 64 and Commodore 64 Ultimate.
-- Configurable back-off and scheduling policies to avoid overwhelming targets.
-- Easy build and deployment via a one-stop shop `build` command.
+- Fixed-width, event-driven UI designed for glanceable device health.
+- Two-button navigation for overview, detail, diagnostics, and about screens.
+- Display support for Pico OLED, LCD, and e-paper modules; verified on the Waveshare Pico OLED 1.3.
+- Built-in `PING`, `TELNET`, `FTP`, `HTTP`, and `SERVICE` checks.
+- Dedicated `IDENT` and `DMA` probes for Ultimate 64 and Commodore 64 Ultimate targets.
+- Configurable scheduling and back-off so repeated checks do not overwhelm targets.
+- One-command local workflow for install, test, firmware build, and deploy.
 
 ![Boot Logo](./docs/img/vivipi_boot_logo.jpg)
 ![Checks all OK](./docs/img/vivipi_checks_all_ok.png)
@@ -105,12 +107,41 @@ The bottom scanline shows a 3-pixel health indicator that moves from left to rig
 | CS | GP9 |
 | DC | GP8 |
 | RST | GP12 |
-| BTN A | GP15 |
-| BTN B | GP17 |
+| BTN A / Key 0 | GP15 |
+| BTN B / Key 1 | GP17 |
+
+On the main tested Waveshare Pico OLED 1.3 hardware, `GP15` is User Key 0 and `GP17` is User Key 1. In the config and code these are named `a` and `b`. By default, `a: GP15` and `b: GP17` use pull-up inputs, so a press pulls the line away from its idle state. If your wiring needs it, each button can be configured explicitly as `{ pin: GP15, pull: up }` or `{ pin: GP15, pull: down }`.
+
+## On-Device Controls
+
+ViviPi is meant to be usable directly from the Pico display module without any extra menu system.
+
+### Main Tested Screen
+
+On the main tested screen, the controls work like this:
+
+| Physical key | GPIO | Internal button name | What it does |
+| --- | --- | --- | --- |
+| `Key 1` | `GP17` | `b` / `Button.B` | Enter details for the current check. Press it again to exit details and return to the main screen. |
+| `Key 0` | `GP15` | `a` / `Button.A` | Cycle through the detail pages. |
+
+Additional input behavior:
+
+- Presses are debounced with a 20-50 ms window; the default controller uses `30 ms`.
+- Holding `Key 0` repeats every `500 ms`, which lets you move through detail pages quickly.
+- `Key 1` is single-step only and does not auto-repeat when held.
+- In code and build config, `Key 0` maps to `a` and `Button.A`, while `Key 1` maps to `b` and `Button.B`.
+
+### Screen Flow
+
+1. Start on the main screen.
+2. Press `Key 1` to enter details for the currently selected check.
+3. Press `Key 0` to cycle through detail pages.
+4. Press `Key 1` again to leave details and return to the main screen.
 
 ## Quick Start
 
-This is the shortest useful path from clone to running device.
+This is the shortest useful path from clone to a running local workflow and a deployable device bundle.
 
 Requirements:
 

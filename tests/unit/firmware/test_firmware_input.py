@@ -99,7 +99,7 @@ def test_button_reader_emits_one_event_on_press_and_none_on_release(monkeypatch)
     assert reader.snapshot()["A"]["pressed"] is False
 
 
-def test_button_reader_emits_button_a_only_once_while_held(monkeypatch):
+def test_button_reader_repeats_button_a_every_500ms_while_held(monkeypatch):
     reader, fake_time, _ = build_reader(monkeypatch)
     button_a = reader.states[Button.A]["pin"]
 
@@ -118,8 +118,10 @@ def test_button_reader_emits_button_a_only_once_while_held(monkeypatch):
 
     assert len(first_events) == 1
     assert first_events[0].button == Button.A
-    assert second_events == ()
-    assert third_events == ()
+    assert len(second_events) == 1
+    assert second_events[0].button == Button.A
+    assert len(third_events) == 1
+    assert third_events[0].button == Button.A
 
 
 def test_button_reader_clamps_button_b_to_one_event_while_held(monkeypatch):
@@ -139,6 +141,20 @@ def test_button_reader_clamps_button_b_to_one_event_while_held(monkeypatch):
     assert len(first_events) == 1
     assert first_events[0].button == Button.B
     assert held_events == ()
+
+
+def test_button_reader_catches_up_button_a_repeat_steps_on_release(monkeypatch):
+    reader, fake_time, _ = build_reader(monkeypatch)
+    button_a = reader.states[Button.A]["pin"]
+
+    fake_time.now_ms = 10
+    button_a.set_value(0)
+
+    fake_time.now_ms = 1040
+    button_a.set_value(1)
+    events = reader.poll()
+
+    assert [event.button for event in events] == [Button.A, Button.A, Button.A]
 
 
 def test_button_reader_uses_pull_down_when_requested(monkeypatch):
@@ -213,6 +229,29 @@ def test_button_reader_logs_press_release_and_event_details(monkeypatch):
     assert "pressed=False" in release_fields
     assert "held_ms=30" in event_fields
     assert "step=1" in event_fields
+
+
+def test_button_reader_logs_release_catch_up_steps_in_order(monkeypatch):
+    reader, fake_time, _ = build_reader(monkeypatch)
+    logger = FakeLogger()
+    reader.bind_logger(logger)
+    button_a = reader.states[Button.A]["pin"]
+
+    fake_time.now_ms = 10
+    button_a.set_value(0)
+
+    fake_time.now_ms = 1040
+    button_a.set_value(1)
+    events = reader.poll()
+
+    assert [event.button for event in events] == [Button.A, Button.A, Button.A]
+    event_fields = [fields for _, message, fields in logger.calls if message == "event"]
+
+    assert [field for fields in event_fields for field in fields if field.startswith("step=")] == [
+        "step=1",
+        "step=2",
+        "step=3",
+    ]
 
 
 def test_button_reader_latches_short_debounced_tap_between_polls_via_irq(monkeypatch):
