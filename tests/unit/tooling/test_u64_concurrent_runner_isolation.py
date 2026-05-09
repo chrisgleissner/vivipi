@@ -56,8 +56,8 @@ def test_http_multi_runner_readwrite_uses_runner_local_memory_slots_and_keeps_au
         "mem_read_screen_ram",
         "mem_read_io_area",
         "mem_read_debug_register",
-        "mem_write_screen_space",
-        "mem_write_screen_exclam",
+        "mem_write_probe_a5",
+        "mem_write_probe_5a",
         "set_vol_ultisid_1_0_db",
         "set_vol_ultisid_1_plus_1_db",
     ]
@@ -72,10 +72,25 @@ def test_http_multi_runner_readwrite_uses_runner_local_memory_slots_and_keeps_au
 
     module.memory_write_verify = fake_memory_write_verify
 
-    next(operation for name, operation in runner_1_operations if name == "mem_write_screen_space")(None)
-    next(operation for name, operation in runner_2_operations if name == "mem_write_screen_space")(None)
+    next(operation for name, operation in runner_1_operations if name == "mem_write_probe_a5")(None)
+    next(operation for name, operation in runner_2_operations if name == "mem_write_probe_a5")(None)
 
-    assert captured_addresses == ["0x0400", "0x0401"]
+    assert captured_addresses == ["0x0334", "0x0335"]
+
+
+def test_http_probe_write_slots_stay_out_of_visible_screen_ram():
+    module = load_http()
+
+    first = int(module._runner_probe_write_address(1), 16)
+    last = int(module._runner_probe_write_address(module.PROBE_WRITE_RUNNER_SLOT_COUNT), 16)
+
+    assert first == 0x0334
+    assert last == 0x03FF
+    assert first in module.PROBE_WRITE_ADDRESSES
+    assert last in module.PROBE_WRITE_ADDRESSES
+    assert all(0x0334 <= address <= 0x033B or 0x03FC <= address <= 0x03FF for address in module.PROBE_WRITE_ADDRESSES)
+    assert not (0x0400 <= first <= 0x07E7)
+    assert not (0x0400 <= last <= 0x07E7)
 
 
 def test_telnet_multi_runner_readwrite_keeps_shared_audio_mixer_writes():
