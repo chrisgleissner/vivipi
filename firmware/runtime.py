@@ -877,7 +877,7 @@ def _wait_for_boot_logo(app, now_provider=None, sleep_ms=None, watchdog=None):
 
 def run_loop(
     app,
-    poll_interval_ms=50,
+    poll_interval_ms=20,
     iterations=None,
     now_provider=_steady_now_s,
     sleep_ms=_sleep_ms,
@@ -913,7 +913,7 @@ def run_loop(
         sleep_ms(poll_interval_ms)
 
 
-def run_forever(config_path="config.json", poll_interval_ms=50):
+def run_forever(config_path="config.json", poll_interval_ms=20):
     app = build_runtime_app_from_path(config_path)
     watchdog = getattr(app, "runtime_watchdog", None)
     steady_now_provider = getattr(app, "_probe_now_s", _steady_now_s)

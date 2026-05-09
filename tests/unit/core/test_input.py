@@ -25,6 +25,16 @@ def test_button_a_auto_repeats_every_500ms():
     assert repeated.selected_id == "delta"
 
 
+def test_button_b_does_not_auto_repeat_when_held():
+    controller = InputController(debounce_ms=30, repeat_ms=500)
+    state = make_state()
+
+    detail = controller.apply(state, Button.B, held_ms=1030)
+
+    assert detail.mode == AppMode.DETAIL
+    assert detail.selected_id == "alpha"
+
+
 def test_button_b_toggles_detail_and_back_to_overview():
     controller = InputController()
     state = make_state()

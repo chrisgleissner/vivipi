@@ -806,6 +806,23 @@ def test_run_loop_ticks_and_sleeps_with_injected_clock():
     assert sleeps == [50, 50, 50]
 
 
+def test_run_loop_defaults_to_20ms_sleep_interval():
+    now_values = iter([1.0, 2.0, 3.0])
+    app = SimpleNamespace(ticks=[])
+    app.tick = lambda now_s: app.ticks.append(now_s)
+    sleeps = []
+
+    firmware_runtime.run_loop(
+        app,
+        iterations=3,
+        now_provider=lambda: next(now_values),
+        sleep_ms=lambda value: sleeps.append(value),
+    )
+
+    assert app.ticks == [1.0, 2.0, 3.0]
+    assert sleeps == [20, 20, 20]
+
+
 def test_wait_for_boot_logo_sleeps_in_chunks_and_feeds_watchdog():
     clock = {"now": 0.0}
     sleeps = []
