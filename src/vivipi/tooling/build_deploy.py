@@ -10,6 +10,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 from textwrap import dedent
@@ -38,6 +39,37 @@ PRERELEASE_VERSION_PATTERN = re.compile(r"^(\d+\.\d+\.\d+)-?(a|b|rc)(\d+)$")
 MPREMOTE_COMMAND_TIMEOUT_S = 20
 MPREMOTE_RECOVERY_TIMEOUT_S = 10
 MPREMOTE_RECOVERY_ATTEMPTS = 1
+
+
+def _default_run_command(command: list[str], *, check: bool, timeout: int | None = None):
+    return subprocess.run(
+        command,
+        check=check,
+        timeout=timeout,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+
+
+def _process_output_text(result: object) -> str:
+    for attribute in ("stdout", "output", "stderr"):
+        value = getattr(result, attribute, None)
+        if value is None:
+            continue
+        if isinstance(value, bytes):
+            return value.decode("utf-8", "replace")
+        if isinstance(value, str):
+            return value
+    return ""
+
+
+def _emit_process_output(result: object):
+    payload = _process_output_text(result)
+    if not payload:
+        return
+    sys.stdout.write(payload)
+    sys.stdout.flush()
 
 
 def _parse_brightness(value: object) -> int:
@@ -266,14 +298,17 @@ def _run_mpremote_command(
 
     for attempt in range(attempts + 1):
         try:
-            return _invoke_run_command(
+            result = _invoke_run_command(
                 run_command,
                 wrapped,
                 check=True,
                 timeout=MPREMOTE_COMMAND_TIMEOUT_S,
             )
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            _emit_process_output(result)
+            return result
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
             if attempt >= attempts:
+                _emit_process_output(error)
                 raise
             time.sleep(float(attempt + 1))
             try:
@@ -797,13 +832,14 @@ def deploy_firmware(
     output_dir: str | Path,
     env: dict[str, str] | None = None,
     port: str | None = None,
-    run_command=subprocess.run,
+    run_command=None,
 ) -> Path:
     source_config_path = Path(config_path).resolve()
     settings = load_build_deploy_settings(source_config_path, env=env)
     bundle_path = build_firmware_bundle(source_config_path, output_dir, env=env)
     device_root = Path(output_dir) / "vivipi-device-fs"
     resolved_port = _resolve_deploy_port(settings.get("device"), port)
+    effective_run_command = _default_run_command if run_command is None else run_command
 
     try:
         for item in sorted(device_root.iterdir(), key=lambda value: value.name):
@@ -812,10 +848,10 @@ def deploy_firmware(
                 command.extend(["-r", str(item), ":"])
             else:
                 command.extend([str(item), f":{item.name}"])
-            _run_mpremote_command(command, run_command=run_command, recovery_port=resolved_port)
+            _run_mpremote_command(command, run_command=effective_run_command, recovery_port=resolved_port)
         _run_mpremote_command(
             ["mpremote", "connect", resolved_port, "reset"],
-            run_command=run_command,
+            run_command=effective_run_command,
             recovery_port=resolved_port,
         )
     except FileNotFoundError as error:

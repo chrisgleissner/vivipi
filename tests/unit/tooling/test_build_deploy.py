@@ -441,7 +441,7 @@ def test_load_build_deploy_settings_allows_missing_service_base_url(tmp_path: Pa
     assert settings["service"] == {}
 
 
-def test_invoke_run_command_and_mpremote_recovery_cover_fallback_paths(monkeypatch):
+def test_invoke_run_command_and_mpremote_recovery_cover_fallback_paths(monkeypatch, capsys):
     calls = []
 
     def fake_run_command(command, check, timeout=None):
@@ -465,17 +465,20 @@ def test_invoke_run_command_and_mpremote_recovery_cover_fallback_paths(monkeypat
         if "soft-reset" in command:
             raise subprocess.TimeoutExpired(command, timeout)
         if len([entry for entry in attempt_log if entry[1] is True]) == 1:
-            raise subprocess.CalledProcessError(1, command)
-        return "recovered"
+            raise subprocess.CalledProcessError(1, command, output="transient usb drop\n")
+        return subprocess.CompletedProcess(command, 0, stdout="recovered\n")
 
-    assert _run_mpremote_command(["mpremote", "fs", "ls"], run_command=flaky_run_command, recovery_port="auto", attempts=1) == "recovered"
+    result = _run_mpremote_command(["mpremote", "fs", "ls"], run_command=flaky_run_command, recovery_port="auto", attempts=1)
+    assert isinstance(result, subprocess.CompletedProcess)
     assert sleep_calls == [1.0]
+    assert capsys.readouterr().out == "recovered\n"
 
     def always_fail(command, check, timeout=None):
-        raise subprocess.CalledProcessError(1, command)
+        raise subprocess.CalledProcessError(1, command, output="final failure\n")
 
     with pytest.raises(subprocess.CalledProcessError):
         _run_mpremote_command(["mpremote", "fs", "ls"], run_command=always_fail, recovery_port="auto", attempts=0)
+    assert capsys.readouterr().out == "final failure\n"
 
 
 def test_normalize_probe_schedule_settings_validates_non_mapping(tmp_path: Path):
