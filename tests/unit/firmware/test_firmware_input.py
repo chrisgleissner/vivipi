@@ -231,6 +231,29 @@ def test_button_reader_logs_press_release_and_event_details(monkeypatch):
     assert "step=1" in event_fields
 
 
+def test_button_reader_logs_release_catch_up_steps_in_order(monkeypatch):
+    reader, fake_time, _ = build_reader(monkeypatch)
+    logger = FakeLogger()
+    reader.bind_logger(logger)
+    button_a = reader.states[Button.A]["pin"]
+
+    fake_time.now_ms = 10
+    button_a.set_value(0)
+
+    fake_time.now_ms = 1040
+    button_a.set_value(1)
+    events = reader.poll()
+
+    assert [event.button for event in events] == [Button.A, Button.A, Button.A]
+    event_fields = [fields for _, message, fields in logger.calls if message == "event"]
+
+    assert [field for fields in event_fields for field in fields if field.startswith("step=")] == [
+        "step=1",
+        "step=2",
+        "step=3",
+    ]
+
+
 def test_button_reader_latches_short_debounced_tap_between_polls_via_irq(monkeypatch):
     reader, fake_time, _ = build_reader(monkeypatch)
     button_a = reader.states[Button.A]["pin"]

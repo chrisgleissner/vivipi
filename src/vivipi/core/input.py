@@ -24,14 +24,14 @@ class InputController:
     def _accepted(self, held_ms: int) -> bool:
         return held_ms >= self.debounce_ms
 
-    def step_count(self, button: Button | object, held_ms: int) -> int:
+    def step_count(self, button: Button | str, held_ms: int) -> int:
         if not self._accepted(held_ms):
             return 0
         if button != Button.A:
             return 1
         return 1 + max(0, (held_ms - self.debounce_ms) // self.repeat_ms)
 
-    def apply(self, state: AppState, button: Button, held_ms: int = 0) -> AppState:
+    def apply(self, state: AppState, button: Button | str, held_ms: int = 0) -> AppState:
         if not self._accepted(held_ms):
             return state
 

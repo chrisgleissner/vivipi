@@ -163,6 +163,10 @@ class ButtonReader:
         held_ms = max(0, time.ticks_diff(now_ms, pressed_since_ms))
         self._queue_due_steps(state, button, held_ms)
         state["pressed_since_ms"] = None
+
+    def _reset_press_tracking_if_idle(self, state):
+        if state["pressed_since_ms"] is not None or state["pending_presses"] > 0:
+            return
         state["press_emitted"] = False
         state["emitted_steps"] = 0
 
@@ -188,6 +192,7 @@ class ButtonReader:
                     pressed=True,
                 ),
             )
+        self._reset_press_tracking_if_idle(state)
 
     def _log(self, method, message, fields=()):
         if self.logger is None:
