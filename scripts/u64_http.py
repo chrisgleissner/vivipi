@@ -25,8 +25,10 @@ AUDIO_MIXER_WRITE_ITEM = "Vol UltiSid 1"
 AUDIO_MIXER_WRITE_TARGET_VALUES = ("0 dB", "+1 dB")
 AUDIO_MIXER_SHARED_STATE_KEY = "u64.audio_mixer.vol_ultisid_1"
 AUDIO_MIXER_TENTATIVE_STATE_KEY = "u64.audio_mixer.vol_ultisid_1.tentative"
-SCREEN_RAM_BASE_ADDRESS = 0x0400
-SCREEN_RAM_RUNNER_SLOT_COUNT = 40
+# Keep probe write slots in the small unused page-3 ranges so readwrite probes
+# avoid both visible screen RAM and the datasette buffer.
+PROBE_WRITE_ADDRESSES = tuple(range(0x0334, 0x033C)) + tuple(range(0x03FC, 0x0400))
+PROBE_WRITE_RUNNER_SLOT_COUNT = len(PROBE_WRITE_ADDRESSES)
 STATE_VERIFY_RETRY_DELAYS_S = (0.05, 0.10, 0.20)
 
 
@@ -280,9 +282,9 @@ def memory_write_verify(settings: RuntimeSettings, address: str, data_hex: str) 
     return f"http_status={write_status} verified=0x{value:02X}"
 
 
-def _runner_screen_address(runner_id: int) -> str:
-    slot = (runner_id - 1) % SCREEN_RAM_RUNNER_SLOT_COUNT
-    return f"0x{SCREEN_RAM_BASE_ADDRESS + slot:04X}"
+def _runner_probe_write_address(runner_id: int) -> str:
+    slot = (runner_id - 1) % PROBE_WRITE_RUNNER_SLOT_COUNT
+    return f"0x{PROBE_WRITE_ADDRESSES[slot]:04X}"
 
 
 def _has_multiple_runners(context: ProbeExecutionContext | None) -> bool:
@@ -315,10 +317,10 @@ def surface_operations(
         return (("get_version_smoke", lambda settings: generic_read(settings, "/v1/version")),)
     if surface == ProbeSurface.READ:
         return read_operations
-    screen_address = _runner_screen_address(runner_id)
+    probe_write_address = _runner_probe_write_address(runner_id)
     operations = read_operations + (
-        ("mem_write_screen_space", lambda settings: memory_write_verify(settings, screen_address, "20")),
-        ("mem_write_screen_exclam", lambda settings: memory_write_verify(settings, screen_address, "21")),
+        ("mem_write_probe_a5", lambda settings: memory_write_verify(settings, probe_write_address, "A5")),
+        ("mem_write_probe_5a", lambda settings: memory_write_verify(settings, probe_write_address, "5A")),
         ("set_vol_ultisid_1_0_db", lambda settings: write_audio_mixer_item(settings, "0 dB", shared_state=shared_state)),
         ("set_vol_ultisid_1_plus_1_db", lambda settings: write_audio_mixer_item(settings, "+1 dB", shared_state=shared_state)),
     )

@@ -569,13 +569,13 @@ def resolve_execution_config(args: argparse.Namespace) -> ExecutionConfig:
 def validate_execution_config(config: ExecutionConfig) -> None:
     if config.schedule != SCHEDULE_CONCURRENT:
         return
-    if config.runners <= u64_http.SCREEN_RAM_RUNNER_SLOT_COUNT:
+    if config.runners <= u64_http.PROBE_WRITE_RUNNER_SLOT_COUNT:
         return
     if config.probe_surfaces.get("http") != ProbeSurface.READWRITE:
         return
     raise ValueError(
         "concurrent HTTP readwrite probing supports at most "
-        f"{u64_http.SCREEN_RAM_RUNNER_SLOT_COUNT} runners; got {config.runners}"
+        f"{u64_http.PROBE_WRITE_RUNNER_SLOT_COUNT} runners; got {config.runners}"
     )
 
 
