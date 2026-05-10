@@ -583,18 +583,29 @@ def rename_self_file(settings: RuntimeSettings, ftp: ftplib.FTP, *, file_prefix:
     target = next_self_file_path(file_prefix=file_prefix, tag=rename_tag)
     attempts = len(FTP_VERIFY_RETRY_DELAYS_S) + 1
     last_error: Exception | None = None
+    current_ftp = ftp
     for attempt in range(attempts):
         try:
-            ftp.rename(source, target)
+            current_ftp.rename(source, target)
             break
         except Exception as error:
             last_error = error
-            if attempt + 1 >= attempts or ftp_reply_code(error) != 450:
+            reply_code = ftp_reply_code(error)
+            if attempt + 1 >= attempts or reply_code not in {226, 450}:
                 raise
-            verify_self_file_state(ftp, shared_state=shared_state, file_prefix=file_prefix, expect_present=((source, size_bytes),))
+            observed_paths = verify_self_file_state(ftp, settings=settings, shared_state=shared_state, file_prefix=file_prefix)
+            if target in observed_paths and source not in observed_paths:
+                break
+            if source not in observed_paths:
+                raise RuntimeError(f"rename lost source after FTP {reply_code}: from={source} to={target}") from error
             time.sleep(FTP_VERIFY_RETRY_DELAYS_S[attempt])
+            if current_ftp is not ftp:
+                close(current_ftp)
+            current_ftp = connect(settings)
     else:
         raise RuntimeError(f"rename failed without terminal error: {last_error}")
+    if current_ftp is not ftp:
+        close(current_ftp)
     forget_self_file(source)
     track_self_file(settings, target)
     replace_shared_self_file(shared_state, source, target, size_bytes)
