@@ -645,16 +645,35 @@ def is_save_flash_dialog(text: str) -> bool:
     return all(marker in lowered for marker in TELNET_SAVE_FLASH_MARKERS)
 
 
+def is_post_audio_mixer_state(text: str) -> bool:
+    lowered = text.lower()
+    return bool(lowered.strip()) and "vol ultisid 1" not in lowered and not is_save_flash_dialog(text)
+
+
 def session_save_changes_to_flash(session: TelnetRunnerSession) -> str:
     first_left = session_send(session, TELNET_KEY_LEFT, view_state="unknown")
+    if is_save_flash_dialog(first_left):
+        confirmed = session_send(session, TELNET_KEY_ENTER, view_state="unknown")
+        return confirmed or first_left
+    if is_post_audio_mixer_state(first_left):
+        return first_left
+
     second_left = session_send(session, TELNET_KEY_LEFT, view_state="unknown")
+    if is_save_flash_dialog(second_left):
+        confirmed = session_send(session, TELNET_KEY_ENTER, view_state="unknown")
+        return confirmed or second_left
+    if is_post_audio_mixer_state(second_left):
+        return second_left
+
     dialog_text = second_left if is_save_flash_dialog(second_left) else first_left
-    if not is_save_flash_dialog(dialog_text):
-        tail = session_read(session, max_empty_reads=2, view_state="unknown")
-        dialog_text = f"{dialog_text} {tail}".strip() if tail else dialog_text
+    tail = session_read(session, max_empty_reads=2, view_state="unknown")
+    if tail:
+        dialog_text = f"{dialog_text} {tail}".strip() if dialog_text else tail
     if is_save_flash_dialog(dialog_text):
         confirmed = session_send(session, TELNET_KEY_ENTER, view_state="unknown")
         return confirmed or dialog_text
+    if is_post_audio_mixer_state(dialog_text):
+        return dialog_text
     raise RuntimeError("missing telnet text: Save changes to Flash")
 
 
@@ -831,15 +850,27 @@ def write_audio_mixer_item(settings: RuntimeSettings, sock, target: str) -> str:
         text = send_and_read(sock, direction_key, require_change=True)
     text = send_and_read(sock, TELNET_KEY_ENTER)
     first_left = send_and_read(sock, TELNET_KEY_LEFT)
-    second_left = send_and_read(sock, TELNET_KEY_LEFT)
-    dialog_text = second_left if is_save_flash_dialog(second_left) else first_left
-    if not is_save_flash_dialog(dialog_text):
-        tail = read_until_idle(sock, max_empty_reads=2)
-        dialog_text = f"{dialog_text} {tail}".strip() if tail else dialog_text
-    if is_save_flash_dialog(dialog_text):
+    if is_save_flash_dialog(first_left):
         text = send_and_read(sock, TELNET_KEY_ENTER)
+    elif is_post_audio_mixer_state(first_left):
+        text = first_left
     else:
-        raise RuntimeError("missing telnet text: Save changes to Flash")
+        second_left = send_and_read(sock, TELNET_KEY_LEFT)
+        if is_save_flash_dialog(second_left):
+            text = send_and_read(sock, TELNET_KEY_ENTER)
+        elif is_post_audio_mixer_state(second_left):
+            text = second_left
+        else:
+            dialog_text = second_left if is_save_flash_dialog(second_left) else first_left
+            tail = read_until_idle(sock, max_empty_reads=2)
+            if tail:
+                dialog_text = f"{dialog_text} {tail}".strip() if dialog_text else tail
+            if is_save_flash_dialog(dialog_text):
+                text = send_and_read(sock, TELNET_KEY_ENTER)
+            elif is_post_audio_mixer_state(dialog_text):
+                text = dialog_text
+            else:
+                raise RuntimeError("missing telnet text: Save changes to Flash")
     updated = extract_audio_mixer_write_value(text)
     if updated != u64_http.normalize_audio_mixer_value(target):
         raise RuntimeError(f"verification mismatch expected={target} got={updated}")

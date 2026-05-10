@@ -446,7 +446,6 @@ def test_telnet_session_write_audio_mixer_item_preserves_latest_known_state(monk
         module.TELNET_KEY_DOWN,
         module.TELNET_KEY_ENTER,
         module.TELNET_KEY_LEFT,
-        module.TELNET_KEY_LEFT,
         module.TELNET_KEY_ENTER,
     ]
     assert state.get_shared_resource_value(module.u64_http.AUDIO_MIXER_SHARED_STATE_KEY) == "0 dB"
@@ -492,7 +491,6 @@ def test_telnet_session_write_audio_mixer_item_accepts_authoritative_http_target
         module.TELNET_KEY_ENTER,
         module.TELNET_KEY_DOWN,
         module.TELNET_KEY_ENTER,
-        module.TELNET_KEY_LEFT,
         module.TELNET_KEY_LEFT,
         module.TELNET_KEY_ENTER,
     ]
@@ -561,7 +559,7 @@ def test_session_save_changes_to_flash_confirms_dialog(monkeypatch):
     text = module.session_save_changes_to_flash(session)
 
     assert text == "Vol UltiSid 1 0 dB"
-    assert calls == [module.TELNET_KEY_LEFT, module.TELNET_KEY_LEFT, module.TELNET_KEY_ENTER]
+    assert calls == [module.TELNET_KEY_LEFT, module.TELNET_KEY_ENTER]
 
 
 def test_extended_telnet_incomplete_mode_uses_incomplete_operations(monkeypatch):
@@ -630,6 +628,61 @@ def test_extended_telnet_open_mode_uses_surface_operations(monkeypatch):
 
     assert outcome.result == "OK"
     assert outcome.detail == "surface=readwrite op=set_vol_ultisid_1_0_db open_surface_path"
+
+
+def test_run_open_surface_operation_does_not_use_shared_state_lock(monkeypatch):
+    runtime = load_runtime()
+    module = load_telnet()
+    settings = make_settings(runtime)
+    session = module.TelnetRunnerSession(sock=UnusedSocket())
+
+    class FailOnLockState:
+        def shared_resource_lock_for(self, resource_key):
+            raise AssertionError(f"unexpected telnet serialization lock: {resource_key}")
+
+    monkeypatch.setattr(module, "get_session", lambda current_settings, runner_id: session)
+    monkeypatch.setattr(module, "drop_session", lambda runner_id: None)
+
+    detail = module.run_open_surface_operation(settings, 1, lambda current_settings, current_session: "open_surface_path")
+
+    assert detail == "open_surface_path"
+
+
+def test_extended_telnet_complete_mode_does_not_use_shared_state_lock(monkeypatch):
+    runtime = load_runtime()
+    module = load_telnet()
+
+    class FailOnLockState:
+        def next_probe_operation_index(self, protocol, runner_id, surface, pool_size):
+            del protocol, runner_id, surface, pool_size
+            return 0
+
+        def shared_resource_lock_for(self, resource_key):
+            raise AssertionError(f"unexpected telnet serialization lock: {resource_key}")
+
+    monkeypatch.setattr(
+        module,
+        "surface_operations",
+        lambda surface, *, concurrent_multi_runner=False, shared_state=None: ((
+            "telnet_smoke_connect",
+            lambda settings, session: "complete_surface_path",
+        ),),
+    )
+    monkeypatch.setattr(module, "connect", lambda current_settings: UnusedSocket())
+    monkeypatch.setattr(module, "close_socket", lambda sock: None)
+
+    context = runtime.ProbeExecutionContext(
+        protocol="telnet",
+        runner_id=1,
+        iteration=1,
+        surface=runtime.ProbeSurface.READWRITE,
+        state=FailOnLockState(),
+    )
+
+    outcome = module.run_probe(make_settings(runtime), runtime.ProbeCorrectness.COMPLETE, context=context)
+
+    assert outcome.result == "OK"
+    assert outcome.detail == "surface=readwrite op=telnet_smoke_connect complete_surface_path"
 
 
 def test_collect_telnet_visible_ignores_subnegotiation_and_keeps_literal_iac():
