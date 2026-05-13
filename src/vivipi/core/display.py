@@ -779,7 +779,16 @@ def _reserved_bottom_indicator_px(family: str, liveness: Mapping[str, object]) -
     if family != "eink":
         return 0
     heartbeat = dict(liveness.get("bottom_heartbeat", {})) if isinstance(liveness, Mapping) else {}
-    return int(heartbeat.get("pixel_height_px", 0)) + int(heartbeat.get("gap_px", 0))
+    return max(0, int(heartbeat.get("pixel_height_px", 0))) + max(0, int(heartbeat.get("gap_px", 0)))
+
+
+def reserved_bottom_indicator_px(display_config: Mapping[str, object] | None) -> int:
+    if not isinstance(display_config, Mapping):
+        return 0
+    return _reserved_bottom_indicator_px(
+        _fold(display_config.get("family", "")),
+        display_config.get("liveness", {}),
+    )
 
 
 def _infer_eink_medium_font(width_px: int, height_px: int, target_size_px: int, reserved_bottom_px: int) -> dict[str, int]:

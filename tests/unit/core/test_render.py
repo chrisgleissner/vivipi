@@ -113,8 +113,8 @@ def test_compact_mode_shows_all_healthy_checks_without_suffixes_when_no_failures
 
     frame = render_frame(state)
 
-    assert frame.rows == ("Bravo   |Alpha  ",)
-    assert frame.inverted_spans == (InvertedSpan(row_index=0, start_column=9, end_column=16),)
+    assert frame.rows == ("Alpha   |Bravo  ",)
+    assert frame.inverted_spans == (InvertedSpan(row_index=0, start_column=0, end_column=8),)
     assert frame.failure_spans == ()
 
 

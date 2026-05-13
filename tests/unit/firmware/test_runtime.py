@@ -113,6 +113,7 @@ def test_main_bootstrap_watchdog_feeds_before_runtime_import(monkeypatch):
             events.append("wdt-feed")
 
     monkeypatch.setattr(firmware_main, "WDT", FakeWDT)
+    monkeypatch.setattr(firmware_main, "_display_family_from_config", lambda path="config.json": "lcd")
 
     run_forever_calls = []
     original_import = __import__
@@ -130,6 +131,36 @@ def test_main_bootstrap_watchdog_feeds_before_runtime_import(monkeypatch):
     assert events[0] == ("wdt-init", 8388)
     assert "wdt-feed" in events[:3]
     assert "runtime-import" in events[:4]
+    assert run_forever_calls == [True]
+
+
+def test_main_skips_bootstrap_watchdog_for_oled(monkeypatch):
+    events = []
+
+    class FakeWDT:
+        def __init__(self, timeout=None):
+            events.append(("wdt-init", timeout))
+
+        def feed(self):
+            events.append("wdt-feed")
+
+    monkeypatch.setattr(firmware_main, "WDT", FakeWDT)
+    monkeypatch.setattr(firmware_main, "_display_family_from_config", lambda path="config.json": "oled")
+
+    run_forever_calls = []
+    original_import = __import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "runtime":
+            events.append("runtime-import")
+            return SimpleNamespace(run_forever=lambda: run_forever_calls.append(True))
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr("builtins.__import__", fake_import)
+
+    firmware_main.main()
+
+    assert events == ["runtime-import"]
     assert run_forever_calls == [True]
 
 
@@ -1171,9 +1202,11 @@ def test_run_forever_connects_network_before_waiting_for_boot_logo(monkeypatch):
 
 
 def test_build_eink_probe_summary_frame_formats_ok_and_fail_rows():
-    display = SimpleNamespace(height=64, font_height=16)
+    display = SimpleNamespace(height=122, font_height=15)
     definitions = (
-        CheckDefinition(identifier="adb", name="ADB SERVICE", check_type=CheckType.HTTP, target="adb"),
+        CheckDefinition(identifier="u64", name="U64 REST", check_type=CheckType.HTTP, target="u64"),
+        CheckDefinition(identifier="c64u", name="C64U REST", check_type=CheckType.HTTP, target="c64u"),
+        CheckDefinition(identifier="pixel4", name="PIXEL4", check_type=CheckType.HTTP, target="pixel4"),
         CheckDefinition(identifier="telnet", name="TELNET", check_type=CheckType.TELNET, target="telnet"),
     )
     app = SimpleNamespace(
@@ -1181,21 +1214,41 @@ def test_build_eink_probe_summary_frame_formats_ok_and_fail_rows():
         display=display,
         definitions=definitions,
         registered_results={
-            "adb": {"name": "ADB SERVICE", "status": "OK"},
+            "u64": {"name": "U64 REST", "status": "OK"},
+            "c64u": {"name": "C64U REST", "status": "FAIL"},
+            "pixel4": {"name": "PIXEL4", "status": "OK"},
             "telnet": {"name": "TELNET", "status": "FAIL"},
         },
+        display_liveness={
+            "bottom_heartbeat": {
+                "enabled": True,
+                "period_s": 1,
+                "pixel_count": 1,
+                "position": "left",
+                "pixel_width_px": 2,
+                "pixel_height_px": 2,
+                "gap_px": 3,
+            }
+        },
+        _frame_bottom_pixels=lambda now_s: (6,),
     )
 
-    frame = firmware_runtime._build_eink_probe_summary_frame(app)
+    frame = firmware_runtime._build_eink_probe_summary_frame(app, now_s=18.5)
 
     assert frame.rows == (
-        "ADB SERVICE   OK",
+        "C64U REST   FAIL",
+        "PIXEL4        OK",
         "TELNET      FAIL",
+        "U64 REST      OK",
     )
     assert frame.failure_spans == (
-        TextSpan(row_index=1, start_column=12, end_column=16),
+        TextSpan(row_index=0, start_column=12, end_column=16),
+        TextSpan(row_index=2, start_column=12, end_column=16),
     )
-    assert frame.shift_offset == (0, 16)
+    assert frame.shift_offset == (0, 28)
+    assert frame.bottom_pixels == (6,)
+    assert frame.bottom_pixel_width_px == 2
+    assert frame.bottom_pixel_height_px == 2
 
 
 def test_build_runtime_app_skips_boot_logo_for_eink(monkeypatch):

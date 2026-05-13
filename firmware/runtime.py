@@ -21,7 +21,7 @@ except ImportError:  # pragma: no cover - imported on-device
 
 from vivipi.core.input import InputController
 from vivipi.core.config import parse_probe_schedule_config
-from vivipi.core.display import normalize_display_config
+from vivipi.core.display import normalize_display_config, reserved_bottom_indicator_px
 from vivipi.core.logging import bound_text
 from vivipi.core.models import DiagnosticEvent, DisplayMode, TransitionThresholds
 from vivipi.core.probe_trace import ProbeTraceCollector
@@ -369,14 +369,6 @@ def _watchdog_timeout_ms(definitions, boot_logo_duration_s: float, button_self_t
     return max(WATCHDOG_MIN_TIMEOUT_MS, min(WATCHDOG_MAX_TIMEOUT_MS, timeout_ms))
 
 
-def _reserved_bottom_indicator_px(display_config) -> int:
-    if not isinstance(display_config, dict) or str(display_config.get("family", "")).strip().lower() != "eink":
-        return 0
-    liveness = dict(display_config.get("liveness", {})) if isinstance(display_config, dict) else {}
-    heartbeat = dict(liveness.get("bottom_heartbeat", {})) if isinstance(liveness.get("bottom_heartbeat", {}), dict) else {}
-    return max(0, int(heartbeat.get("pixel_height_px", 1))) + max(0, int(heartbeat.get("gap_px", 0)))
-
-
 def _build_runtime_watchdog(definitions, boot_logo_duration_s: float, button_self_test_s: float):
     if machine is None or not hasattr(machine, "WDT"):
         return _NoopRuntimeWatchdog()
@@ -665,7 +657,7 @@ def build_runtime_app(
     font = display_config.get("font", {}) if isinstance(display_config, dict) else {}
     font_width = int(getattr(display, "font_width", int(font.get("width_px", 8)) if isinstance(font, dict) else 8))
     font_height = int(getattr(display, "font_height", int(font.get("height_px", 8)) if isinstance(font, dict) else 8))
-    text_height_px = max(1, int(display_config.get("height_px", 64)) - _reserved_bottom_indicator_px(display_config))
+    text_height_px = max(1, int(display_config.get("height_px", 64)) - reserved_bottom_indicator_px(display_config))
     page_size = max(1, text_height_px // font_height)
     row_width = max(1, int(display_config.get("width_px", 128)) // font_width)
 
@@ -962,20 +954,41 @@ def _eink_status_text(value) -> str:
     return "OK" if str(candidate).strip().upper() == "OK" else "FAIL"
 
 
-def _build_eink_probe_summary_frame(app):
+def _summary_bottom_indicator_px(app) -> int:
+    display_liveness = getattr(app, "display_liveness", {})
+    if not isinstance(display_liveness, dict):
+        return 0
+    heartbeat = display_liveness.get("bottom_heartbeat", {})
+    if not isinstance(heartbeat, dict):
+        return 0
+    return max(0, int(heartbeat.get("pixel_height_px", 0))) + max(0, int(heartbeat.get("gap_px", 0)))
+
+
+def _summary_bottom_pixels(app, now_s: float) -> tuple[int, ...]:
+    frame_bottom_pixels = getattr(app, "_frame_bottom_pixels", None)
+    if callable(frame_bottom_pixels):
+        return tuple(int(pixel_x) for pixel_x in frame_bottom_pixels(now_s))
+    return ()
+
+
+def _build_eink_probe_summary_frame(app, now_s: float = 0.0):
     state = getattr(app, "state", None)
     row_width = max(1, int(getattr(state, "row_width", 16)))
     display = getattr(app, "display", None)
     row_height = max(8, int(getattr(display, "font_height", 8)))
     registered_results = getattr(app, "registered_results", {})
     definitions = tuple(getattr(app, "definitions", ()))
+    summary_rows = []
     rows = []
     failure_spans = []
 
-    for row_index, definition in enumerate(definitions):
+    for definition in definitions:
         current = registered_results.get(definition.identifier, {}) if isinstance(registered_results, dict) else {}
         name_text = str(current.get("name") or getattr(definition, "name", getattr(definition, "identifier", "CHECK")))
         status_text = _eink_status_text(current.get("status"))
+        summary_rows.append((name_text.casefold(), str(getattr(definition, "identifier", "")), name_text, status_text))
+
+    for row_index, (_, _, name_text, status_text) in enumerate(sorted(summary_rows, key=lambda item: (item[0], item[1]))):
         name_width = max(1, row_width - len(status_text) - 1)
         rows.append(f"{_fit_row(name_text[:name_width], name_width)} {status_text}")
         if status_text == "FAIL":
@@ -992,10 +1005,18 @@ def _build_eink_probe_summary_frame(app):
 
     content_height_px = len(rows) * row_height
     display_height_px = int(getattr(display, "height", content_height_px))
+    reserved_bottom_px = _summary_bottom_indicator_px(app)
+    content_area_height_px = max(0, display_height_px - reserved_bottom_px)
+    display_liveness = getattr(app, "display_liveness", {})
+    bottom_heartbeat = display_liveness.get("bottom_heartbeat", {}) if isinstance(display_liveness, dict) else {}
     return Frame(
         rows=tuple(rows),
-        shift_offset=(0, max(0, (display_height_px - content_height_px) // 2)),
+        shift_offset=(0, max(0, (content_area_height_px - content_height_px) // 2)),
         failure_spans=tuple(failure_spans),
+        bottom_pixels=_summary_bottom_pixels(app, now_s),
+        bottom_pixel_width_px=int(bottom_heartbeat.get("pixel_width_px", 1)) if isinstance(bottom_heartbeat, dict) else 1,
+        bottom_pixel_height_px=int(bottom_heartbeat.get("pixel_height_px", 1)) if isinstance(bottom_heartbeat, dict) else 1,
+        bottom_pixel_gap_px=int(bottom_heartbeat.get("gap_px", 0)) if isinstance(bottom_heartbeat, dict) else 0,
     )
 
 
@@ -1008,7 +1029,7 @@ def _run_eink_probe_summary(app, now_s, watchdog=None):
             _feed_watchdog(watchdog)
             app._run_check(definition, now_s, manual=True)
     _feed_watchdog(watchdog)
-    frame = _build_eink_probe_summary_frame(app)
+    frame = _build_eink_probe_summary_frame(app, now_s=now_s)
     getattr(app, "display", HeadlessDisplay()).draw_frame(frame)
     _feed_watchdog(watchdog)
 

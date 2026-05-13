@@ -7,8 +7,14 @@ from vivipi.core.diagnostics import append_diagnostic_lines
 from vivipi.core.models import AppMode, AppState, CheckObservation, CheckRuntime, DiagnosticEvent, DisplayMode, Status, TransitionThresholds
 
 
+def _check_sort_key(check: CheckRuntime) -> tuple[str, str]:
+    name = check.name if isinstance(check.name, str) else str(check.name)
+    identifier = check.identifier if isinstance(check.identifier, str) else str(check.identifier)
+    return (name.casefold(), identifier.casefold())
+
+
 def sort_checks(checks: tuple[CheckRuntime, ...]) -> tuple[CheckRuntime, ...]:
-    return tuple(checks)
+    return tuple(sorted(checks, key=_check_sort_key))
 
 
 def normalize_selection(

@@ -514,6 +514,7 @@ def test_epaper_v4_show_buffers_clears_once_then_streams_vendor_landscape_order(
 
     assert phases == [
         "clear",
+        "init",
         (0x24, list(range(8))),
         (0x26, list(range(20, 28))),
         "refresh",

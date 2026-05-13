@@ -205,6 +205,101 @@ class WaveshareEPaper213BV4Display:
             failure_by_row.setdefault(int(span.row_index), []).append((int(span.start_column), int(span.end_column)))
         return failure_by_row
 
+    def _framebuf_glyph_rows(self, character):
+        if framebuf is None:
+            return ()
+
+        glyph_cache = getattr(self, "_framebuf_glyph_rows_cache", None)
+        if glyph_cache is None:
+            glyph_cache = {}
+            self._framebuf_glyph_rows_cache = glyph_cache
+
+        if not character:
+            character = " "
+        else:
+            codepoint = ord(character[0])
+            if not (32 <= codepoint <= 126):
+                character = "?"
+            else:
+                character = character[0]
+
+        cached = glyph_cache.get(character)
+        if cached is not None:
+            return cached
+
+        glyph_buffer = getattr(self, "_framebuf_glyph_buffer", None)
+        glyph_surface = getattr(self, "_framebuf_glyph_surface", None)
+        if glyph_buffer is None or glyph_surface is None:
+            glyph_buffer = bytearray(8)
+            glyph_surface = framebuf.FrameBuffer(glyph_buffer, 8, 8, framebuf.MONO_VLSB)
+            self._framebuf_glyph_buffer = glyph_buffer
+            self._framebuf_glyph_surface = glyph_surface
+
+        glyph_surface.fill(0)
+        glyph_surface.text(character, 0, 0, 1)
+        rows = []
+        for y in range(8):
+            bits = 0
+            for x in range(8):
+                if glyph_surface.pixel(x, y):
+                    bits |= 1 << x
+            rows.append(bits)
+        rendered_rows = tuple(rows)
+        glyph_cache[character] = rendered_rows
+        return rendered_rows
+
+    def _scaled_axis_spans(self, target_size):
+        span_cache = getattr(self, "_scaled_axis_spans_cache", None)
+        if span_cache is None:
+            span_cache = {}
+            self._scaled_axis_spans_cache = span_cache
+
+        target_size = max(1, int(target_size))
+        cached = span_cache.get(target_size)
+        if cached is not None:
+            return cached
+
+        spans = []
+        for source_index in range(8):
+            start = (source_index * target_size) // 8
+            end = ((source_index + 1) * target_size) // 8
+            if end <= start:
+                end = start + 1
+            spans.append((start, end))
+        rendered_spans = tuple(spans)
+        span_cache[target_size] = rendered_spans
+        return rendered_spans
+
+    def _draw_scaled_framebuf_char(self, surface, character, origin_x, origin_y, color_name):
+        source_rows = self._framebuf_glyph_rows(character)
+        if not source_rows:
+            return
+
+        rotation = int(getattr(self, "rotation", 0))
+        x_spans = self._scaled_axis_spans(getattr(self, "font_width", 16))
+        y_spans = self._scaled_axis_spans(getattr(self, "font_height", 16))
+
+        fill_calls = 0
+        for source_y, row_bits in enumerate(source_rows):
+            if not row_bits:
+                continue
+            start_y, end_y = y_spans[source_y]
+            rect_height = max(1, end_y - start_y)
+            for source_x in range(8):
+                if not (row_bits & (1 << source_x)):
+                    continue
+                start_x, end_x = x_spans[source_x]
+                rect_width = max(1, end_x - start_x)
+                pixel_x = origin_x + start_x
+                pixel_y = origin_y + start_y
+                if rotation == 180:
+                    pixel_x = self.width - origin_x - end_x
+                    pixel_y = self.height - origin_y - end_y
+                surface.fill_rect(pixel_x, pixel_y, rect_width, rect_height, color_name)
+                fill_calls += 1
+                if (fill_calls & 0x0F) == 0:
+                    self._feed_watchdog()
+
     def _draw_rotated_glyph(self, surface, glyph_pixels, origin_x, origin_y, color_name):
         rotation = int(getattr(self, "rotation", 0))
 
@@ -225,10 +320,12 @@ class WaveshareEPaper213BV4Display:
         failure_by_row = self._row_failure_columns(frame)
         glyph_width = max(1, int(getattr(self, "font_width", 16)))
         glyph_height = max(1, int(getattr(self, "font_height", 16)))
-        glyph_lookup = getattr(self, "_glyph_lookup", None)
-        if glyph_lookup is None:
-            glyph_lookup = self._glyph_builder(glyph_width, glyph_height)
-            self._glyph_lookup = glyph_lookup
+        glyph_lookup = None
+        if framebuf is None:
+            glyph_lookup = getattr(self, "_glyph_lookup", None)
+            if glyph_lookup is None:
+                glyph_lookup = self._glyph_builder(glyph_width, glyph_height)
+                self._glyph_lookup = glyph_lookup
 
         for row_index, row in enumerate(getattr(frame, "rows", ())):
             self._feed_watchdog()
@@ -244,13 +341,11 @@ class WaveshareEPaper213BV4Display:
                     if start_column <= column_index < end_column:
                         is_failure = True
                         break
-                self._draw_rotated_glyph(
-                    surface,
-                    glyph_lookup(character),
-                    x,
-                    y,
-                    "red" if is_failure else surface.foreground_color,
-                )
+                color_name = "red" if is_failure else surface.foreground_color
+                if framebuf is not None:
+                    self._draw_scaled_framebuf_char(surface, character, x, y, color_name)
+                else:
+                    self._draw_rotated_glyph(surface, glyph_lookup(character), x, y, color_name)
                 self._feed_watchdog()
 
         bottom_pixel_width = max(1, int(getattr(frame, "bottom_pixel_width_px", 1)))
@@ -393,6 +488,7 @@ class WaveshareEPaper213BV4Display:
         if not getattr(self, "_panel_primed", False):
             self._clear_panel()
             self._panel_primed = True
+        self._initialize()
         self._send_landscape_plane(0x24, black_buffer)
         self._send_landscape_plane(0x26, accent_buffer)
         self._refresh()
