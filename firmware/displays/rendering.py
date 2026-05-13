@@ -55,7 +55,26 @@ def _source_overlap_weights(target_size):
     return tuple(weights)
 
 
-def _scale_glyph_pixels(source_rows, font_width, font_height):
+def _sample_glyph_pixels(source_rows, font_width, font_height):
+    scaled_x = _sample_source_coordinates(font_width)
+    scaled_y = _sample_source_coordinates(font_height)
+    pixels = []
+
+    for y, source_y in enumerate(scaled_y):
+        row_bits = source_rows[source_y]
+        for x, source_x in enumerate(scaled_x):
+            if row_bits & (1 << source_x):
+                pixels.append((x, y))
+
+    return tuple(pixels)
+
+
+def _scale_glyph_pixels(source_rows, font_width, font_height, raster_mode="coverage"):
+    if raster_mode == "sampled":
+        return _sample_glyph_pixels(source_rows, font_width, font_height)
+    if raster_mode != "coverage":
+        raise ValueError(f"unsupported glyph raster mode: {raster_mode}")
+
     x_weights = _source_overlap_weights(font_width)
     y_weights = _source_overlap_weights(font_height)
     center_x = _sample_source_coordinates(font_width)
@@ -91,7 +110,7 @@ def _normalize_character(value):
     return "?"
 
 
-def _build_glyph_lookup(font_width, font_height):
+def _build_glyph_lookup(font_width, font_height, raster_mode="coverage"):
     if framebuf is None:
         raise RuntimeError("framebuf is required when no glyph_lookup is provided")
 
@@ -136,7 +155,7 @@ def _build_glyph_lookup(font_width, font_height):
             return cached
 
         source_rows = glyph_rows(character)
-        scaled = _scale_glyph_pixels(source_rows, font_width, font_height)
+        scaled = _scale_glyph_pixels(source_rows, font_width, font_height, raster_mode=raster_mode)
         scaled_glyph_cache[character] = scaled
         return scaled
 
@@ -422,8 +441,11 @@ def render_to_surface(frame, surface, font_width, font_height, glyph_lookup, fai
 
         _draw_text(surface, row, x_offset, y, font_width, text_color, glyph_lookup)
 
-    for pixel_x in getattr(frame, "bottom_pixels", ()):  # bottom-row liveness uses the reserved baseline scanline.
-        surface.set_pixel(int(pixel_x), surface.height - 1, surface.foreground_color)
+    bottom_pixel_width = max(1, int(getattr(frame, "bottom_pixel_width_px", 1)))
+    bottom_pixel_height = max(1, int(getattr(frame, "bottom_pixel_height_px", 1)))
+    bottom_pixel_y = max(0, surface.height - bottom_pixel_height)
+    for pixel_x in getattr(frame, "bottom_pixels", ()):  # bottom-row liveness uses the reserved baseline band.
+        surface.fill_rect(int(pixel_x), bottom_pixel_y, bottom_pixel_width, bottom_pixel_height, surface.foreground_color)
 
     return surface
 

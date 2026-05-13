@@ -11,6 +11,7 @@ except ImportError:  # pragma: no cover - MicroPython fallback
 DEFAULT_DISPLAY_TYPE = "waveshare-pico-oled-1.3"
 DEFAULT_GRID_COLUMNS = 16
 DEFAULT_GRID_ROWS = 8
+EPAPER_DEFAULT_ROW_CANDIDATES = (7, 8, 9, 10)
 MIN_FONT_SIZE_PX = 6
 MAX_FONT_SIZE_PX = 32
 DEFAULT_FAILURE_COLOR = "red"
@@ -46,6 +47,26 @@ LCD_SPI_PINS = dict(DEFAULT_SPI_PINS)
 LCD_SPI_PINS["bl"] = "GP13"
 EPAPER_SPI_PINS = dict(DEFAULT_SPI_PINS)
 EPAPER_SPI_PINS["busy"] = "GP13"
+
+DEFAULT_BOTTOM_HEARTBEAT = {
+    "enabled": False,
+    "period_s": 20,
+    "pixel_count": 1,
+    "position": "left",
+    "pixel_width_px": 1,
+    "pixel_height_px": 1,
+    "gap_px": 0,
+}
+
+EPAPER_BOTTOM_HEARTBEAT = {
+    "enabled": False,
+    "period_s": 20,
+    "pixel_count": 1,
+    "position": "left",
+    "pixel_width_px": 2,
+    "pixel_height_px": 2,
+    "gap_px": 3,
+}
 
 
 def _fold(value: object) -> str:
@@ -624,6 +645,14 @@ def _parse_bottom_pixel_count(value: object, context: str, default: int) -> int:
     return count
 
 
+def _parse_bottom_pixel_size(value: object, context: str, default: int) -> int:
+    return _parse_positive_int(default if value is None else value, context)
+
+
+def _parse_bottom_gap_px(value: object, context: str, default: int) -> int:
+    return _parse_non_negative_int(value, context, default)
+
+
 def _parse_liveness_position(value: object, context: str, default: str) -> str:
     if value is None:
         return default
@@ -635,7 +664,7 @@ def _parse_liveness_position(value: object, context: str, default: str) -> str:
     return normalized
 
 
-def _parse_display_liveness(value: object) -> dict[str, object]:
+def _parse_display_liveness(value: object, heartbeat_defaults: Mapping[str, object] | None = None) -> dict[str, object]:
     if value is None:
         raw = {}
     elif isinstance(value, Mapping):
@@ -666,6 +695,10 @@ def _parse_display_liveness(value: object) -> dict[str, object]:
         heartbeat = dict(heartbeat_raw)
     else:
         raise ValueError("device.display.liveness.bottom_heartbeat must be a mapping")
+
+    resolved_heartbeat_defaults = dict(DEFAULT_BOTTOM_HEARTBEAT)
+    if heartbeat_defaults is not None:
+        resolved_heartbeat_defaults.update(dict(heartbeat_defaults))
 
     return {
         "contrast_breathing": {
@@ -706,25 +739,64 @@ def _parse_display_liveness(value: object) -> dict[str, object]:
             "enabled": _parse_bool(
                 heartbeat.get("enabled"),
                 "device.display.liveness.bottom_heartbeat.enabled",
-                False,
+                bool(resolved_heartbeat_defaults["enabled"]),
             ),
             "period_s": _parse_liveness_period_s(
                 heartbeat.get("period_s"),
                 "device.display.liveness.bottom_heartbeat.period_s",
-                20,
+                int(resolved_heartbeat_defaults["period_s"]),
             ),
             "pixel_count": _parse_bottom_pixel_count(
                 heartbeat.get("pixel_count"),
                 "device.display.liveness.bottom_heartbeat.pixel_count",
-                1,
+                int(resolved_heartbeat_defaults["pixel_count"]),
             ),
             "position": _parse_liveness_position(
                 heartbeat.get("position"),
                 "device.display.liveness.bottom_heartbeat.position",
-                "right",
+                str(resolved_heartbeat_defaults["position"]),
+            ),
+            "pixel_width_px": _parse_bottom_pixel_size(
+                heartbeat.get("pixel_width_px"),
+                "device.display.liveness.bottom_heartbeat.pixel_width_px",
+                int(resolved_heartbeat_defaults["pixel_width_px"]),
+            ),
+            "pixel_height_px": _parse_bottom_pixel_size(
+                heartbeat.get("pixel_height_px"),
+                "device.display.liveness.bottom_heartbeat.pixel_height_px",
+                int(resolved_heartbeat_defaults["pixel_height_px"]),
+            ),
+            "gap_px": _parse_bottom_gap_px(
+                heartbeat.get("gap_px"),
+                "device.display.liveness.bottom_heartbeat.gap_px",
+                int(resolved_heartbeat_defaults["gap_px"]),
             ),
         },
     }
+
+
+def _reserved_bottom_indicator_px(family: str, liveness: Mapping[str, object]) -> int:
+    if family != "eink":
+        return 0
+    heartbeat = dict(liveness.get("bottom_heartbeat", {})) if isinstance(liveness, Mapping) else {}
+    return int(heartbeat.get("pixel_height_px", 0)) + int(heartbeat.get("gap_px", 0))
+
+
+def _infer_eink_medium_font(width_px: int, height_px: int, target_size_px: int, reserved_bottom_px: int) -> dict[str, int]:
+    usable_height_px = max(MIN_FONT_SIZE_PX, int(height_px) - max(0, int(reserved_bottom_px)))
+    candidates = []
+    for row_count in EPAPER_DEFAULT_ROW_CANDIDATES:
+        cell_height = usable_height_px // row_count
+        if cell_height < MIN_FONT_SIZE_PX or cell_height > MAX_FONT_SIZE_PX:
+            continue
+        candidates.append((usable_height_px % row_count, abs(cell_height - target_size_px), abs(row_count - DEFAULT_GRID_ROWS), row_count, cell_height))
+
+    if not candidates:
+        fallback = max(MIN_FONT_SIZE_PX, min(MAX_FONT_SIZE_PX, target_size_px))
+        return {"width_px": fallback, "height_px": fallback}
+
+    _, _, _, _, cell_height = min(candidates)
+    return {"width_px": cell_height, "height_px": cell_height}
 
 
 def _canonical_display_type(value: str) -> str:
@@ -891,12 +963,21 @@ def normalize_display_config(raw_display: object) -> dict[str, object]:
         raise ValueError("device.display.pins must be a mapping")
 
     font_size = _parse_font_size_name(font.get("size"))
+    heartbeat_defaults = EPAPER_BOTTOM_HEARTBEAT if definition["family"] == "eink" else DEFAULT_BOTTOM_HEARTBEAT
+    liveness = _parse_display_liveness(display.get("liveness"), heartbeat_defaults=heartbeat_defaults)
     default_font = infer_default_font(
         definition["width_px"],
         definition["height_px"],
         float(definition["diagonal_in"]),
         size_name=font_size,
     )
+    if definition["family"] == "eink" and font.get("width_px") is None and font.get("height_px") is None and font_size == DEFAULT_FONT_SIZE:
+        default_font = _infer_eink_medium_font(
+            definition["width_px"],
+            definition["height_px"],
+            int(default_font["height_px"]),
+            _reserved_bottom_indicator_px(definition["family"], liveness),
+        )
     resolved_pins = dict(definition["pins"])
     for pin_name, pin_value in pins.items():
         if not isinstance(pin_value, str) or not pin_value.strip():
@@ -932,7 +1013,7 @@ def normalize_display_config(raw_display: object) -> dict[str, object]:
             "width_px": _parse_font_size_px(font.get("width_px"), "device.display.font.width_px", default_font["width_px"]),
             "height_px": _parse_font_size_px(font.get("height_px"), "device.display.font.height_px", default_font["height_px"]),
         },
-        "liveness": _parse_display_liveness(display.get("liveness")),
+        "liveness": liveness,
         "pins": resolved_pins,
     }
 

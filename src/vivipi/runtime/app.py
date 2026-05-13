@@ -163,7 +163,15 @@ def _normalize_display_liveness(display_liveness: object) -> dict[str, dict[str,
     defaults = {
         "contrast_breathing": {"enabled": False, "period_s": 45, "amplitude": 8},
         "per_row_micro": {"enabled": False, "period_s": 15, "stagger": True},
-        "bottom_heartbeat": {"enabled": False, "period_s": 1, "pixel_count": 1, "position": "left"},
+        "bottom_heartbeat": {
+            "enabled": False,
+            "period_s": 1,
+            "pixel_count": 1,
+            "position": "left",
+            "pixel_width_px": 1,
+            "pixel_height_px": 1,
+            "gap_px": 0,
+        },
     }
     if display_liveness is None:
         return defaults
@@ -210,6 +218,9 @@ def _normalize_display_liveness(display_liveness: object) -> dict[str, dict[str,
         min(3, int(normalized["bottom_heartbeat"].get("pixel_count", 1))),
     )
     normalized["bottom_heartbeat"]["position"] = str(normalized["bottom_heartbeat"].get("position", "left"))
+    normalized["bottom_heartbeat"]["pixel_width_px"] = max(1, int(normalized["bottom_heartbeat"].get("pixel_width_px", 1)))
+    normalized["bottom_heartbeat"]["pixel_height_px"] = max(1, int(normalized["bottom_heartbeat"].get("pixel_height_px", 1)))
+    normalized["bottom_heartbeat"]["gap_px"] = max(0, int(normalized["bottom_heartbeat"].get("gap_px", 0)))
     return normalized
 
 
@@ -237,6 +248,7 @@ class RuntimeApp:
         probe_time_provider=_monotonic_now_s,
         version: str = "",
         build_time: str = "",
+        display_family: str = "oled",
     ):
         if page_interval_s < 0:
             raise ValueError("page_interval_s must not be negative")
@@ -254,6 +266,7 @@ class RuntimeApp:
         self.display_liveness = _normalize_display_liveness(display_liveness)
         self.sleep_ms = sleep_ms
         self.probe_time_provider = probe_time_provider
+        self.display_family = str(display_family).strip().lower()
         self.base_display_contrast = int(getattr(display, "contrast", 128)) if hasattr(display, "contrast") else None
         self.last_started_at: dict[str, float] = {}
         self.last_completed_at: dict[str, float] = {}
@@ -1273,6 +1286,8 @@ class RuntimeApp:
     def _render_probe_progress(self, now_s: float):
         if not self.display_liveness["bottom_heartbeat"].get("enabled"):
             return
+        if self.display_family == "eink":
+            return
         self.render_once(float(now_s))
 
     def _run_due_checks(self, now_s: float):
@@ -1471,8 +1486,9 @@ class RuntimeApp:
             display_width_px,
             int(config.get("pixel_count", 1)),
             str(config.get("position", "left")),
+            pixel_width_px=int(config.get("pixel_width_px", 1)),
             step_index=self.bottom_heartbeat_step,
-            step_px=1,
+            step_px=int(config.get("pixel_width_px", 1)),
         )
 
     def _current_liveness_signature(self, now_s: float) -> tuple[int | None, tuple[int, ...]]:
@@ -1496,6 +1512,9 @@ class RuntimeApp:
             frame,
             rows=tuple(rows),
             bottom_pixels=self._frame_bottom_pixels(now_s),
+            bottom_pixel_width_px=int(self.display_liveness["bottom_heartbeat"].get("pixel_width_px", 1)),
+            bottom_pixel_height_px=int(self.display_liveness["bottom_heartbeat"].get("pixel_height_px", 1)),
+            bottom_pixel_gap_px=int(self.display_liveness["bottom_heartbeat"].get("gap_px", 0)),
             contrast=self._frame_contrast(now_s),
         )
 

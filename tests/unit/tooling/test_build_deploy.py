@@ -219,6 +219,9 @@ def test_load_build_deploy_settings_substitutes_environment_placeholders(tmp_pat
         "period_s": 1,
         "pixel_count": 1,
         "position": "left",
+        "pixel_width_px": 1,
+        "pixel_height_px": 1,
+        "gap_px": 0,
     }
     assert settings["device"]["display"]["mode"] == "standard"
     assert settings["device"]["display"]["columns"] == 1
@@ -885,7 +888,7 @@ def test_load_build_deploy_settings_infers_epaper_metadata_from_type(tmp_path: P
     assert settings["device"]["display"]["width_px"] == 250
     assert settings["device"]["display"]["height_px"] == 122
     assert settings["device"]["display"]["font_size"] == "medium"
-    assert settings["device"]["display"]["font"] == {"width_px": 10, "height_px": 10}
+    assert settings["device"]["display"]["font"] == {"width_px": 13, "height_px": 13}
     assert settings["device"]["display"]["page_interval_s"] == 180
     assert settings["device"]["display"]["pins"]["busy"] == "GP13"
 

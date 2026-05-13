@@ -29,6 +29,9 @@ class Frame:
     inverted_spans: tuple[InvertedSpan, ...] = ()
     failure_spans: tuple[TextSpan, ...] = ()
     bottom_pixels: tuple[int, ...] = ()
+    bottom_pixel_width_px: int = 1
+    bottom_pixel_height_px: int = 1
+    bottom_pixel_gap_px: int = 0
     contrast: int | None = None
 
 

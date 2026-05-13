@@ -80,6 +80,9 @@ def test_normalize_display_config_accepts_liveness_configuration():
         "period_s": 20,
         "pixel_count": 3,
         "position": "center",
+        "pixel_width_px": 1,
+        "pixel_height_px": 1,
+        "gap_px": 0,
     }
 
 
@@ -102,6 +105,9 @@ def test_normalize_display_config_parses_liveness_string_values_and_rejects_inva
         "period_s": 3,
         "pixel_count": 2,
         "position": "left",
+        "pixel_width_px": 1,
+        "pixel_height_px": 1,
+        "gap_px": 0,
     }
 
     with pytest.raises(ValueError, match="device.display.liveness must be a mapping"):
@@ -162,11 +168,20 @@ def test_normalize_display_config_infers_epaper_defaults_from_type_only():
     assert config["width_px"] == 250
     assert config["height_px"] == 122
     assert config["font_size"] == "medium"
-    assert config["font"] == {"width_px": 10, "height_px": 10}
+    assert config["font"] == {"width_px": 13, "height_px": 13}
     assert config["rotation"] == 0
     assert config["page_interval_s"] == 180
     assert config["pins"]["busy"] == "GP13"
     assert config["failure_color"] == "red"
+    assert config["liveness"]["bottom_heartbeat"] == {
+        "enabled": False,
+        "period_s": 20,
+        "pixel_count": 1,
+        "position": "left",
+        "pixel_width_px": 2,
+        "pixel_height_px": 2,
+        "gap_px": 3,
+    }
 
 
 def test_supported_font_sizes_expose_symbolic_presets():

@@ -71,6 +71,8 @@ Display brightness MUST be configurable at build time for display types that sup
 - E-paper display types do not expose brightness control
 - `device.display.liveness` MAY configure an optional bottom-row device-health indicator
 - When enabled on the default OLED overview, the bottom heartbeat SHOULD use a single pixel that advances by one pixel for each completed probe
+- `device.display.liveness.bottom_heartbeat` MAY configure `pixel_count`, `pixel_width_px`, `pixel_height_px`, and `gap_px`
+- When `pixel_width_px` is greater than `1`, heartbeat progress MUST advance in steps of that configured width
 - If `device.display.liveness` is omitted, all liveness indicators MUST default to disabled
 
 [VIVIPI-DISPLAY-002]

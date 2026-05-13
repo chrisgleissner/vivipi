@@ -3,7 +3,8 @@ from types import SimpleNamespace
 import pytest
 
 import firmware.runtime as firmware_runtime
-from vivipi.core.models import DiagnosticEvent, DisplayMode, ProbeSchedulingPolicy, TransitionThresholds
+from vivipi.core.render import TextSpan
+from vivipi.core.models import CheckDefinition, CheckType, DiagnosticEvent, DisplayMode, ProbeSchedulingPolicy, TransitionThresholds
 
 
 class FakeTime:
@@ -188,6 +189,7 @@ def test_build_runtime_app_uses_injected_factories_and_defers_wifi_startup():
             probe_time_provider,
             version="",
             build_time="",
+            display_family="oled",
         ):
             called["definitions"] = definitions
             called["executor"] = executor
@@ -209,6 +211,7 @@ def test_build_runtime_app_uses_injected_factories_and_defers_wifi_startup():
             called["probe_time_provider"] = probe_time_provider
             called["version"] = version
             called["build_time"] = build_time
+            called["display_family"] = display_family
             called["diagnostics"] = None
             called["network_refreshes"] = []
 
@@ -290,10 +293,19 @@ def test_build_runtime_app_uses_injected_factories_and_defers_wifi_startup():
     assert called["display_liveness"] == {
         "contrast_breathing": {"enabled": False, "period_s": 30, "amplitude": 16},
         "per_row_micro": {"enabled": False, "period_s": 15, "stagger": True},
-        "bottom_heartbeat": {"enabled": True, "period_s": 1, "pixel_count": 1, "position": "left"},
+        "bottom_heartbeat": {
+            "enabled": True,
+            "period_s": 1,
+            "pixel_count": 1,
+            "position": "left",
+            "pixel_width_px": 1,
+            "pixel_height_px": 1,
+            "gap_px": 0,
+        },
     }
     assert called["version"] == "1.2.3"
     assert called["build_time"] == "2025-04-05T12:00Z"
+    assert called["display_family"] == "oled"
     assert called["diagnostics"] is None
     assert called["network_refreshes"] == [{}]
     assert wifi_calls == []
@@ -316,6 +328,45 @@ def test_build_executor_with_optional_trace_uses_trace_sink_when_runtime_app_exp
 
     assert built.__self__ is app
     assert built.__func__ is FakeApp.emit_probe_trace
+
+
+def test_build_runtime_app_passes_eink_family_to_runtime_app():
+    called = {}
+
+    class FakeApp:
+        def __init__(self, **kwargs):
+            called.update(kwargs)
+
+        def inject_diagnostics(self, diagnostics, activate=True):
+            called["diagnostics"] = (diagnostics, activate)
+
+        def configure_observability(self, **kwargs):
+            called["observability"] = kwargs
+
+        def _refresh_network_state(self, **kwargs):
+            called.setdefault("network_refreshes", []).append(kwargs)
+
+    app = firmware_runtime.build_runtime_app(
+        {
+            "project": {},
+            "device": {
+                "display": {"type": "waveshare-pico-epaper-2.13-b-v4"},
+                "buttons": {"a": "GP15", "b": "GP17"},
+            },
+        },
+        input_controller_factory=lambda: object(),
+        display_factory=lambda config: SimpleNamespace(show_boot_logo=lambda version: None),
+        button_reader_factory=lambda config, input_controller: object(),
+        runtime_app_factory=FakeApp,
+        definitions_builder=lambda config: (),
+        executor_factory=lambda trace_sink=None: object(),
+        wifi_connector=lambda config: (),
+        now_provider=lambda: 0.0,
+        sleep_ms=lambda ms: None,
+    )
+
+    assert isinstance(app, FakeApp)
+    assert called["display_family"] == "eink"
 
 
 def test_visible_degraded_from_config_defaults_true_and_parses_boolean_strings():
@@ -588,10 +639,10 @@ def test_build_runtime_app_infers_geometry_and_page_interval_from_display_type()
     assert captured_display["config"]["width_px"] == 250
     assert captured_display["config"]["height_px"] == 122
     assert captured_display["config"]["font_size"] == "medium"
-    assert captured_display["config"]["font"] == {"width_px": 10, "height_px": 10}
+    assert captured_display["config"]["font"] == {"width_px": 13, "height_px": 13}
     assert captured_display["config"]["rotation"] == 0
-    assert called["row_width"] == 25
-    assert called["page_size"] == 12
+    assert called["row_width"] == 19
+    assert called["page_size"] == 9
     assert called["page_interval_s"] == 180
 
 
@@ -1036,6 +1087,162 @@ def test_run_forever_connects_network_before_waiting_for_boot_logo(monkeypatch):
     assert events == [("network", 12.5), ("wait", 16.5)]
     assert fake_app.prime_calls == [(16.5, True)]
     assert fake_app.tick_calls == [(16.5, (), True)]
+
+
+def test_build_eink_probe_summary_frame_formats_ok_and_fail_rows():
+    display = SimpleNamespace(height=64)
+    definitions = (
+        CheckDefinition(identifier="adb", name="ADB SERVICE", check_type=CheckType.HTTP, target="adb"),
+        CheckDefinition(identifier="telnet", name="TELNET", check_type=CheckType.TELNET, target="telnet"),
+    )
+    app = SimpleNamespace(
+        state=SimpleNamespace(row_width=16),
+        display=display,
+        definitions=definitions,
+        registered_results={
+            "adb": {"name": "ADB SERVICE", "status": "OK"},
+            "telnet": {"name": "TELNET", "status": "FAIL"},
+        },
+    )
+
+    frame = firmware_runtime._build_eink_probe_summary_frame(app)
+
+    assert frame.rows == (
+        "ADB SERVICE   OK",
+        "TELNET      FAIL",
+    )
+    assert frame.failure_spans == (
+        TextSpan(row_index=1, start_column=12, end_column=16),
+    )
+    assert frame.shift_offset == (0, 24)
+
+
+def test_run_eink_probe_summary_runs_checks_and_draws_frame():
+    definitions = (
+        CheckDefinition(identifier="adb", name="ADB", check_type=CheckType.HTTP, target="adb"),
+        CheckDefinition(identifier="ping", name="PING", check_type=CheckType.PING, target="ping"),
+    )
+    display = firmware_runtime.HeadlessDisplay()
+    calls = []
+
+    class Watchdog:
+        def __init__(self):
+            self.feed_calls = 0
+
+        def feed(self):
+            self.feed_calls += 1
+            return True
+
+    app = SimpleNamespace(
+        state=SimpleNamespace(row_width=16),
+        display=display,
+        definitions=definitions,
+        registered_results={
+            "adb": {"name": "ADB", "status": "?"},
+            "ping": {"name": "PING", "status": "?"},
+        },
+        run_all_checks=lambda now_s: calls.append(now_s) or app.registered_results.update(
+            {
+                "adb": {"name": "ADB", "status": "OK"},
+                "ping": {"name": "PING", "status": "FAIL"},
+            }
+        ),
+    )
+    watchdog = Watchdog()
+
+    firmware_runtime._run_eink_probe_summary(app, 18.5, watchdog=watchdog)
+
+    assert calls == [18.5]
+    assert watchdog.feed_calls == 3
+    assert len(display.frames) == 1
+    assert display.frames[0].rows == (
+        "ADB           OK",
+        "PING        FAIL",
+    )
+
+
+def test_run_forever_runs_eink_summary_then_holds_static(monkeypatch):
+    class FakeApp:
+        def __init__(self):
+            self.boot_logo_until_s = 18.5
+            self.display_family = "eink"
+
+    fake_app = FakeApp()
+    called = {"run_loop": 0, "hold": 0, "summary": []}
+
+    monkeypatch.setattr(firmware_runtime, "build_runtime_app_from_path", lambda path: fake_app)
+    monkeypatch.setattr(firmware_runtime, "_now_s", lambda: 12.5)
+    startup_network_calls = []
+    button_test_calls = []
+    monkeypatch.setattr(firmware_runtime, "_run_startup_network", lambda app, now_s: startup_network_calls.append((app, now_s)) or now_s)
+    monkeypatch.setattr(
+        firmware_runtime,
+        "_maybe_run_button_self_test_from_app",
+        lambda app, now_provider, sleep_ms, watchdog=None: button_test_calls.append((app, watchdog)),
+    )
+    monkeypatch.setattr(
+        firmware_runtime,
+        "_wait_for_boot_logo",
+        lambda app, now_provider=None, sleep_ms=None, watchdog=None: 18.5,
+    )
+    monkeypatch.setattr(
+        firmware_runtime,
+        "run_loop",
+        lambda app, poll_interval_ms=50, now_provider=None, watchdog=None: called.__setitem__("run_loop", called["run_loop"] + 1),
+    )
+    monkeypatch.setattr(
+        firmware_runtime,
+        "_run_eink_probe_summary",
+        lambda app, now_s, watchdog=None: called["summary"].append((app, now_s, watchdog)),
+    )
+    monkeypatch.setattr(
+        firmware_runtime,
+        "hold_safe_display",
+        lambda poll_interval_ms=20, sleep_ms=None, watchdog=None, iterations=None: called.__setitem__("hold", called["hold"] + 1),
+    )
+
+    firmware_runtime.run_forever(poll_interval_ms=75)
+
+    assert called == {"run_loop": 0, "hold": 1, "summary": [(fake_app, 18.5, None)]}
+    assert startup_network_calls == []
+    assert button_test_calls == []
+
+
+def test_render_eink_safe_hold_screen_draws_sparse_text_frame():
+    display = firmware_runtime.HeadlessDisplay()
+    app = SimpleNamespace(display=display, state=SimpleNamespace(row_width=19))
+
+    firmware_runtime._render_eink_safe_hold_screen(app, 18.5)
+
+    assert len(display.frames) == 1
+    assert display.frames[0].rows == (
+        "VIVIPI EPAPER      ",
+        "SAFE HOLD MODE     ",
+        "STATIC SCREEN      ",
+    )
+
+
+def test_hold_safe_display_feeds_watchdog_while_idle():
+    class Watchdog:
+        def __init__(self):
+            self.feed_calls = 0
+
+        def feed(self):
+            self.feed_calls += 1
+            return True
+
+    sleeps = []
+    watchdog = Watchdog()
+
+    firmware_runtime.hold_safe_display(
+        poll_interval_ms=75,
+        sleep_ms=lambda value: sleeps.append(value),
+        watchdog=watchdog,
+        iterations=3,
+    )
+
+    assert sleeps == [75, 75, 75]
+    assert watchdog.feed_calls == 3
 
 
 def test_run_startup_tick_uses_prime_due_checks_when_available():

@@ -496,25 +496,30 @@ def test_epaper_v4_initialize_matches_vendor_landscape_profile():
     ]
 
 
-def test_epaper_v4_show_buffers_streams_vendor_landscape_order():
+def test_epaper_v4_show_buffers_primes_panel_then_streams_vendor_landscape_order():
     display = WaveshareEPaper213BV4Display.__new__(WaveshareEPaper213BV4Display)
     display.width = 4
     display.height = 9
+    display.surface_height = 16
+    display._panel_primed = False
 
-    commands = []
-    payloads = []
     phases = []
 
+    display._clear_panel = lambda: phases.append("clear")
     display._initialize = lambda: phases.append("init")
-    display._command = lambda value: commands.append(value)
-    display._data = lambda values: payloads.append(int(values))
+    display._send_landscape_plane = lambda command, buffer: phases.append((command, list(buffer)))
     display._refresh = lambda: phases.append("refresh")
 
     display._show_buffers(bytearray(range(8)), bytearray(range(20, 28)))
 
-    assert commands == [0x24, 0x26]
-    assert payloads == [4, 5, 6, 7, 0, 1, 2, 3, 24, 25, 26, 27, 20, 21, 22, 23]
-    assert phases == ["refresh"]
+    assert phases == [
+        "clear",
+        "init",
+        (0x24, list(range(8))),
+        (0x26, list(range(20, 28))),
+        "refresh",
+    ]
+    assert display._panel_primed is True
 
 
 def test_epaper_v4_wait_until_idle_matches_vendor_polling(monkeypatch):
@@ -566,7 +571,13 @@ def test_epaper_v4_constructor_uses_busy_pull_up_when_available(monkeypatch):
 
     monkeypatch.setattr(waveshare_epaper_module, "Pin", FakePin)
     monkeypatch.setattr(waveshare_epaper_module, "SPI", FakeSPI)
-    monkeypatch.setattr(waveshare_epaper_module, "_build_glyph_lookup", lambda width, height: fake_glyph_lookup)
+    glyph_modes = []
+
+    def fake_builder(width, height, raster_mode="coverage"):
+        glyph_modes.append(raster_mode)
+        return fake_glyph_lookup
+
+    monkeypatch.setattr(waveshare_epaper_module, "_build_glyph_lookup", fake_builder)
     init_calls = []
     monkeypatch.setattr(waveshare_epaper_module.WaveshareEPaper213BV4Display, "_initialize", lambda self: init_calls.append(True))
 
@@ -583,7 +594,10 @@ def test_epaper_v4_constructor_uses_busy_pull_up_when_available(monkeypatch):
     assert display.busy.number == 13
     assert display.busy.mode == FakePin.IN
     assert display.busy.pull == FakePin.PULL_UP
-    assert display.spi.init_calls == [{"baudrate": 4_000_000}]
+    assert len(display.spi.init_calls) == 1
+    init_kwargs = display.spi.init_calls[0]
+    assert init_kwargs["baudrate"] == 4_000_000
+    assert glyph_modes == ["coverage"]
     assert init_calls == [True]
 
 
