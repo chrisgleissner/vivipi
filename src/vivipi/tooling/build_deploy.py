@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import grp
 import ipaddress
 import json
@@ -15,10 +16,12 @@ import time
 from pathlib import Path
 from textwrap import dedent
 from urllib.parse import urlparse
+from urllib.request import urlretrieve
 
 import yaml
 
 from vivipi.core.config import parse_checks_config
+from vivipi.core.device_inventory import resolve_device_inventory_state
 from vivipi.core.display import (
     _parse_brightness as _core_parse_brightness,
     _parse_column_separator as _core_parse_column_separator,
@@ -28,6 +31,7 @@ from vivipi.core.display import (
     _parse_font_size_px as _core_parse_font_size_px,
     normalize_display_config,
 )
+from vivipi.core.multi_device_config import expand_multi_device_settings, is_multi_device_settings
 from vivipi.core.models import CheckDefinition, CheckType
 
 
@@ -39,6 +43,9 @@ PRERELEASE_VERSION_PATTERN = re.compile(r"^(\d+\.\d+\.\d+)-?(a|b|rc)(\d+)$")
 MPREMOTE_COMMAND_TIMEOUT_S = 20
 MPREMOTE_RECOVERY_TIMEOUT_S = 10
 MPREMOTE_RECOVERY_ATTEMPTS = 1
+DEFAULT_SINGLE_DEVICE_ID = "default"
+DEVICE_ARTIFACTS_DIRNAME = "devices"
+BOOTSEL_MOUNT_PATTERN = re.compile(r" at (?P<mount>/[^\n.]+)")
 
 
 def _default_run_command(command: list[str], *, check: bool, timeout: int | None = None):
@@ -125,23 +132,70 @@ def _resolve_placeholders(
     return value
 
 
-def load_build_deploy_settings(path: str | Path, env: dict[str, str] | None = None) -> dict[str, object]:
+def _load_raw_build_deploy_settings(path: str | Path, env: dict[str, str] | None = None) -> dict[str, object]:
     config_path = Path(path)
     raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     resolved = _resolve_placeholders(raw, env or dict(os.environ), optional_placeholders=OPTIONAL_PLACEHOLDERS)
 
-    service = resolved.get("service")
+    return resolved
+
+
+def _normalize_build_deploy_settings(settings: dict[str, object]) -> dict[str, object]:
+    normalized = copy.deepcopy(settings)
+
+    service = normalized.get("service")
     if isinstance(service, dict):
         base_url = service.get("base_url")
         if isinstance(base_url, str) and not base_url.strip():
             service.pop("base_url", None)
-        _normalize_service_settings(resolved)
+        _normalize_service_settings(normalized)
 
-    _normalize_device_display_settings(resolved)
-    _normalize_check_state_settings(resolved)
-    _normalize_probe_schedule_settings(resolved)
+    _normalize_device_display_settings(normalized)
+    _normalize_check_state_settings(normalized)
+    _normalize_probe_schedule_settings(normalized)
 
-    return resolved
+    return normalized
+
+
+def load_build_deploy_settings(path: str | Path, env: dict[str, str] | None = None) -> dict[str, object]:
+    return _normalize_build_deploy_settings(_load_raw_build_deploy_settings(path, env=env))
+
+
+def load_multi_device_build_deploy_settings(path: str | Path, env: dict[str, str] | None = None) -> dict[str, dict[str, object]]:
+    resolved = _load_raw_build_deploy_settings(path, env=env)
+    expanded = expand_multi_device_settings(resolved)
+    return {
+        device_id: _normalize_build_deploy_settings(device_settings)
+        for device_id, device_settings in expanded.items()
+    }
+
+
+def load_selected_build_deploy_settings(
+    path: str | Path,
+    *,
+    env: dict[str, str] | None = None,
+    device_id: str | None = None,
+    all_devices: bool = False,
+) -> dict[str, dict[str, object]]:
+    resolved = _load_raw_build_deploy_settings(path, env=env)
+    if is_multi_device_settings(resolved):
+        devices = {
+            current_id: _normalize_build_deploy_settings(device_settings)
+            for current_id, device_settings in expand_multi_device_settings(resolved).items()
+        }
+        if all_devices:
+            return devices
+        if device_id is None:
+            raise ValueError("multi-device config requires --device or --all-devices")
+        if device_id not in devices:
+            raise ValueError(f"unknown device id: {device_id}")
+        return {device_id: devices[device_id]}
+
+    if device_id is not None and device_id != DEFAULT_SINGLE_DEVICE_ID:
+        raise ValueError("single-device config does not define named devices")
+
+    selected = load_build_deploy_settings(path, env=env)
+    return {DEFAULT_SINGLE_DEVICE_ID: selected}
 
 
 def _normalize_service_settings(settings: dict[str, object]):
@@ -725,16 +779,17 @@ def _resolve_checks_path(config_path: Path, settings: dict[str, object]) -> Path
     return (config_path.parent / checks_config).resolve()
 
 
-def write_runtime_config(
-    config_path: str | Path,
+def write_runtime_config_from_settings(
+    source_config_path: str | Path,
+    settings: dict[str, object],
     output_path: str | Path,
+    *,
     env: dict[str, str] | None = None,
     version: str = "",
     build_time: str = "",
 ) -> Path:
-    source_config_path = Path(config_path).resolve()
-    settings = load_build_deploy_settings(source_config_path, env=env)
-    checks = load_runtime_checks(_resolve_checks_path(source_config_path, settings), env=env)
+    resolved_source_path = Path(source_config_path).resolve()
+    checks = load_runtime_checks(_resolve_checks_path(resolved_source_path, settings), env=env)
     validate_runtime_settings(settings, checks)
     runtime_config = render_device_runtime_config(settings, checks)
 
@@ -751,33 +806,27 @@ def write_runtime_config(
     return destination
 
 
-def build_firmware_bundle(
+def write_runtime_config(
     config_path: str | Path,
-    output_dir: str | Path,
+    output_path: str | Path,
     env: dict[str, str] | None = None,
-    version_resolver=None,
-    build_time_resolver=None,
+    version: str = "",
+    build_time: str = "",
 ) -> Path:
-    repository_root = Path(__file__).resolve().parents[3]
-    release_dir = Path(output_dir)
-    release_dir.mkdir(parents=True, exist_ok=True)
-
     source_config_path = Path(config_path).resolve()
     settings = load_build_deploy_settings(source_config_path, env=env)
+    return write_runtime_config_from_settings(
+        source_config_path,
+        settings,
+        output_path,
+        env=env,
+        version=version,
+        build_time=build_time,
+    )
 
-    version = _resolve_release_version(repository_root, version_resolver=version_resolver)
 
-    if build_time_resolver is not None:
-        build_time = build_time_resolver()
-    else:
-        from datetime import datetime, timezone
-        build_time = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
-
-    staging_dir = release_dir / "vivipi-device-fs"
-    if staging_dir.exists():
-        shutil.rmtree(staging_dir)
-    staging_dir.mkdir(parents=True)
-
+def _copy_device_firmware_tree(staging_dir: Path):
+    repository_root = Path(__file__).resolve().parents[3]
     firmware_dir = repository_root / "firmware"
     package_dir = repository_root / "src" / "vivipi"
 
@@ -789,12 +838,553 @@ def build_firmware_bundle(
         else:
             shutil.copy2(item, staging_dir / item.name)
     _copy_release_tree(package_dir, staging_dir / "vivipi")
-    write_runtime_config(source_config_path, staging_dir / "config.json", env=env, version=version, build_time=build_time)
-    write_install_manifest(settings, _versioned_release_path(release_dir, "pico2w-micropython", version, ".txt"))
 
-    archive_path = _versioned_release_path(release_dir, "vivipi-device-filesystem", version, "")
-    built_archive = shutil.make_archive(str(archive_path), "zip", root_dir=staging_dir)
-    return Path(built_archive)
+
+def _build_device_firmware_bundle(
+    source_config_path: Path,
+    settings: dict[str, object],
+    device_output_dir: Path,
+    *,
+    env: dict[str, str] | None,
+    version: str,
+    build_time: str,
+    include_device_config_copy: bool,
+) -> dict[str, Path]:
+    device_output_dir.mkdir(parents=True, exist_ok=True)
+
+    staging_dir = device_output_dir / "vivipi-device-fs"
+    if staging_dir.exists():
+        shutil.rmtree(staging_dir)
+    staging_dir.mkdir(parents=True)
+
+    _copy_device_firmware_tree(staging_dir)
+    runtime_config_path = write_runtime_config_from_settings(
+        source_config_path,
+        settings,
+        staging_dir / "config.json",
+        env=env,
+        version=version,
+        build_time=build_time,
+    )
+    if include_device_config_copy:
+        shutil.copy2(runtime_config_path, device_output_dir / "config.json")
+
+    install_manifest_path = _versioned_release_path(device_output_dir, "pico2w-micropython", version, ".txt")
+    write_install_manifest(settings, install_manifest_path)
+
+    archive_base = _versioned_release_path(device_output_dir, "vivipi-device-filesystem", version, "")
+    built_archive = shutil.make_archive(str(archive_base), "zip", root_dir=staging_dir)
+
+    return {
+        "staging_dir": staging_dir,
+        "runtime_config": runtime_config_path,
+        "install_manifest": install_manifest_path,
+        "bundle": Path(built_archive),
+    }
+
+
+def _device_artifact_root(output_dir: str | Path, device_id: str) -> Path:
+    return Path(output_dir) / DEVICE_ARTIFACTS_DIRNAME / device_id
+
+
+def _write_multi_device_manifest(output_dir: str | Path, manifest_entries: dict[str, dict[str, object]]) -> Path:
+    manifest_path = Path(output_dir) / DEVICE_ARTIFACTS_DIRNAME / "manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps({"devices": manifest_entries}, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return manifest_path
+
+
+def build_firmware_bundles(
+    config_path: str | Path,
+    output_dir: str | Path,
+    *,
+    env: dict[str, str] | None = None,
+    version_resolver=None,
+    build_time_resolver=None,
+    device_id: str | None = None,
+    all_devices: bool = False,
+) -> dict[str, dict[str, Path]]:
+    repository_root = Path(__file__).resolve().parents[3]
+    release_dir = Path(output_dir)
+    release_dir.mkdir(parents=True, exist_ok=True)
+
+    source_config_path = Path(config_path).resolve()
+    selected_settings = load_selected_build_deploy_settings(
+        source_config_path,
+        env=env,
+        device_id=device_id,
+        all_devices=all_devices,
+    )
+    version = _resolve_release_version(repository_root, version_resolver=version_resolver)
+
+    if build_time_resolver is not None:
+        build_time = build_time_resolver()
+    else:
+        from datetime import datetime, timezone
+
+        build_time = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
+
+    multiple_devices = len(selected_settings) > 1 or is_multi_device_settings(_load_raw_build_deploy_settings(source_config_path, env=env))
+    outputs: dict[str, dict[str, Path]] = {}
+    manifest_entries: dict[str, dict[str, object]] = {}
+
+    for current_device_id, settings in selected_settings.items():
+        device_output_dir = _device_artifact_root(release_dir, current_device_id) if multiple_devices else release_dir
+        outputs[current_device_id] = _build_device_firmware_bundle(
+            source_config_path,
+            settings,
+            device_output_dir,
+            env=env,
+            version=version,
+            build_time=build_time,
+            include_device_config_copy=multiple_devices,
+        )
+        manifest_entries[current_device_id] = {
+            "device_id": current_device_id,
+            "display_type": settings.get("device", {}).get("display", {}).get("type"),
+            "checks_config": settings.get("checks_config"),
+            "selectors": settings.get("selector", {}),
+            "runtime_config": str(outputs[current_device_id]["runtime_config"]),
+            "staging_dir": str(outputs[current_device_id]["staging_dir"]),
+            "bundle": str(outputs[current_device_id]["bundle"]),
+            "install_manifest": str(outputs[current_device_id]["install_manifest"]),
+            "build_time": build_time,
+        }
+
+    if multiple_devices:
+        _write_multi_device_manifest(release_dir, manifest_entries)
+
+    return outputs
+
+
+def build_firmware_bundle(
+    config_path: str | Path,
+    output_dir: str | Path,
+    env: dict[str, str] | None = None,
+    version_resolver=None,
+    build_time_resolver=None,
+) -> Path:
+    outputs = build_firmware_bundles(
+        config_path,
+        output_dir,
+        env=env,
+        version_resolver=version_resolver,
+        build_time_resolver=build_time_resolver,
+    )
+    return outputs[DEFAULT_SINGLE_DEVICE_ID]["bundle"]
+
+
+def _list_serial_by_id_candidates() -> list[str]:
+    root = Path("/dev/serial/by-id")
+    if not root.exists():
+        return []
+    return sorted(str(path) for path in root.iterdir())
+
+
+def _list_port_candidates() -> list[str]:
+    candidates = {str(path) for pattern in ("/dev/ttyACM*", "/dev/ttyUSB*") for path in Path("/").glob(pattern[1:])}
+    return sorted(candidates)
+
+
+def _list_bootsel_disk_candidates() -> list[str]:
+    root = Path("/dev/disk/by-id")
+    if not root.exists():
+        return []
+    return sorted(str(path) for path in root.iterdir() if "-part" not in path.name)
+
+
+def _selector_from_settings(settings: dict[str, object]) -> dict[str, str]:
+    selector = settings.get("selector")
+    if isinstance(selector, dict) and selector:
+        return {str(key): str(value) for key, value in selector.items()}
+
+    device = settings.get("device")
+    if isinstance(device, dict):
+        port = device.get("micropython_port")
+        if isinstance(port, str) and port.strip() and port.strip() != DEFAULT_DEPLOY_PORT:
+            return {"port": port.strip()}
+
+    raise ValueError("device inventory requires a selector or explicit device.micropython_port")
+
+
+def resolve_configured_device_inventory(
+    config_path: str | Path,
+    *,
+    env: dict[str, str] | None = None,
+    device_id: str | None = None,
+    all_devices: bool = False,
+    serial_candidates: list[str] | None = None,
+    port_candidates: list[str] | None = None,
+    bootsel_candidates: list[str] | None = None,
+) -> dict[str, object]:
+    selected_settings = load_selected_build_deploy_settings(
+        config_path,
+        env=env,
+        device_id=device_id,
+        all_devices=all_devices,
+    )
+    resolved_serial_candidates = _list_serial_by_id_candidates() if serial_candidates is None else serial_candidates
+    resolved_port_candidates = _list_port_candidates() if port_candidates is None else port_candidates
+    resolved_bootsel_candidates = _list_bootsel_disk_candidates() if bootsel_candidates is None else bootsel_candidates
+
+    return {
+        current_device_id: resolve_device_inventory_state(
+            _selector_from_settings(settings),
+            serial_candidates=resolved_serial_candidates,
+            port_candidates=resolved_port_candidates,
+            bootsel_candidates=resolved_bootsel_candidates,
+        )
+        for current_device_id, settings in selected_settings.items()
+    }
+
+
+def _deploy_staged_device_root(device_root: Path, resolved_port: str, *, run_command) -> None:
+    for item in sorted(device_root.iterdir(), key=lambda value: value.name):
+        command = ["mpremote", "connect", resolved_port, "fs", "cp"]
+        if item.is_dir():
+            command.extend(["-r", str(item), ":"])
+        else:
+            command.extend([str(item), f":{item.name}"])
+        _run_mpremote_command(command, run_command=run_command, recovery_port=resolved_port)
+    _run_mpremote_command(
+        ["mpremote", "connect", resolved_port, "reset"],
+        run_command=run_command,
+        recovery_port=resolved_port,
+    )
+
+
+def _resolve_bootstrap_uf2_path(source_config_path: Path, settings: dict[str, object], device_output_dir: Path) -> Path:
+    bootstrap = settings.get("bootstrap")
+    if not isinstance(bootstrap, dict):
+        raise ValueError("BOOTSEL provisioning requires a bootstrap mapping")
+
+    uf2_path_value = bootstrap.get("uf2_path")
+    if isinstance(uf2_path_value, str) and uf2_path_value.strip():
+        candidate_path = Path(uf2_path_value.strip())
+        if not candidate_path.is_absolute():
+            candidate_path = (source_config_path.parent / candidate_path).resolve()
+        if not candidate_path.exists():
+            raise ValueError(f"bootstrap UF2 not found: {candidate_path}")
+        return candidate_path
+
+    uf2_url_value = bootstrap.get("uf2_url")
+    if isinstance(uf2_url_value, str) and uf2_url_value.strip():
+        parsed = urlparse(uf2_url_value.strip())
+        filename = Path(parsed.path).name or "bootstrap.uf2"
+        destination = device_output_dir / filename
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        urlretrieve(uf2_url_value.strip(), destination)
+        return destination
+
+    raise ValueError("BOOTSEL provisioning requires bootstrap.uf2_path or bootstrap.uf2_url")
+
+
+def _resolve_bootsel_partition_path(bootsel_disk: str) -> Path:
+    disk_path = Path(bootsel_disk)
+    if disk_path.name.endswith("-part1"):
+        return disk_path
+    partition_path = disk_path.with_name(f"{disk_path.name}-part1")
+    if partition_path.exists():
+        return partition_path
+    raise ValueError(f"could not resolve BOOTSEL partition for {bootsel_disk}")
+
+
+def _current_mountpoint(partition_path: Path, *, run_command) -> Path | None:
+    result = _invoke_run_command(
+        run_command,
+        ["lsblk", "-no", "MOUNTPOINT", str(partition_path.resolve())],
+        check=True,
+    )
+    mountpoint = _process_output_text(result).strip()
+    if not mountpoint:
+        return None
+    return Path(mountpoint)
+
+
+def _ensure_bootsel_mountpoint(partition_path: Path, *, run_command) -> Path:
+    current_mountpoint = _current_mountpoint(partition_path, run_command=run_command)
+    if current_mountpoint is not None:
+        return current_mountpoint
+
+    result = _invoke_run_command(
+        run_command,
+        ["udisksctl", "mount", "-b", str(partition_path.resolve())],
+        check=True,
+    )
+    output = _process_output_text(result)
+    match = BOOTSEL_MOUNT_PATTERN.search(output)
+    if match is None:
+        raise RuntimeError(f"could not determine BOOTSEL mountpoint from: {output.strip()}")
+    return Path(match.group("mount"))
+
+
+def _wait_for_serial_state(
+    selector: dict[str, str],
+    *,
+    timeout_s: float,
+    serial_candidates: list[str] | None = None,
+    port_candidates: list[str] | None = None,
+    bootsel_candidates: list[str] | None = None,
+) -> object:
+    deadline = time.monotonic() + timeout_s
+    last_state = None
+    while time.monotonic() <= deadline:
+        last_state = resolve_device_inventory_state(
+            selector,
+            serial_candidates=_list_serial_by_id_candidates() if serial_candidates is None else serial_candidates,
+            port_candidates=_list_port_candidates() if port_candidates is None else port_candidates,
+            bootsel_candidates=_list_bootsel_disk_candidates() if bootsel_candidates is None else bootsel_candidates,
+        )
+        if last_state.state == "serial-ready":
+            return last_state
+        time.sleep(1.0)
+    raise TimeoutError(f"timed out waiting for serial device; last state was {getattr(last_state, 'state', 'unknown')}")
+
+
+def provision_device(
+    config_path: str | Path,
+    settings: dict[str, object],
+    bootsel_disk: str,
+    device_output_dir: Path,
+    *,
+    run_command=None,
+) -> str:
+    effective_run_command = _default_run_command if run_command is None else run_command
+    source_config_path = Path(config_path).resolve()
+    uf2_path = _resolve_bootstrap_uf2_path(source_config_path, settings, device_output_dir)
+    partition_path = _resolve_bootsel_partition_path(bootsel_disk)
+    mountpoint = _ensure_bootsel_mountpoint(partition_path, run_command=effective_run_command)
+    shutil.copy2(uf2_path, mountpoint / uf2_path.name)
+    os.sync()
+
+    bootstrap = settings.get("bootstrap") if isinstance(settings.get("bootstrap"), dict) else {}
+    timeout_s = float(bootstrap.get("serial_timeout_s", 30))
+    selector = _selector_from_settings(settings)
+    serial_state = _wait_for_serial_state(selector, timeout_s=timeout_s)
+    if serial_state.serial_path is None:
+        raise RuntimeError("provisioning completed without a resolved serial path")
+
+    _run_mpremote_command(
+        ["mpremote", "connect", serial_state.serial_path, "fs", "ls", ":"],
+        run_command=effective_run_command,
+        recovery_port=serial_state.serial_path,
+        attempts=0,
+    )
+    return serial_state.serial_path
+
+
+def deploy_firmware_targets(
+    config_path: str | Path,
+    output_dir: str | Path,
+    *,
+    env: dict[str, str] | None = None,
+    device_id: str | None = None,
+    all_devices: bool = False,
+    provision_missing: bool = False,
+    run_command=None,
+    serial_candidates: list[str] | None = None,
+    port_candidates: list[str] | None = None,
+    bootsel_candidates: list[str] | None = None,
+) -> dict[str, dict[str, object]]:
+    effective_run_command = _default_run_command if run_command is None else run_command
+    source_config_path = Path(config_path).resolve()
+    selected_settings = load_selected_build_deploy_settings(
+        source_config_path,
+        env=env,
+        device_id=device_id,
+        all_devices=all_devices,
+    )
+    inventory = resolve_configured_device_inventory(
+        source_config_path,
+        env=env,
+        device_id=device_id,
+        all_devices=all_devices,
+        serial_candidates=serial_candidates,
+        port_candidates=port_candidates,
+        bootsel_candidates=bootsel_candidates,
+    )
+    outputs = build_firmware_bundles(
+        source_config_path,
+        output_dir,
+        env=env,
+        device_id=device_id,
+        all_devices=all_devices,
+    )
+
+    results: dict[str, dict[str, object]] = {}
+    for current_device_id, settings in selected_settings.items():
+        state = inventory[current_device_id]
+        try:
+            resolved_port = None
+            if state.state == "serial-ready":
+                resolved_port = state.serial_path
+            elif state.state == "bootsel" and provision_missing:
+                resolved_port = provision_device(
+                    source_config_path,
+                    settings,
+                    state.bootsel_disk,
+                    _device_artifact_root(output_dir, current_device_id),
+                    run_command=effective_run_command,
+                )
+            elif state.state == "bootsel":
+                raise RuntimeError("device is in BOOTSEL mode; rerun with --provision-missing or provision it explicitly")
+            elif state.state == "missing":
+                raise RuntimeError("device selector did not match any connected hardware")
+            else:
+                raise RuntimeError("device selector matched multiple connected devices")
+
+            if resolved_port is None:
+                raise RuntimeError("could not resolve a serial port for deploy")
+
+            _deploy_staged_device_root(outputs[current_device_id]["staging_dir"], resolved_port, run_command=effective_run_command)
+            results[current_device_id] = {
+                "status": "ok",
+                "state": state.state,
+                "port": resolved_port,
+                "bundle": outputs[current_device_id]["bundle"],
+            }
+        except Exception as error:
+            results[current_device_id] = {
+                "status": "error",
+                "state": state.state,
+                "error": str(error),
+                "bundle": outputs[current_device_id]["bundle"],
+            }
+
+    return results
+
+
+def provision_firmware_targets(
+    config_path: str | Path,
+    output_dir: str | Path,
+    *,
+    env: dict[str, str] | None = None,
+    device_id: str | None = None,
+    all_devices: bool = False,
+    run_command=None,
+    serial_candidates: list[str] | None = None,
+    port_candidates: list[str] | None = None,
+    bootsel_candidates: list[str] | None = None,
+) -> dict[str, dict[str, object]]:
+    effective_run_command = _default_run_command if run_command is None else run_command
+    source_config_path = Path(config_path).resolve()
+    selected_settings = load_selected_build_deploy_settings(
+        source_config_path,
+        env=env,
+        device_id=device_id,
+        all_devices=all_devices,
+    )
+    inventory = resolve_configured_device_inventory(
+        source_config_path,
+        env=env,
+        device_id=device_id,
+        all_devices=all_devices,
+        serial_candidates=serial_candidates,
+        port_candidates=port_candidates,
+        bootsel_candidates=bootsel_candidates,
+    )
+
+    results: dict[str, dict[str, object]] = {}
+    for current_device_id, settings in selected_settings.items():
+        state = inventory[current_device_id]
+        try:
+            if state.state == "serial-ready":
+                results[current_device_id] = {
+                    "status": "ok",
+                    "state": state.state,
+                    "port": state.serial_path,
+                }
+                continue
+            if state.state == "bootsel":
+                device_output_dir = _device_artifact_root(output_dir, current_device_id)
+                resolved_port = provision_device(
+                    source_config_path,
+                    settings,
+                    state.bootsel_disk,
+                    device_output_dir,
+                    run_command=effective_run_command,
+                )
+                results[current_device_id] = {
+                    "status": "ok",
+                    "state": state.state,
+                    "port": resolved_port,
+                }
+                continue
+            if state.state == "missing":
+                raise RuntimeError("device selector did not match any connected hardware")
+            raise RuntimeError("device selector matched multiple connected devices")
+        except Exception as error:
+            results[current_device_id] = {
+                "status": "error",
+                "state": state.state,
+                "error": str(error),
+            }
+
+    return results
+
+
+def write_selected_runtime_config(
+    config_path: str | Path,
+    output_path: str | Path,
+    *,
+    env: dict[str, str] | None = None,
+    device_id: str | None = None,
+) -> Path:
+    source_config_path = Path(config_path).resolve()
+    selected_settings = load_selected_build_deploy_settings(source_config_path, env=env, device_id=device_id)
+    current_device_id, settings = next(iter(selected_settings.items()))
+    return write_runtime_config_from_settings(
+        source_config_path,
+        settings,
+        output_path,
+        env=env,
+        version=settings.get("project", {}).get("version", "") if isinstance(settings.get("project"), dict) else "",
+        build_time=settings.get("project", {}).get("build_time", "") if isinstance(settings.get("project"), dict) else "",
+    )
+
+
+def list_devices(
+    config_path: str | Path,
+    *,
+    env: dict[str, str] | None = None,
+    device_id: str | None = None,
+    all_devices: bool = False,
+) -> dict[str, object]:
+    inventory = resolve_configured_device_inventory(
+        config_path,
+        env=env,
+        device_id=device_id,
+        all_devices=all_devices,
+    )
+    for current_device_id, state in inventory.items():
+        fields = [current_device_id, state.state]
+        if state.serial_path is not None:
+            fields.append(f"serial={state.serial_path}")
+        if state.bootsel_disk is not None:
+            fields.append(f"bootsel={state.bootsel_disk}")
+        print(" ".join(fields))
+    return inventory
+
+
+def _report_operation_results(results: dict[str, dict[str, object]]) -> int:
+    exit_code = 0
+    for current_device_id, result in results.items():
+        status = result.get("status", "unknown")
+        state = result.get("state", "unknown")
+        if status != "ok":
+            exit_code = 1
+        message_parts = [current_device_id, status, f"state={state}"]
+        port = result.get("port")
+        if isinstance(port, str) and port:
+            message_parts.append(f"port={port}")
+        error = result.get("error")
+        if isinstance(error, str) and error:
+            message_parts.append(f"error={error}")
+        print(" ".join(message_parts))
+    return exit_code
 
 
 def _resolve_deploy_port(device: object, port: str | None) -> str:
@@ -842,18 +1432,7 @@ def deploy_firmware(
     effective_run_command = _default_run_command if run_command is None else run_command
 
     try:
-        for item in sorted(device_root.iterdir(), key=lambda value: value.name):
-            command = ["mpremote", "connect", resolved_port, "fs", "cp"]
-            if item.is_dir():
-                command.extend(["-r", str(item), ":"])
-            else:
-                command.extend([str(item), f":{item.name}"])
-            _run_mpremote_command(command, run_command=effective_run_command, recovery_port=resolved_port)
-        _run_mpremote_command(
-            ["mpremote", "connect", resolved_port, "reset"],
-            run_command=effective_run_command,
-            recovery_port=resolved_port,
-        )
+        _deploy_staged_device_root(device_root, resolved_port, run_command=effective_run_command)
     except FileNotFoundError as error:
         raise RuntimeError("mpremote is required for deploy") from error
 
@@ -867,6 +1446,7 @@ def main(argv: list[str] | None = None) -> int:
     render_parser = subparsers.add_parser("render-config", help="Render runtime config JSON")
     render_parser.add_argument("--config", required=True)
     render_parser.add_argument("--output", required=True)
+    render_parser.add_argument("--device")
     render_parser.add_argument(
         "--prefer-local-config",
         action="store_true",
@@ -876,7 +1456,19 @@ def main(argv: list[str] | None = None) -> int:
     bundle_parser = subparsers.add_parser("build-firmware", help="Build a zipped firmware bundle")
     bundle_parser.add_argument("--config", required=True)
     bundle_parser.add_argument("--output-dir", required=True)
+    bundle_parser.add_argument("--device")
+    bundle_parser.add_argument("--all-devices", action="store_true")
     bundle_parser.add_argument(
+        "--prefer-local-config",
+        action="store_true",
+        help="Prefer a sibling <config>.local.yaml file when it exists",
+    )
+
+    list_parser = subparsers.add_parser("list-devices", help="List configured multi-device targets and their current state")
+    list_parser.add_argument("--config", required=True)
+    list_parser.add_argument("--device")
+    list_parser.add_argument("--all-devices", action="store_true")
+    list_parser.add_argument(
         "--prefer-local-config",
         action="store_true",
         help="Prefer a sibling <config>.local.yaml file when it exists",
@@ -896,7 +1488,21 @@ def main(argv: list[str] | None = None) -> int:
     deploy_parser.add_argument("--config", required=True)
     deploy_parser.add_argument("--output-dir", required=True)
     deploy_parser.add_argument("--port")
+    deploy_parser.add_argument("--device")
+    deploy_parser.add_argument("--all-devices", action="store_true")
+    deploy_parser.add_argument("--provision-missing", action="store_true")
     deploy_parser.add_argument(
+        "--prefer-local-config",
+        action="store_true",
+        help="Prefer a sibling <config>.local.yaml file when it exists",
+    )
+
+    provision_parser = subparsers.add_parser("provision-firmware", help="Provision BOOTSEL devices with a base UF2")
+    provision_parser.add_argument("--config", required=True)
+    provision_parser.add_argument("--output-dir", required=True)
+    provision_parser.add_argument("--device")
+    provision_parser.add_argument("--all-devices", action="store_true")
+    provision_parser.add_argument(
         "--prefer-local-config",
         action="store_true",
         help="Prefer a sibling <config>.local.yaml file when it exists",
@@ -906,15 +1512,48 @@ def main(argv: list[str] | None = None) -> int:
     if hasattr(args, "config"):
         args.config = str(resolve_config_path(args.config, prefer_local_config=args.prefer_local_config))
     if args.command == "render-config":
+        if getattr(args, "device", None):
+            write_selected_runtime_config(args.config, args.output, device_id=args.device)
+            return 0
         write_runtime_config(args.config, args.output)
         return 0
+    if args.command == "list-devices":
+        list_devices(args.config, device_id=getattr(args, "device", None), all_devices=args.all_devices)
+        return 0
     if args.command == "build-firmware":
+        if args.all_devices or getattr(args, "device", None):
+            build_firmware_bundles(
+                args.config,
+                args.output_dir,
+                device_id=getattr(args, "device", None),
+                all_devices=args.all_devices,
+            )
+            return 0
         build_firmware_bundle(args.config, args.output_dir)
         return 0
     if args.command == "stage-release-assets":
         stage_release_assets(args.config, args.output_dir, args.dist_dir)
         return 0
+    if args.command == "provision-firmware":
+        return _report_operation_results(
+            provision_firmware_targets(
+                args.config,
+                args.output_dir,
+                device_id=getattr(args, "device", None),
+                all_devices=args.all_devices,
+            )
+        )
     if args.command == "deploy-firmware":
+        if args.all_devices or getattr(args, "device", None):
+            return _report_operation_results(
+                deploy_firmware_targets(
+                    args.config,
+                    args.output_dir,
+                    device_id=getattr(args, "device", None),
+                    all_devices=args.all_devices,
+                    provision_missing=args.provision_missing,
+                )
+            )
         deploy_firmware(args.config, args.output_dir, port=args.port)
         return 0
     raise ValueError(f"unsupported command: {args.command}")

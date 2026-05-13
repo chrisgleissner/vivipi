@@ -35,8 +35,8 @@ class WaveshareEPaper213BV4Surface:
         self.background_color = background_color
         self.foreground_color = foreground_color
         self.supported_colors = ("white", "black", "red")
-        self.padded_height = ((height + 7) // 8) * 8
-        self.row_bytes = self.padded_height // 8
+        self.surface_height = ((height + 7) // 8) * 8
+        self.row_bytes = self.surface_height // 8
         self.black_buffer = bytearray(width * self.row_bytes)
         self.accent_buffer = bytearray(width * self.row_bytes)
         self.clear(background_color)
@@ -44,23 +44,21 @@ class WaveshareEPaper213BV4Surface:
     def can_render_color(self, color_name):
         return color_name in self.supported_colors
 
-    def clear(self, color_name):
+    def _encoded_bytes(self, color_name):
         if color_name == "black":
-            fill_black = 0x00
-            fill_accent = 0xFF
-        elif color_name == "red":
-            fill_black = 0xFF
-            fill_accent = 0x00
-        else:
-            fill_black = 0xFF
-            fill_accent = 0xFF
+            return 0x00, 0xFF
+        if color_name == "red":
+            return 0xFF, 0x00
+        return 0xFF, 0xFF
 
+    def clear(self, color_name):
+        fill_black, fill_accent = self._encoded_bytes(color_name)
         for index in range(len(self.black_buffer)):
             self.black_buffer[index] = fill_black
             self.accent_buffer[index] = fill_accent
 
     def _index_and_mask(self, x, y):
-        byte_index = (x * self.row_bytes) + (y // 8)
+        byte_index = x + ((y // 8) * self.logical_width)
         bit_mask = 1 << (y % 8)
         return byte_index, bit_mask
 
@@ -110,16 +108,23 @@ class WaveshareEPaper213BV4Display:
         self.rst = Pin(_pin_number(pins["rst"]), Pin.OUT)
         self.cs = Pin(_pin_number(pins["cs"]), Pin.OUT)
         self.busy = Pin(_pin_number(pins["busy"]), Pin.IN)
-        self.spi = spi or SPI(
-            1,
-            baudrate=4_000_000,
-            polarity=0,
-            phase=0,
-            sck=Pin(_pin_number(pins["clk"])),
-            mosi=Pin(_pin_number(pins["din"])),
-        )
+        self.spi = spi or SPI(1)
+        if spi is None and hasattr(self.spi, "init"):
+            self.spi.init(baudrate=4_000_000)
         self._glyph_lookup = _build_glyph_lookup(self.font_width, self.font_height)
         self.surface_height = ((self.height + 7) // 8) * 8
+
+    @property
+    def surface_height_px(self):
+        return int(getattr(self, "surface_height", ((self.height + 7) // 8) * 8))
+
+    @property
+    def transport_width_px(self):
+        return int(self.surface_height_px)
+
+    @property
+    def transport_height_px(self):
+        return int(self.width)
 
     def _command(self, value):
         self.cs(1)
@@ -145,43 +150,62 @@ class WaveshareEPaper213BV4Display:
 
     def _reset(self):
         self.rst(1)
-        _sleep_ms(20)
+        _sleep_ms(50)
         self.rst(0)
         _sleep_ms(2)
         self.rst(1)
-        _sleep_ms(20)
+        _sleep_ms(50)
+
+    def _set_windows(self, x_start, y_start, x_end, y_end):
+        self._command(0x44)
+        self._data(bytearray([(x_start >> 3) & 0xFF, (x_end >> 3) & 0xFF]))
+        self._command(0x45)
+        self._data(
+            bytearray(
+                [
+                    y_start & 0xFF,
+                    (y_start >> 8) & 0xFF,
+                    y_end & 0xFF,
+                    (y_end >> 8) & 0xFF,
+                ]
+            )
+        )
+
+    def _set_cursor(self, x_start, y_start):
+        self._command(0x4E)
+        self._data(x_start & 0xFF)
+        self._command(0x4F)
+        self._data(bytearray([y_start & 0xFF, (y_start >> 8) & 0xFF]))
 
     def _initialize(self):
         self._reset()
         self._wait_until_idle()
         self._command(0x12)
         self._wait_until_idle()
-
         self._command(0x01)
         self._data(bytearray([0xF9, 0x00, 0x00]))
         self._command(0x11)
         self._data(0x07)
-
-        self._command(0x44)
-        self._data(bytearray([0x00, self.row_bytes - 1]))
-        self._command(0x45)
-        self._data(bytearray([0x00, 0x00, (self.width - 1) & 0xFF, ((self.width - 1) >> 8) & 0xFF]))
-
+        self._set_windows(0, 0, self.transport_width_px - 1, self.transport_height_px - 1)
+        self._set_cursor(0, 0)
         self._command(0x3C)
         self._data(0x05)
         self._command(0x18)
         self._data(0x80)
         self._command(0x21)
         self._data(bytearray([0x80, 0x80]))
-        self._command(0x4E)
-        self._data(0x00)
-        self._command(0x4F)
-        self._data(bytearray([0x00, 0x00]))
         self._wait_until_idle()
 
     @property
     def row_bytes(self):
-        return self.surface_height // 8
+        return self.surface_height_px // 8
+
+    def _send_landscape_plane(self, command, buffer):
+        self._command(command)
+        for column_group in range(self.row_bytes - 1, -1, -1):
+            base_index = column_group * self.width
+            for row in range(self.width):
+                self._data(buffer[base_index + row])
 
     def _refresh(self):
         self._command(0x20)
@@ -195,10 +219,8 @@ class WaveshareEPaper213BV4Display:
 
     def _show_buffers(self, black_buffer, accent_buffer):
         self._initialize()
-        self._command(0x24)
-        self._data(black_buffer)
-        self._command(0x26)
-        self._data(accent_buffer)
+        self._send_landscape_plane(0x24, black_buffer)
+        self._send_landscape_plane(0x26, accent_buffer)
         self._refresh()
         self._sleep()
 

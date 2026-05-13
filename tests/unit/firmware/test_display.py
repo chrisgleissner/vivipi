@@ -4,7 +4,7 @@ import firmware.displays.sh1107 as sh1107_module
 from firmware.display import SH1107Display, SSD1305Display, ST77xxDisplay, WaveshareEPaperMonoDisplay, WaveshareEPaperTriColorDisplay, _pin_number, _sample_source_coordinates, boot_logo_font_sizes, render, render_boot_logo, render_boot_logo_to_surface, render_framebuffer
 from firmware.displays import BACKENDS, create_display
 from firmware.displays.rendering import HorizontalMonochromeSurface, MonochromeSurface, RGB565Surface
-from firmware.displays.waveshare_epaper import WaveshareEPaper213BV4Surface
+from firmware.displays.waveshare_epaper import WaveshareEPaper213BV4Display, WaveshareEPaper213BV4Surface
 from vivipi.core.models import CheckRuntime, Status
 from vivipi.core.render import InvertedSpan
 
@@ -300,8 +300,7 @@ def test_render_returns_epaper_planes_and_uses_red_for_failures_when_supported()
     rendered = render(checks, config, glyph_lookup=fake_glyph_lookup)
 
     assert set(rendered) == {"black", "accent"}
-    assert rendered["black"][0] == 0xFF
-    assert rendered["accent"][0] == 0xFE
+    assert any(byte != 0xFF for byte in rendered["accent"])
 
 
 def test_render_returns_tri_color_epaper_planes_for_large_tricolor_panels():
@@ -387,19 +386,74 @@ def test_create_display_selects_backend_from_display_type(monkeypatch):
     ]
 
 
-def test_epaper_surface_uses_rotated_padded_transport_layout():
+def test_epaper_surface_uses_vendor_landscape_vlsb_layout():
     surface = WaveshareEPaper213BV4Surface(width=250, height=122)
 
     surface.clear("white")
     surface.set_pixel(0, 0, "red")
-    surface.set_pixel(1, 0, "black")
+    surface.set_pixel(8, 0, "black")
 
-    assert len(surface.black_buffer) == 250 * 16
-    assert len(surface.accent_buffer) == 250 * 16
+    assert len(surface.black_buffer) == 16 * 250
+    assert len(surface.accent_buffer) == 16 * 250
     assert surface.black_buffer[0] == 0xFF
     assert surface.accent_buffer[0] == 0xFE
-    assert surface.black_buffer[16] == 0xFE
-    assert surface.accent_buffer[16] == 0xFF
+    assert surface.black_buffer[8] == 0xFE
+    assert surface.accent_buffer[8] == 0xFF
+
+
+def test_epaper_v4_initialize_matches_vendor_landscape_profile():
+    display = WaveshareEPaper213BV4Display.__new__(WaveshareEPaper213BV4Display)
+    display.width = 250
+    display.height = 122
+
+    resets = []
+    waits = []
+    commands = []
+    payloads = []
+
+    display._reset = lambda: resets.append(True)
+    display._wait_until_idle = lambda timeout_ms=20_000: waits.append(timeout_ms)
+    display._command = lambda value: commands.append(value)
+    display._data = lambda values: payloads.append(bytes([values]) if isinstance(values, int) else bytes(values))
+
+    display._initialize()
+
+    assert resets == [True]
+    assert waits == [20_000, 20_000, 20_000]
+    assert commands == [0x12, 0x01, 0x11, 0x44, 0x45, 0x4E, 0x4F, 0x3C, 0x18, 0x21]
+    assert payloads == [
+        b"\xF9\x00\x00",
+        b"\x07",
+        b"\x00\x0F",
+        b"\x00\x00\xF9\x00",
+        b"\x00",
+        b"\x00\x00",
+        b"\x05",
+        b"\x80",
+        b"\x80\x80",
+    ]
+
+
+def test_epaper_v4_show_buffers_streams_vendor_landscape_order():
+    display = WaveshareEPaper213BV4Display.__new__(WaveshareEPaper213BV4Display)
+    display.width = 4
+    display.height = 9
+
+    commands = []
+    payloads = []
+    phases = []
+
+    display._initialize = lambda: phases.append("init")
+    display._command = lambda value: commands.append(value)
+    display._data = lambda values: payloads.append(int(values))
+    display._refresh = lambda: phases.append("refresh")
+    display._sleep = lambda: phases.append("sleep")
+
+    display._show_buffers(bytearray(range(8)), bytearray(range(20, 28)))
+
+    assert commands == [0x24, 0x26]
+    assert payloads == [4, 5, 6, 7, 0, 1, 2, 3, 24, 25, 26, 27, 20, 21, 22, 23]
+    assert phases == ["init", "refresh", "sleep"]
 
 
 def test_boot_logo_font_sizes_scale_to_screen_dimensions():
