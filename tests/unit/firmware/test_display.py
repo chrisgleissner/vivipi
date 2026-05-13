@@ -4,7 +4,7 @@ import firmware.displays.sh1107 as sh1107_module
 import firmware.displays.waveshare_epaper as waveshare_epaper_module
 from firmware.display import SH1107Display, SSD1305Display, ST77xxDisplay, WaveshareEPaperMonoDisplay, WaveshareEPaperTriColorDisplay, _pin_number, _sample_source_coordinates, boot_logo_font_sizes, render, render_boot_logo, render_boot_logo_to_surface, render_framebuffer
 from firmware.displays import BACKENDS, create_display
-from firmware.displays.rendering import HorizontalMonochromeSurface, MonochromeSurface, RGB565Surface
+from firmware.displays.rendering import HorizontalMonochromeSurface, MonochromeSurface, RGB565Surface, render_to_surface
 from firmware.displays.waveshare_epaper import WaveshareEPaper213BV4Display, WaveshareEPaper213BV4Surface
 from vivipi.core.models import CheckRuntime, Status
 from vivipi.core.render import InvertedSpan
@@ -14,6 +14,16 @@ def fake_glyph_lookup(character):
     if character == " ":
         return ()
     return ((0, 0),)
+
+
+def lit_pixels(buffer, width, height):
+    pixels = set()
+    for y in range(height):
+        for x in range(width):
+            byte_index = x + ((y // 8) * width)
+            if buffer[byte_index] & (1 << (y % 8)):
+                pixels.add((x, y))
+    return pixels
 
 
 def test_pin_number_parses_gpio_names():
@@ -252,6 +262,36 @@ def test_render_framebuffer_draws_bottom_heartbeat():
     buffer = render_framebuffer(frame, width=8, height=8, font_width=8, font_height=8, glyph_lookup=fake_glyph_lookup)
 
     assert list(buffer) == [0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x80, 0x80]
+
+
+def test_render_to_surface_supports_180_degree_rotation():
+    frame = SimpleNamespace(
+        rows=("A ",),
+        inverted_row=None,
+        shift_offset=(0, 0),
+        inverted_spans=(),
+        failure_spans=(),
+        bottom_pixels=(),
+    )
+    surface = MonochromeSurface(2, 8)
+
+    render_to_surface(frame, surface, 1, 1, fake_glyph_lookup, rotation=180)
+
+    assert lit_pixels(surface.buffer, 2, 8) == {(1, 7)}
+
+
+def test_render_boot_logo_to_surface_supports_180_degree_rotation():
+    normal = MonochromeSurface(64, 32)
+    rotated = MonochromeSurface(64, 32)
+
+    render_boot_logo_to_surface(normal, "1", glyph_builder=lambda w, h: fake_glyph_lookup)
+    render_boot_logo_to_surface(rotated, "1", glyph_builder=lambda w, h: fake_glyph_lookup, rotation=180)
+
+    normal_pixels = lit_pixels(normal.buffer, normal.width, normal.height)
+    rotated_pixels = lit_pixels(rotated.buffer, rotated.width, rotated.height)
+
+    assert normal_pixels
+    assert rotated_pixels == {(rotated.width - 1 - x, rotated.height - 1 - y) for x, y in normal_pixels}
 
 
 def test_render_returns_a_deterministic_buffer_for_compact_failed_columns():

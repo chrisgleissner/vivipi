@@ -911,6 +911,25 @@ def test_load_build_deploy_settings_accepts_symbolic_font_size(tmp_path: Path):
     assert settings["device"]["display"]["font"]["height_px"] >= 12
 
 
+def test_load_build_deploy_settings_accepts_display_rotation_180(tmp_path: Path):
+    config_path = tmp_path / "build-deploy.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "device:",
+                "  display:",
+                "    type: waveshare-pico-epaper-2.13-b-v4",
+                "    rotation: 180",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    settings = load_build_deploy_settings(config_path, env={})
+
+    assert settings["device"]["display"]["rotation"] == 180
+
+
 def test_load_build_deploy_settings_rejects_oled_geometry_override(tmp_path: Path):
     config_path = tmp_path / "build-deploy.yaml"
     config_path.write_text(

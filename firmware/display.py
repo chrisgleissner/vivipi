@@ -77,6 +77,7 @@ def _render_display_config(config):
         "columns": int(display_config.get("columns", 1)),
         "column_separator": str(display_config.get("column_separator", " ")),
         "failure_color": str(display_config.get("failure_color", "red")),
+        "rotation": int(display_config.get("rotation", 0)),
         "font": font,
     }
 
@@ -102,25 +103,26 @@ def render_display_buffers(checks, config, selected_id=None, page_index=0, shift
     )
     frame = render_frame(state)
     failure_color = str(display_config.get("failure_color", "red"))
+    rotation = int(display_config.get("rotation", 0))
     if display_config.get("family") == "eink":
         if "red" in tuple(display_config.get("colors", ())):
             if str(display_config.get("type", "")) == "waveshare-pico-epaper-2.13-b-v4":
                 surface = WaveshareEPaper213BV4Surface(width, height)
             else:
                 surface = TriColorSurface(width, height)
-            render_to_surface(frame, surface, font_width, font_height, glyph_lookup, failure_color=failure_color)
+            render_to_surface(frame, surface, font_width, font_height, glyph_lookup, failure_color=failure_color, rotation=rotation)
             return {"black": surface.black_buffer, "accent": surface.accent_buffer}
         surface = HorizontalMonochromeSurface(width, height)
-        render_to_surface(frame, surface, font_width, font_height, glyph_lookup, failure_color=failure_color)
+        render_to_surface(frame, surface, font_width, font_height, glyph_lookup, failure_color=failure_color, rotation=rotation)
         return surface.buffer
 
     if display_config.get("family") == "lcd":
         surface = RGB565Surface(width, height)
-        render_to_surface(frame, surface, font_width, font_height, glyph_lookup, failure_color=failure_color)
+        render_to_surface(frame, surface, font_width, font_height, glyph_lookup, failure_color=failure_color, rotation=rotation)
         return surface.buffer
 
     surface = MonochromeSurface(width, height)
-    render_to_surface(frame, surface, font_width, font_height, glyph_lookup, failure_color=failure_color)
+    render_to_surface(frame, surface, font_width, font_height, glyph_lookup, failure_color=failure_color, rotation=rotation)
     return surface.buffer
 
 

@@ -589,6 +589,7 @@ def test_build_runtime_app_infers_geometry_and_page_interval_from_display_type()
     assert captured_display["config"]["height_px"] == 122
     assert captured_display["config"]["font_size"] == "medium"
     assert captured_display["config"]["font"] == {"width_px": 10, "height_px": 10}
+    assert captured_display["config"]["rotation"] == 0
     assert called["row_width"] == 25
     assert called["page_size"] == 12
     assert called["page_interval_s"] == 180

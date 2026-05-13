@@ -18,6 +18,7 @@ DEFAULT_FONT_SIZE = "medium"
 DEFAULT_BOOT_LOGO_DURATION_S = 4
 DISPLAY_MODES = frozenset({"standard", "compact"})
 LIVENESS_POSITIONS = frozenset({"left", "center", "right"})
+DISPLAY_ROTATIONS = frozenset({0, 180})
 BRIGHTNESS_PRESETS = {
     "low": 64,
     "medium": 128,
@@ -571,6 +572,23 @@ def _parse_failure_color(value: object) -> str:
     return normalized
 
 
+def _parse_rotation(value: object) -> int:
+    if value is None:
+        rotation = 0
+    elif isinstance(value, int):
+        rotation = value
+    elif isinstance(value, float) and value.is_integer():
+        rotation = int(value)
+    elif isinstance(value, str) and value.strip().isdigit():
+        rotation = int(value.strip())
+    else:
+        raise ValueError("device.display.rotation must be 0 or 180")
+
+    if rotation not in DISPLAY_ROTATIONS:
+        raise ValueError("device.display.rotation must be 0 or 180")
+    return rotation
+
+
 def _parse_bool(value: object, context: str, default: bool) -> bool:
     if value is None:
         return default
@@ -898,6 +916,7 @@ def normalize_display_config(raw_display: object) -> dict[str, object]:
         "columns": _parse_columns(display.get("columns")),
         "column_separator": _parse_column_separator(display.get("column_separator")),
         "failure_color": _parse_failure_color(display.get("failure_color")),
+        "rotation": _parse_rotation(display.get("rotation")),
         "page_interval_s": _parse_duration_s(page_interval_value, "device.display.page_interval"),
         "boot_logo_duration_s": DEFAULT_BOOT_LOGO_DURATION_S,
         "column_offset": _parse_non_negative_int(

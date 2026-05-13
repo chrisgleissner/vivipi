@@ -296,6 +296,43 @@ class TriColorSurface:
                 self.set_pixel(x + delta_x, pixel_y, color_name)
 
 
+class _RotatedSurface:
+    def __init__(self, surface, rotation):
+        self._surface = surface
+        self.width = surface.width
+        self.height = surface.height
+        self.background_color = surface.background_color
+        self.foreground_color = surface.foreground_color
+        self.rotation = rotation
+
+    def __getattr__(self, name):
+        return getattr(self._surface, name)
+
+    def clear(self, color_name):
+        self._surface.clear(color_name)
+
+    def can_render_color(self, color_name):
+        return self._surface.can_render_color(color_name)
+
+    def set_pixel(self, x, y, color_name):
+        if self.rotation == 180:
+            x = self.width - 1 - x
+            y = self.height - 1 - y
+        self._surface.set_pixel(x, y, color_name)
+
+    def fill_rect(self, x, y, rect_width, rect_height, color_name):
+        if self.rotation == 180:
+            x = self.width - x - rect_width
+            y = self.height - y - rect_height
+        self._surface.fill_rect(x, y, rect_width, rect_height, color_name)
+
+
+def _render_surface(surface, rotation):
+    if rotation == 0:
+        return surface
+    return _RotatedSurface(surface, rotation)
+
+
 def _draw_text(surface, value, origin_x, origin_y, font_width, text_color, glyph_lookup):
     for column_index, character in enumerate(value):
         glyph = glyph_lookup(character)
@@ -307,7 +344,8 @@ def _draw_text(surface, value, origin_x, origin_y, font_width, text_color, glyph
             surface.set_pixel(cell_x + delta_x, origin_y + delta_y, text_color(column_index))
 
 
-def render_to_surface(frame, surface, font_width, font_height, glyph_lookup, failure_color="red"):
+def render_to_surface(frame, surface, font_width, font_height, glyph_lookup, failure_color="red", rotation=0):
+    surface = _render_surface(surface, int(rotation))
     surface.clear(surface.background_color)
     x_offset, y_offset = frame.shift_offset
     inverted_by_row = {}
@@ -399,8 +437,9 @@ def boot_logo_font_sizes(width, height, version):
     return title_font, version_font
 
 
-def render_boot_logo_to_surface(surface, version, glyph_builder=None):
+def render_boot_logo_to_surface(surface, version, glyph_builder=None, rotation=0):
     builder = glyph_builder or _build_glyph_lookup
+    surface = _render_surface(surface, int(rotation))
     surface.clear(surface.background_color)
 
     title_font, version_font = boot_logo_font_sizes(surface.width, surface.height, version)
@@ -437,7 +476,7 @@ def render_framebuffer(frame, width, height, font_width, font_height, glyph_look
     return surface.buffer
 
 
-def render_boot_logo(width, height, version, glyph_builder=None):
+def render_boot_logo(width, height, version, glyph_builder=None, rotation=0):
     surface = MonochromeSurface(width, height)
-    render_boot_logo_to_surface(surface, version, glyph_builder=glyph_builder)
+    render_boot_logo_to_surface(surface, version, glyph_builder=glyph_builder, rotation=rotation)
     return surface.buffer

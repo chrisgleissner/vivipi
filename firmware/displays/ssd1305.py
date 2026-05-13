@@ -28,6 +28,7 @@ class SSD1305Display:
         self.font_height = int(font.get("height_px", 8)) if isinstance(font, dict) else 8
         self.contrast = int(display_config.get("brightness", 128))
         self.failure_color = str(display_config.get("failure_color", "red"))
+        self.rotation = int(display_config.get("rotation", 0))
         pins = display_config["pins"]
         self.dc = Pin(_pin_number(pins["dc"]), Pin.OUT)
         self.rst = Pin(_pin_number(pins["rst"]), Pin.OUT)
@@ -115,6 +116,7 @@ class SSD1305Display:
             self.font_height,
             self._glyph_lookup,
             failure_color=self.failure_color,
+            rotation=getattr(self, "rotation", 0),
         )
         self.buffer[:] = surface.buffer
         contrast = getattr(frame, "contrast", None)
@@ -125,6 +127,6 @@ class SSD1305Display:
 
     def show_boot_logo(self, version, glyph_builder=None):
         surface = MonochromeSurface(self.width, self.height)
-        render_boot_logo_to_surface(surface, version, glyph_builder=glyph_builder)
+        render_boot_logo_to_surface(surface, version, glyph_builder=glyph_builder, rotation=getattr(self, "rotation", 0))
         self.buffer[:] = surface.buffer
         self._show()

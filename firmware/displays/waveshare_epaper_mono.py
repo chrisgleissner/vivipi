@@ -179,6 +179,7 @@ class WaveshareEPaperMonoDisplay:
         self.font_width = int(font.get("width_px", 8)) if isinstance(font, dict) else 8
         self.font_height = int(font.get("height_px", 8)) if isinstance(font, dict) else 8
         self.failure_color = str(display_config.get("failure_color", "red"))
+        self.rotation = int(display_config.get("rotation", 0))
         pins = display_config["pins"]
         self.dc = Pin(_pin_number(pins["dc"]), Pin.OUT)
         self.rst = Pin(_pin_number(pins["rst"]), Pin.OUT)
@@ -550,6 +551,7 @@ class WaveshareEPaperMonoDisplay:
             self.font_height,
             self._glyph_lookup,
             failure_color=self.failure_color,
+            rotation=getattr(self, "rotation", 0),
         )
         if self.profile["surface_kind"] == "horizontal":
             self._send_horizontal_buffer(surface.buffer)
@@ -559,7 +561,7 @@ class WaveshareEPaperMonoDisplay:
     def show_boot_logo(self, version, glyph_builder=None):
         self._initialize()
         surface = self._render_surface()
-        render_boot_logo_to_surface(surface, version, glyph_builder=glyph_builder)
+        render_boot_logo_to_surface(surface, version, glyph_builder=glyph_builder, rotation=getattr(self, "rotation", 0))
         if self.profile["surface_kind"] == "horizontal":
             self._send_horizontal_buffer(surface.buffer)
             return

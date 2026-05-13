@@ -40,6 +40,7 @@ def test_normalize_display_config_defaults_to_inferred_oled_geometry_and_font():
     assert config["height_px"] == 64
     assert config["column_offset"] == 32
     assert config["font"] == {"width_px": 8, "height_px": 8}
+    assert config["rotation"] == 0
     assert config["page_interval_s"] == 20
     assert config["boot_logo_duration_s"] == 4
     assert config["liveness"]["contrast_breathing"]["enabled"] is False
@@ -162,6 +163,7 @@ def test_normalize_display_config_infers_epaper_defaults_from_type_only():
     assert config["height_px"] == 122
     assert config["font_size"] == "medium"
     assert config["font"] == {"width_px": 10, "height_px": 10}
+    assert config["rotation"] == 0
     assert config["page_interval_s"] == 180
     assert config["pins"]["busy"] == "GP13"
     assert config["failure_color"] == "red"
@@ -179,6 +181,17 @@ def test_normalize_display_config_accepts_symbolic_font_size_strings():
     assert expanded["font_size"] == "extralarge"
     assert compact["font"]["width_px"] < expanded["font"]["width_px"]
     assert compact["font"]["height_px"] < expanded["font"]["height_px"]
+
+
+def test_normalize_display_config_accepts_180_degree_rotation_only():
+    oled = normalize_display_config({"type": "waveshare-pico-oled-1.3", "rotation": "180"})
+    epaper = normalize_display_config({"type": "waveshare-pico-epaper-2.13-b-v4", "rotation": 180})
+
+    assert oled["rotation"] == 180
+    assert epaper["rotation"] == 180
+
+    with pytest.raises(ValueError, match="device.display.rotation"):
+        normalize_display_config({"type": "waveshare-pico-oled-1.3", "rotation": 90})
 
 
 def test_normalize_display_config_keeps_pixel_font_overrides_for_backwards_compatibility():
