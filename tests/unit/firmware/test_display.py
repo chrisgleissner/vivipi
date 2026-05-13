@@ -496,7 +496,7 @@ def test_epaper_v4_initialize_matches_vendor_landscape_profile():
     ]
 
 
-def test_epaper_v4_show_buffers_primes_panel_then_streams_vendor_landscape_order():
+def test_epaper_v4_show_buffers_clears_once_then_streams_vendor_landscape_order():
     display = WaveshareEPaper213BV4Display.__new__(WaveshareEPaper213BV4Display)
     display.width = 4
     display.height = 9
@@ -514,7 +514,6 @@ def test_epaper_v4_show_buffers_primes_panel_then_streams_vendor_landscape_order
 
     assert phases == [
         "clear",
-        "init",
         (0x24, list(range(8))),
         (0x26, list(range(20, 28))),
         "refresh",
@@ -599,6 +598,61 @@ def test_epaper_v4_constructor_uses_busy_pull_up_when_available(monkeypatch):
     assert init_kwargs["baudrate"] == 4_000_000
     assert glyph_modes == ["coverage"]
     assert init_calls == [True]
+
+
+def test_epaper_show_boot_logo_uses_framebuf_text_when_available(monkeypatch):
+    display = WaveshareEPaper213BV4Display.__new__(WaveshareEPaper213BV4Display)
+    display.width = 250
+    display.height = 122
+    display.rotation = 180
+    display._glyph_builder = lambda width, height: fake_glyph_lookup
+    display._surface = WaveshareEPaper213BV4Surface(250, 122)
+
+    called = {}
+    monkeypatch.setattr(
+        waveshare_epaper_module,
+        "render_boot_logo_to_surface",
+        lambda *args, **kwargs: called.update({"scaled": True}),
+    )
+    display._surface_supports_framebuf_text = lambda surface: True
+    display._render_text_with_framebuf = lambda surface, frame: called.update({"surface": surface, "frame": frame})
+    display._show_buffers = lambda black, accent: called.update({"black": black, "accent": accent})
+
+    display.show_boot_logo("0.1.0")
+
+    assert called.get("scaled") is None
+    assert called["surface"] is display._surface
+    assert called["frame"].rows == ("ViviPi", "0.1.0")
+    assert called["black"] is display._surface.black_buffer
+    assert called["accent"] is display._surface.accent_buffer
+
+
+def test_epaper_render_text_with_framebuf_feeds_watchdog_during_large_render(monkeypatch):
+    display = WaveshareEPaper213BV4Display.__new__(WaveshareEPaper213BV4Display)
+    display.width = 250
+    display.height = 122
+    display.font_width = 16
+    display.font_height = 16
+    display.rotation = 0
+    display._glyph_lookup = lambda character: tuple((x, y) for y in range(16) for x in range(16))
+    display._glyph_builder = lambda width, height: display._glyph_lookup
+    display._feed_watchdog_calls = 0
+    display._feed_watchdog = lambda: setattr(display, "_feed_watchdog_calls", display._feed_watchdog_calls + 1)
+    surface = WaveshareEPaper213BV4Surface(250, 122)
+
+    display._render_text_with_framebuf(
+        surface,
+        SimpleNamespace(
+            rows=("PIXEL4      OK ", "U64         OK ", "C64U        FAIL"),
+            shift_offset=(0, 0),
+            failure_spans=(),
+            bottom_pixels=(),
+            bottom_pixel_width_px=1,
+            bottom_pixel_height_px=1,
+        ),
+    )
+
+    assert display._feed_watchdog_calls > 3
 
 
 def test_boot_logo_font_sizes_scale_to_screen_dimensions():

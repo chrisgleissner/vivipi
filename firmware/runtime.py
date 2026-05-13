@@ -394,6 +394,20 @@ def _build_runtime_watchdog(definitions, boot_logo_duration_s: float, button_sel
     return _RuntimeWatchdog(handle, timeout_ms=timeout_ms, reset_fn=getattr(machine, "reset", None))
 
 
+def _build_bootstrap_watchdog():
+    if machine is None or not hasattr(machine, "WDT"):
+        return _NoopRuntimeWatchdog()
+
+    try:
+        handle = machine.WDT(timeout=WATCHDOG_MAX_TIMEOUT_MS)
+    except TypeError:
+        handle = machine.WDT(WATCHDOG_MAX_TIMEOUT_MS)
+    except Exception:
+        return _NoopRuntimeWatchdog()
+
+    return _RuntimeWatchdog(handle, timeout_ms=WATCHDOG_MAX_TIMEOUT_MS, reset_fn=getattr(machine, "reset", None))
+
+
 def _feed_watchdog(watchdog):
     if watchdog is None:
         return False
@@ -645,9 +659,12 @@ def build_runtime_app(
     _serial_log("BOOT", "display ready", backend=display_config.get("backend", "?"))
     collected_diagnostics.extend(display_diagnostics)
     collected_errors.extend(display_errors)
+    bootstrap_watchdog = _build_bootstrap_watchdog()
+    if hasattr(display, "_watchdog_feed"):
+        display._watchdog_feed = bootstrap_watchdog.feed if getattr(bootstrap_watchdog, "enabled", False) else None
     font = display_config.get("font", {}) if isinstance(display_config, dict) else {}
-    font_width = int(font.get("width_px", 8)) if isinstance(font, dict) else 8
-    font_height = int(font.get("height_px", 8)) if isinstance(font, dict) else 8
+    font_width = int(getattr(display, "font_width", int(font.get("width_px", 8)) if isinstance(font, dict) else 8))
+    font_height = int(getattr(display, "font_height", int(font.get("height_px", 8)) if isinstance(font, dict) else 8))
     text_height_px = max(1, int(display_config.get("height_px", 64)) - _reserved_bottom_indicator_px(display_config))
     page_size = max(1, text_height_px // font_height)
     row_width = max(1, int(display_config.get("width_px", 128)) // font_width)
@@ -656,8 +673,15 @@ def build_runtime_app(
     version = str(project.get("version", ""))
     build_time_value = str(project.get("build_time", ""))
     boot_start_s = now_provider()
-    logo_diagnostics, logo_errors = _safe_show_boot_logo(display, version)
-    _serial_log("BOOT", "boot logo shown", version=version or "-")
+    if str(display_config.get("family", "")).strip().lower() == "eink":
+        logo_diagnostics = ()
+        logo_errors = ()
+        _serial_log("BOOT", "boot logo skipped", reason="eink-single-refresh")
+    else:
+        _feed_watchdog(bootstrap_watchdog)
+        logo_diagnostics, logo_errors = _safe_show_boot_logo(display, version)
+        _feed_watchdog(bootstrap_watchdog)
+        _serial_log("BOOT", "boot logo shown", version=version or "-")
     collected_diagnostics.extend(logo_diagnostics)
     collected_errors.extend(logo_errors)
 
@@ -671,7 +695,7 @@ def build_runtime_app(
     collected_diagnostics.extend(definition_diagnostics)
     collected_errors.extend(definition_errors)
 
-    boot_logo_duration_s = float(display_config.get("boot_logo_duration_s", 4.0))
+    boot_logo_duration_s = 0.0 if str(display_config.get("family", "")).strip().lower() == "eink" else float(display_config.get("boot_logo_duration_s", 4.0))
     runtime_watchdog = _build_runtime_watchdog(
         definitions,
         boot_logo_duration_s=boot_logo_duration_s,
@@ -941,6 +965,8 @@ def _eink_status_text(value) -> str:
 def _build_eink_probe_summary_frame(app):
     state = getattr(app, "state", None)
     row_width = max(1, int(getattr(state, "row_width", 16)))
+    display = getattr(app, "display", None)
+    row_height = max(8, int(getattr(display, "font_height", 8)))
     registered_results = getattr(app, "registered_results", {})
     definitions = tuple(getattr(app, "definitions", ()))
     rows = []
@@ -964,8 +990,8 @@ def _build_eink_probe_summary_frame(app):
     if not rows:
         rows = [_fit_row("NO CHECKS", row_width)]
 
-    content_height_px = len(rows) * 8
-    display_height_px = int(getattr(getattr(app, "display", None), "height", content_height_px))
+    content_height_px = len(rows) * row_height
+    display_height_px = int(getattr(display, "height", content_height_px))
     return Frame(
         rows=tuple(rows),
         shift_offset=(0, max(0, (display_height_px - content_height_px) // 2)),
@@ -1005,6 +1031,7 @@ def run_forever(config_path="config.json", poll_interval_ms=20):
     display_family = str(getattr(app, "display_family", "")).strip().lower()
     steady_now_provider = getattr(app, "_probe_now_s", _steady_now_s)
     if display_family == "eink":
+        _run_startup_network(app, _now_s())
         startup_now_s = _wait_for_boot_logo(app, now_provider=steady_now_provider, sleep_ms=_sleep_ms, watchdog=watchdog)
         _serial_log("BOOT", "startup summary", now_s=f"{startup_now_s:.3f}")
         _run_eink_probe_summary(app, startup_now_s, watchdog=watchdog)

@@ -170,8 +170,10 @@ class WaveshareEPaper213BV4Display:
         self.width = int(display_config["width_px"])
         self.height = int(display_config["height_px"])
         font = display_config.get("font", {}) if isinstance(display_config, dict) else {}
-        self.font_width = int(font.get("width_px", 15)) if isinstance(font, dict) else 15
-        self.font_height = int(font.get("height_px", 15)) if isinstance(font, dict) else 15
+        configured_font_width = int(font.get("width_px", 15)) if isinstance(font, dict) else 15
+        configured_font_height = int(font.get("height_px", 15)) if isinstance(font, dict) else 15
+        self.font_width = max(16, configured_font_width)
+        self.font_height = max(16, configured_font_height)
         self.failure_color = str(display_config.get("failure_color", "red"))
         self.rotation = int(display_config.get("rotation", 0))
         pins = display_config["pins"]
@@ -203,35 +205,38 @@ class WaveshareEPaper213BV4Display:
             failure_by_row.setdefault(int(span.row_index), []).append((int(span.start_column), int(span.end_column)))
         return failure_by_row
 
-    def _draw_rotated_framebuf_char(self, surface, character, origin_x, origin_y, color_name):
-        glyph_buffer = bytearray(8)
-        glyph_framebuffer = framebuf.FrameBuffer(glyph_buffer, 8, 8, framebuf.MONO_VLSB)
-        glyph_framebuffer.fill(0)
-        glyph_framebuffer.text(character, 0, 0, 1)
+    def _draw_rotated_glyph(self, surface, glyph_pixels, origin_x, origin_y, color_name):
         rotation = int(getattr(self, "rotation", 0))
 
-        for delta_y in range(8):
-            for delta_x in range(8):
-                if not glyph_framebuffer.pixel(delta_x, delta_y):
-                    continue
-                pixel_x = origin_x + delta_x
-                pixel_y = origin_y + delta_y
-                if rotation == 180:
-                    pixel_x = self.width - 1 - pixel_x
-                    pixel_y = self.height - 1 - pixel_y
-                surface.set_pixel(pixel_x, pixel_y, color_name)
+        for index, (delta_x, delta_y) in enumerate(glyph_pixels):
+            pixel_x = origin_x + delta_x
+            pixel_y = origin_y + delta_y
+            if rotation == 180:
+                pixel_x = self.width - 1 - pixel_x
+                pixel_y = self.height - 1 - pixel_y
+            surface.set_pixel(pixel_x, pixel_y, color_name)
+            if (index & 0x3F) == 0x3F:
+                self._feed_watchdog()
 
     def _render_text_with_framebuf(self, surface, frame):
         surface.clear(surface.background_color)
+        self._feed_watchdog()
         x_offset, y_offset = getattr(frame, "shift_offset", (0, 0))
         failure_by_row = self._row_failure_columns(frame)
+        glyph_width = max(1, int(getattr(self, "font_width", 16)))
+        glyph_height = max(1, int(getattr(self, "font_height", 16)))
+        glyph_lookup = getattr(self, "_glyph_lookup", None)
+        if glyph_lookup is None:
+            glyph_lookup = self._glyph_builder(glyph_width, glyph_height)
+            self._glyph_lookup = glyph_lookup
 
         for row_index, row in enumerate(getattr(frame, "rows", ())):
-            y = y_offset + (row_index * 8)
+            self._feed_watchdog()
+            y = y_offset + (row_index * glyph_height)
             if y >= self.height:
                 break
             for column_index, character in enumerate(str(row)):
-                x = x_offset + (column_index * 8)
+                x = x_offset + (column_index * glyph_width)
                 if x >= self.width:
                     break
                 is_failure = False
@@ -239,13 +244,21 @@ class WaveshareEPaper213BV4Display:
                     if start_column <= column_index < end_column:
                         is_failure = True
                         break
-                self._draw_rotated_framebuf_char(surface, character, x, y, "red" if is_failure else surface.foreground_color)
+                self._draw_rotated_glyph(
+                    surface,
+                    glyph_lookup(character),
+                    x,
+                    y,
+                    "red" if is_failure else surface.foreground_color,
+                )
+                self._feed_watchdog()
 
         bottom_pixel_width = max(1, int(getattr(frame, "bottom_pixel_width_px", 1)))
         bottom_pixel_height = max(1, int(getattr(frame, "bottom_pixel_height_px", 1)))
         bottom_pixel_y = max(0, self.height - bottom_pixel_height)
         for pixel_x in getattr(frame, "bottom_pixels", ()):
             surface.fill_rect(int(pixel_x), bottom_pixel_y, bottom_pixel_width, bottom_pixel_height, surface.foreground_color)
+            self._feed_watchdog()
 
     @property
     def surface_height_px(self):
@@ -380,7 +393,6 @@ class WaveshareEPaper213BV4Display:
         if not getattr(self, "_panel_primed", False):
             self._clear_panel()
             self._panel_primed = True
-        self._initialize()
         self._send_landscape_plane(0x24, black_buffer)
         self._send_landscape_plane(0x26, accent_buffer)
         self._refresh()
@@ -413,6 +425,7 @@ class WaveshareEPaper213BV4Display:
     def show_boot_logo(self, version, glyph_builder=None):
         surface = self._render_surface()
         if self._surface_supports_framebuf_text(surface):
+            glyph_height = max(1, int(getattr(self, "font_height", 16)))
             rows = (
                 "ViviPi",
                 str(version or ""),
@@ -421,7 +434,7 @@ class WaveshareEPaper213BV4Display:
                 surface,
                 type("BootFrame", (), {
                     "rows": rows,
-                    "shift_offset": (0, max(0, (self.height - (len(rows) * 8)) // 2)),
+                    "shift_offset": (0, max(0, (self.height - (len(rows) * glyph_height)) // 2)),
                     "failure_spans": (),
                     "bottom_pixels": (),
                     "bottom_pixel_width_px": 1,

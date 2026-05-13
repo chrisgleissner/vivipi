@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 import firmware.runtime as firmware_runtime
+import firmware.main as firmware_main
 from vivipi.core.render import TextSpan
 from vivipi.core.models import CheckDefinition, CheckType, DiagnosticEvent, DisplayMode, ProbeSchedulingPolicy, TransitionThresholds
 
@@ -99,6 +100,86 @@ def test_build_runtime_watchdog_uses_supported_timeout_when_machine_wdt_accepts_
     assert type(watchdog).__name__ == "_RuntimeWatchdog"
     assert created["timeout"] == firmware_runtime.WATCHDOG_MAX_TIMEOUT_MS
     assert watchdog.timeout_ms == firmware_runtime.WATCHDOG_MAX_TIMEOUT_MS
+
+
+def test_main_bootstrap_watchdog_feeds_before_runtime_import(monkeypatch):
+    events = []
+
+    class FakeWDT:
+        def __init__(self, timeout=None):
+            events.append(("wdt-init", timeout))
+
+        def feed(self):
+            events.append("wdt-feed")
+
+    monkeypatch.setattr(firmware_main, "WDT", FakeWDT)
+
+    run_forever_calls = []
+    original_import = __import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "runtime":
+            events.append("runtime-import")
+            return SimpleNamespace(run_forever=lambda: run_forever_calls.append(True))
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr("builtins.__import__", fake_import)
+
+    firmware_main.main()
+
+    assert events[0] == ("wdt-init", 8388)
+    assert "wdt-feed" in events[:3]
+    assert "runtime-import" in events[:4]
+    assert run_forever_calls == [True]
+
+
+def test_build_runtime_app_attaches_bootstrap_watchdog_before_boot_logo(monkeypatch):
+    class FakeWDT:
+        def __init__(self, timeout=None):
+            self.timeout = timeout
+
+        def feed(self):
+            return None
+
+    display = SimpleNamespace(show_boot_logo=lambda version: None, _watchdog_feed=None)
+    observed = {}
+
+    monkeypatch.setattr(firmware_runtime, "machine", SimpleNamespace(WDT=FakeWDT, reset=lambda: None))
+    monkeypatch.setattr(
+        firmware_runtime,
+        "_safe_show_boot_logo",
+        lambda passed_display, version: observed.update(
+            {
+                "display": passed_display,
+                "version": version,
+                "watchdog_feed": getattr(passed_display, "_watchdog_feed", None),
+            }
+        ) or ((), ()),
+    )
+
+    app = firmware_runtime.build_runtime_app(
+        {
+            "project": {"version": "1.2.3"},
+            "device": {
+                "display": {"width_px": 128, "height_px": 64, "font": {"width_px": 8, "height_px": 8}},
+                "buttons": {"a": "GP15", "b": "GP17"},
+            },
+        },
+        input_controller_factory=lambda: object(),
+        display_factory=lambda config: display,
+        button_reader_factory=lambda config, input_controller: object(),
+        runtime_app_factory=lambda **kwargs: SimpleNamespace(**kwargs),
+        definitions_builder=lambda config: (),
+        executor_factory=lambda trace_sink=None: object(),
+        now_provider=lambda: 0.0,
+        sleep_ms=lambda ms: None,
+    )
+
+    assert callable(observed["watchdog_feed"])
+    assert observed["display"] is display
+    assert observed["version"] == "1.2.3"
+    assert callable(display._watchdog_feed)
+    assert app.runtime_watchdog.timeout_ms == firmware_runtime.WATCHDOG_MAX_TIMEOUT_MS
 
 
 def test_connect_wifi_joins_network_when_available(monkeypatch):
@@ -1090,7 +1171,7 @@ def test_run_forever_connects_network_before_waiting_for_boot_logo(monkeypatch):
 
 
 def test_build_eink_probe_summary_frame_formats_ok_and_fail_rows():
-    display = SimpleNamespace(height=64)
+    display = SimpleNamespace(height=64, font_height=16)
     definitions = (
         CheckDefinition(identifier="adb", name="ADB SERVICE", check_type=CheckType.HTTP, target="adb"),
         CheckDefinition(identifier="telnet", name="TELNET", check_type=CheckType.TELNET, target="telnet"),
@@ -1114,7 +1195,45 @@ def test_build_eink_probe_summary_frame_formats_ok_and_fail_rows():
     assert frame.failure_spans == (
         TextSpan(row_index=1, start_column=12, end_column=16),
     )
-    assert frame.shift_offset == (0, 24)
+    assert frame.shift_offset == (0, 16)
+
+
+def test_build_runtime_app_skips_boot_logo_for_eink(monkeypatch):
+    display = SimpleNamespace(show_boot_logo=lambda version: None, _watchdog_feed=None, font_width=16, font_height=16)
+    called = {"boot_logo": 0}
+
+    monkeypatch.setattr(
+        firmware_runtime,
+        "_safe_show_boot_logo",
+        lambda passed_display, version: called.__setitem__("boot_logo", called["boot_logo"] + 1) or ((), ()),
+    )
+
+    app = firmware_runtime.build_runtime_app(
+        {
+            "project": {"version": "1.2.3"},
+            "device": {
+                "display": {
+                    "family": "eink",
+                    "type": "waveshare-pico-epaper-2.13-b-v4",
+                    "width_px": 250,
+                    "height_px": 122,
+                    "font": {"width_px": 15, "height_px": 15},
+                },
+                "buttons": {"a": "GP15", "b": "GP17"},
+            },
+        },
+        input_controller_factory=lambda: object(),
+        display_factory=lambda config: display,
+        button_reader_factory=lambda config, input_controller: object(),
+        runtime_app_factory=lambda **kwargs: SimpleNamespace(**kwargs),
+        definitions_builder=lambda config: (),
+        executor_factory=lambda trace_sink=None: object(),
+        now_provider=lambda: 0.0,
+        sleep_ms=lambda ms: None,
+    )
+
+    assert called["boot_logo"] == 0
+    assert app.boot_logo_until_s == 0.0
 
 
 def test_run_eink_probe_summary_runs_checks_and_draws_frame():
@@ -1204,7 +1323,7 @@ def test_run_forever_runs_eink_summary_then_holds_static(monkeypatch):
     firmware_runtime.run_forever(poll_interval_ms=75)
 
     assert called == {"run_loop": 0, "hold": 1, "summary": [(fake_app, 18.5, None)]}
-    assert startup_network_calls == []
+    assert startup_network_calls == [(fake_app, 12.5)]
     assert button_test_calls == []
 
 
