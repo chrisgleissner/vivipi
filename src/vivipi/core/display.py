@@ -835,7 +835,10 @@ def _validate_inferred_value(value: object, expected: object, context: str):
     if value is None:
         return
     if isinstance(expected, int):
-        parsed = _parse_positive_int(value, context)
+        if expected < 1:
+            parsed = _parse_non_negative_int(value, context, expected)
+        else:
+            parsed = _parse_positive_int(value, context)
     elif isinstance(expected, str):
         if not isinstance(value, str):
             raise ValueError(f"{context} is inferred from device.display.type")

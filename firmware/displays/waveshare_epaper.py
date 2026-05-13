@@ -121,6 +121,8 @@ class WaveshareEPaper213BV4Display:
             self.spi.init(baudrate=4_000_000)
         self._glyph_lookup = _build_glyph_lookup(self.font_width, self.font_height)
         self.surface_height = ((self.height + 7) // 8) * 8
+        self._surface = WaveshareEPaper213BV4Surface(self.width, self.height)
+        self._watchdog_feed = None
         self._initialize()
 
     @property
@@ -152,8 +154,10 @@ class WaveshareEPaper213BV4Display:
     def _wait_until_idle(self, timeout_ms=20_000):
         waited_ms = 0
         while self.busy.value() == 1 and waited_ms < timeout_ms:
+            self._feed_watchdog()
             _sleep_ms(10)
             waited_ms += 10
+        self._feed_watchdog()
         _sleep_ms(20)
 
     def _reset(self):
@@ -211,13 +215,23 @@ class WaveshareEPaper213BV4Display:
     def _send_landscape_plane(self, command, buffer):
         self._command(command)
         for column_group in range(self.row_bytes - 1, -1, -1):
+            self._feed_watchdog()
             base_index = column_group * self.width
             for row in range(self.width):
                 self._data(buffer[base_index + row])
+                if (row & 0x3F) == 0x3F:
+                    self._feed_watchdog()
 
     def _refresh(self):
+        self._feed_watchdog()
         self._command(0x20)
         self._wait_until_idle()
+
+    def _feed_watchdog(self):
+        callback = getattr(self, "_watchdog_feed", None)
+        if callback is None:
+            return
+        callback()
 
     def _sleep(self):
         self._command(0x10)
@@ -230,8 +244,16 @@ class WaveshareEPaper213BV4Display:
         self._send_landscape_plane(0x26, accent_buffer)
         self._refresh()
 
+    def _render_surface(self):
+        surface = getattr(self, "_surface", None)
+        if surface is None:
+            surface = WaveshareEPaper213BV4Surface(self.width, self.height)
+            self._surface = surface
+        surface.clear(surface.background_color)
+        return surface
+
     def draw_frame(self, frame):
-        surface = WaveshareEPaper213BV4Surface(self.width, self.height)
+        surface = self._render_surface()
         render_to_surface(
             frame,
             surface,
@@ -244,6 +266,6 @@ class WaveshareEPaper213BV4Display:
         self._show_buffers(surface.black_buffer, surface.accent_buffer)
 
     def show_boot_logo(self, version, glyph_builder=None):
-        surface = WaveshareEPaper213BV4Surface(self.width, self.height)
+        surface = self._render_surface()
         render_boot_logo_to_surface(surface, version, glyph_builder=glyph_builder, rotation=getattr(self, "rotation", 0))
         self._show_buffers(surface.black_buffer, surface.accent_buffer)

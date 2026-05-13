@@ -299,6 +299,12 @@ def test_normalize_display_config_validates_inferred_string_and_numeric_fields()
         normalize_display_config({"type": "waveshare-pico-oled-1.3", "column_offset": -1})
 
 
+def test_normalize_display_config_accepts_zero_spi_mode_for_epaper_displays():
+    config = normalize_display_config({"type": "waveshare-pico-epaper-2.13-b-v4", "spi_mode": 0})
+
+    assert config["spi_mode"] == 0
+
+
 def test_normalize_display_config_rejects_mismatched_inferred_values():
     with pytest.raises(ValueError, match="device.display.width_px"):
         normalize_display_config({"type": "waveshare-pico-oled-1.3", "width_px": 64})

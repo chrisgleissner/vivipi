@@ -37,6 +37,49 @@ def _sample_source_coordinates(target_size):
     )
 
 
+def _source_overlap_weights(target_size):
+    weights = []
+    for target_index in range(target_size):
+        start = target_index * BASE_GLYPH_SIZE
+        end = start + BASE_GLYPH_SIZE
+        overlaps = []
+        source_start = start // target_size
+        source_end = min(BASE_GLYPH_SIZE - 1, (end - 1) // target_size)
+        for source_index in range(source_start, source_end + 1):
+            overlap_start = max(start, source_index * target_size)
+            overlap_end = min(end, (source_index + 1) * target_size)
+            overlap = overlap_end - overlap_start
+            if overlap > 0:
+                overlaps.append((source_index, overlap))
+        weights.append(tuple(overlaps))
+    return tuple(weights)
+
+
+def _scale_glyph_pixels(source_rows, font_width, font_height):
+    x_weights = _source_overlap_weights(font_width)
+    y_weights = _source_overlap_weights(font_height)
+    center_x = _sample_source_coordinates(font_width)
+    center_y = _sample_source_coordinates(font_height)
+    pixels = []
+
+    for y, row_weights in enumerate(y_weights):
+        center_row_bits = source_rows[center_y[y]]
+        for x, column_weights in enumerate(x_weights):
+            coverage = 0
+            for source_y, overlap_y in row_weights:
+                row_bits = source_rows[source_y]
+                for source_x, overlap_x in column_weights:
+                    if row_bits & (1 << source_x):
+                        coverage += overlap_x * overlap_y
+            if coverage >= 24:
+                pixels.append((x, y))
+                continue
+            if coverage >= 8 and (center_row_bits & (1 << center_x[x])):
+                pixels.append((x, y))
+
+    return tuple(pixels)
+
+
 def _normalize_character(value):
     if value == ELLIPSIS:
         return value
@@ -61,8 +104,6 @@ def _build_glyph_lookup(font_width, font_height):
     )
     glyph_rows_cache = {}
     scaled_glyph_cache = {}
-    scaled_x = _sample_source_coordinates(font_width)
-    scaled_y = _sample_source_coordinates(font_height)
 
     def glyph_rows(value):
         character = _normalize_character(value)
@@ -95,13 +136,7 @@ def _build_glyph_lookup(font_width, font_height):
             return cached
 
         source_rows = glyph_rows(character)
-        pixels = []
-        for y, source_y in enumerate(scaled_y):
-            row_bits = source_rows[source_y]
-            for x, source_x in enumerate(scaled_x):
-                if row_bits & (1 << source_x):
-                    pixels.append((x, y))
-        scaled = tuple(pixels)
+        scaled = _scale_glyph_pixels(source_rows, font_width, font_height)
         scaled_glyph_cache[character] = scaled
         return scaled
 

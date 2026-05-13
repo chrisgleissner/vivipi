@@ -669,6 +669,8 @@ def build_runtime_app(
         button_self_test_s=_button_self_test_duration_s(button_input),
     )
     runtime_checks_module.set_probe_activity_callback(runtime_watchdog.feed if getattr(runtime_watchdog, "enabled", False) else None)
+    if hasattr(display, "_watchdog_feed"):
+        display._watchdog_feed = runtime_watchdog.feed if getattr(runtime_watchdog, "enabled", False) else None
     try:
         button_self_test_ran = _run_button_self_test(
             display,

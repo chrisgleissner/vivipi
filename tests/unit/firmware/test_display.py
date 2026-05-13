@@ -4,7 +4,7 @@ import firmware.displays.sh1107 as sh1107_module
 import firmware.displays.waveshare_epaper as waveshare_epaper_module
 from firmware.display import SH1107Display, SSD1305Display, ST77xxDisplay, WaveshareEPaperMonoDisplay, WaveshareEPaperTriColorDisplay, _pin_number, _sample_source_coordinates, boot_logo_font_sizes, render, render_boot_logo, render_boot_logo_to_surface, render_framebuffer
 from firmware.displays import BACKENDS, create_display
-from firmware.displays.rendering import HorizontalMonochromeSurface, MonochromeSurface, RGB565Surface, render_to_surface
+from firmware.displays.rendering import HorizontalMonochromeSurface, MonochromeSurface, RGB565Surface, _scale_glyph_pixels, render_to_surface
 from firmware.displays.waveshare_epaper import WaveshareEPaper213BV4Display, WaveshareEPaper213BV4Surface
 from vivipi.core.models import CheckRuntime, Status
 from vivipi.core.render import InvertedSpan
@@ -278,6 +278,27 @@ def test_render_to_surface_supports_180_degree_rotation():
     render_to_surface(frame, surface, 1, 1, fake_glyph_lookup, rotation=180)
 
     assert lit_pixels(surface.buffer, 2, 8) == {(1, 7)}
+
+
+def test_scale_glyph_pixels_balances_horizontal_and_vertical_strokes():
+    source_rows = (
+        0b00011000,
+        0b00011000,
+        0b00011000,
+        0b11111111,
+        0b11111111,
+        0b00011000,
+        0b00011000,
+        0b00011000,
+    )
+
+    scaled = set(_scale_glyph_pixels(source_rows, 15, 15))
+    vertical_width = sum(1 for x in range(15) if (x, 0) in scaled)
+    horizontal_height = sum(1 for y in range(15) if (0, y) in scaled)
+
+    assert vertical_width > 0
+    assert horizontal_height > 0
+    assert abs(vertical_width - horizontal_height) <= 1
 
 
 def test_render_boot_logo_to_surface_supports_180_degree_rotation():
@@ -788,6 +809,66 @@ def test_waveshare_epaper_tricolor_draw_frame_emits_both_planes():
     assert sent["accent"] is not None
     assert len(sent["black"]) == 1
     assert len(sent["accent"]) == 1
+
+
+def test_waveshare_epaper_v4_reuses_surface_between_frames():
+    display = WaveshareEPaper213BV4Display.__new__(WaveshareEPaper213BV4Display)
+    display.width = 8
+    display.height = 8
+    display.font_width = 1
+    display.font_height = 8
+    display.failure_color = "red"
+    display.rotation = 0
+    display._glyph_lookup = fake_glyph_lookup
+    display._surface = WaveshareEPaper213BV4Surface(8, 8)
+    sent = {"calls": 0, "black": None, "accent": None}
+    display._show_buffers = lambda black, accent: (
+        sent.__setitem__("calls", sent["calls"] + 1),
+        sent.__setitem__("black", bytes(black)),
+        sent.__setitem__("accent", bytes(accent)),
+    )
+
+    display.draw_frame(
+        SimpleNamespace(
+            rows=("A       ",),
+            inverted_row=None,
+            shift_offset=(0, 0),
+            inverted_spans=(),
+            failure_spans=(),
+        )
+    )
+    first_surface_id = id(display._surface)
+
+    display.draw_frame(
+        SimpleNamespace(
+            rows=("        ",),
+            inverted_row=None,
+            shift_offset=(0, 0),
+            inverted_spans=(),
+            failure_spans=(),
+        )
+    )
+
+    assert id(display._surface) == first_surface_id
+    assert sent["calls"] == 2
+    assert sent["black"] == bytes([0xFF] * len(sent["black"]))
+    assert sent["accent"] == bytes([0xFF] * len(sent["accent"]))
+
+
+def test_waveshare_epaper_v4_feeds_watchdog_while_waiting_for_busy_pin(monkeypatch):
+    display = WaveshareEPaper213BV4Display.__new__(WaveshareEPaper213BV4Display)
+    busy_values = iter([1, 1, 0])
+    display.busy = SimpleNamespace(value=lambda: next(busy_values))
+    feed_calls = []
+    sleep_calls = []
+    display._watchdog_feed = lambda: feed_calls.append(True)
+
+    monkeypatch.setattr(waveshare_epaper_module, "_sleep_ms", lambda value: sleep_calls.append(value))
+
+    display._wait_until_idle(timeout_ms=40)
+
+    assert len(feed_calls) == 3
+    assert sleep_calls == [10, 10, 20]
 
 
 def test_rgb565_surface_encodes_little_endian_pixels():
