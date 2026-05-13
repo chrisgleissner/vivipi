@@ -26,6 +26,13 @@ def _sleep_ms(value):
     time.sleep(value / 1000.0)
 
 
+def _busy_pin(pin_number):
+    pull_up = getattr(Pin, "PULL_UP", None)
+    if pull_up is None:
+        return Pin(pin_number, Pin.IN)
+    return Pin(pin_number, Pin.IN, pull_up)
+
+
 class WaveshareEPaper213BV4Surface:
     def __init__(self, width, height, background_color="white", foreground_color="black"):
         self.logical_width = width
@@ -107,12 +114,13 @@ class WaveshareEPaper213BV4Display:
         self.dc = Pin(_pin_number(pins["dc"]), Pin.OUT)
         self.rst = Pin(_pin_number(pins["rst"]), Pin.OUT)
         self.cs = Pin(_pin_number(pins["cs"]), Pin.OUT)
-        self.busy = Pin(_pin_number(pins["busy"]), Pin.IN)
+        self.busy = _busy_pin(_pin_number(pins["busy"]))
         self.spi = spi or SPI(1)
         if spi is None and hasattr(self.spi, "init"):
             self.spi.init(baudrate=4_000_000)
         self._glyph_lookup = _build_glyph_lookup(self.font_width, self.font_height)
         self.surface_height = ((self.height + 7) // 8) * 8
+        self._initialize()
 
     @property
     def surface_height_px(self):
@@ -127,7 +135,6 @@ class WaveshareEPaper213BV4Display:
         return int(self.width)
 
     def _command(self, value):
-        self.cs(1)
         self.dc(0)
         self.cs(0)
         self.spi.write(bytearray([value]))
@@ -135,18 +142,18 @@ class WaveshareEPaper213BV4Display:
 
     def _data(self, values):
         if isinstance(values, int):
-            values = bytearray([values])
-        self.cs(1)
+            values = (values,)
         self.dc(1)
         self.cs(0)
-        self.spi.write(values)
+        self.spi.write(values if isinstance(values, bytearray) else bytearray(values))
         self.cs(1)
 
     def _wait_until_idle(self, timeout_ms=20_000):
         waited_ms = 0
         while self.busy.value() == 1 and waited_ms < timeout_ms:
-            _sleep_ms(20)
-            waited_ms += 20
+            _sleep_ms(10)
+            waited_ms += 10
+        _sleep_ms(20)
 
     def _reset(self):
         self.rst(1)
@@ -218,11 +225,9 @@ class WaveshareEPaper213BV4Display:
         self.rst(0)
 
     def _show_buffers(self, black_buffer, accent_buffer):
-        self._initialize()
         self._send_landscape_plane(0x24, black_buffer)
         self._send_landscape_plane(0x26, accent_buffer)
         self._refresh()
-        self._sleep()
 
     def draw_frame(self, frame):
         surface = WaveshareEPaper213BV4Surface(self.width, self.height)

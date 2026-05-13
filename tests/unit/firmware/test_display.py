@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import firmware.displays.sh1107 as sh1107_module
+import firmware.displays.waveshare_epaper as waveshare_epaper_module
 from firmware.display import SH1107Display, SSD1305Display, ST77xxDisplay, WaveshareEPaperMonoDisplay, WaveshareEPaperTriColorDisplay, _pin_number, _sample_source_coordinates, boot_logo_font_sizes, render, render_boot_logo, render_boot_logo_to_surface, render_framebuffer
 from firmware.displays import BACKENDS, create_display
 from firmware.displays.rendering import HorizontalMonochromeSurface, MonochromeSurface, RGB565Surface
@@ -447,13 +448,82 @@ def test_epaper_v4_show_buffers_streams_vendor_landscape_order():
     display._command = lambda value: commands.append(value)
     display._data = lambda values: payloads.append(int(values))
     display._refresh = lambda: phases.append("refresh")
-    display._sleep = lambda: phases.append("sleep")
 
     display._show_buffers(bytearray(range(8)), bytearray(range(20, 28)))
 
     assert commands == [0x24, 0x26]
     assert payloads == [4, 5, 6, 7, 0, 1, 2, 3, 24, 25, 26, 27, 20, 21, 22, 23]
-    assert phases == ["init", "refresh", "sleep"]
+    assert phases == ["refresh"]
+
+
+def test_epaper_v4_wait_until_idle_matches_vendor_polling(monkeypatch):
+    display = WaveshareEPaper213BV4Display.__new__(WaveshareEPaper213BV4Display)
+
+    class FakeBusy:
+        def __init__(self):
+            self.values = [1, 1, 0]
+
+        def value(self):
+            return self.values.pop(0)
+
+    sleeps = []
+    display.busy = FakeBusy()
+    monkeypatch.setattr(waveshare_epaper_module, "_sleep_ms", lambda value: sleeps.append(value))
+
+    display._wait_until_idle()
+
+    assert sleeps == [10, 10, 20]
+
+
+def test_epaper_v4_constructor_uses_busy_pull_up_when_available(monkeypatch):
+    class FakePin:
+        OUT = "out"
+        IN = "in"
+        PULL_UP = "pull_up"
+
+        def __init__(self, number, mode=None, pull=None):
+            self.number = number
+            self.mode = mode
+            self.pull = pull
+
+        def __call__(self, value):
+            return None
+
+        def value(self):
+            return 0
+
+    class FakeSPI:
+        def __init__(self, bus):
+            self.bus = bus
+            self.init_calls = []
+
+        def init(self, **kwargs):
+            self.init_calls.append(kwargs)
+
+        def write(self, values):
+            return None
+
+    monkeypatch.setattr(waveshare_epaper_module, "Pin", FakePin)
+    monkeypatch.setattr(waveshare_epaper_module, "SPI", FakeSPI)
+    monkeypatch.setattr(waveshare_epaper_module, "_build_glyph_lookup", lambda width, height: fake_glyph_lookup)
+    init_calls = []
+    monkeypatch.setattr(waveshare_epaper_module.WaveshareEPaper213BV4Display, "_initialize", lambda self: init_calls.append(True))
+
+    display = WaveshareEPaper213BV4Display(
+        {
+            "width_px": 250,
+            "height_px": 122,
+            "pins": {"dc": "GP8", "rst": "GP12", "cs": "GP9", "busy": "GP13", "clk": "GP10", "din": "GP11"},
+            "font": {"width_px": 10, "height_px": 10},
+            "failure_color": "red",
+        }
+    )
+
+    assert display.busy.number == 13
+    assert display.busy.mode == FakePin.IN
+    assert display.busy.pull == FakePin.PULL_UP
+    assert display.spi.init_calls == [{"baudrate": 4_000_000}]
+    assert init_calls == [True]
 
 
 def test_boot_logo_font_sizes_scale_to_screen_dimensions():
