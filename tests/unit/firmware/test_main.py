@@ -20,14 +20,14 @@ def test_main_delegates_non_eink_to_run_forever(monkeypatch):
     assert called == {"count": 1}
 
 
-def test_main_routes_eink_to_lightweight_runner(monkeypatch):
+def test_main_routes_eink_to_runtime_runner(monkeypatch):
     called = {"count": 0}
     original_import = __import__
 
     monkeypatch.setattr(firmware_main, "_display_family_from_config", lambda path="config.json": "eink")
 
     def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
-        if name == "eink_runtime":
+        if name == "runtime":
             return SimpleNamespace(run_forever=lambda: called.__setitem__("count", called["count"] + 1))
         return original_import(name, globals, locals, fromlist, level)
 

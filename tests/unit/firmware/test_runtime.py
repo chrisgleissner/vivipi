@@ -5,7 +5,7 @@ import pytest
 import firmware.runtime as firmware_runtime
 import firmware.main as firmware_main
 from vivipi.core.render import TextSpan
-from vivipi.core.models import CheckDefinition, CheckType, DiagnosticEvent, DisplayMode, ProbeSchedulingPolicy, TransitionThresholds
+from vivipi.core.models import CheckDefinition, CheckRuntime, CheckType, DiagnosticEvent, DisplayMode, ProbeSchedulingPolicy, Status, TransitionThresholds
 
 
 class FakeTime:
@@ -1183,22 +1183,20 @@ def test_run_forever_connects_network_before_waiting_for_boot_logo(monkeypatch):
 
 def test_build_eink_probe_summary_frame_formats_ok_and_fail_rows():
     display = SimpleNamespace(height=122, font_height=15)
-    definitions = (
-        CheckDefinition(identifier="u64", name="U64 REST", check_type=CheckType.HTTP, target="u64"),
-        CheckDefinition(identifier="c64u", name="C64U REST", check_type=CheckType.HTTP, target="c64u"),
-        CheckDefinition(identifier="pixel4", name="PIXEL4", check_type=CheckType.HTTP, target="pixel4"),
-        CheckDefinition(identifier="telnet", name="TELNET", check_type=CheckType.TELNET, target="telnet"),
-    )
     app = SimpleNamespace(
-        state=SimpleNamespace(row_width=16),
+        state=SimpleNamespace(
+            row_width=16,
+            checks=(
+                CheckRuntime(identifier="u64-rest", name="U64 REST", status=Status.OK),
+                CheckRuntime(identifier="u64-ftp", name="U64 FTP", status=Status.OK),
+                CheckRuntime(identifier="pixel4-adb", name="PIXEL4 ADB", status=Status.OK),
+                CheckRuntime(identifier="u64-telnet", name="U64 TELNET", status=Status.OK),
+                CheckRuntime(identifier="c64u-rest", name="C64U REST", status=Status.FAIL),
+                CheckRuntime(identifier="c64u-ftp", name="C64U FTP", status=Status.FAIL),
+                CheckRuntime(identifier="c64u-telnet", name="C64U TELNET", status=Status.FAIL),
+            ),
+        ),
         display=display,
-        definitions=definitions,
-        registered_results={
-            "u64": {"name": "U64 REST", "status": "OK"},
-            "c64u": {"name": "C64U REST", "status": "FAIL"},
-            "pixel4": {"name": "PIXEL4", "status": "OK"},
-            "telnet": {"name": "TELNET", "status": "FAIL"},
-        },
         display_liveness={
             "bottom_heartbeat": {
                 "enabled": True,
@@ -1215,17 +1213,30 @@ def test_build_eink_probe_summary_frame_formats_ok_and_fail_rows():
 
     frame = firmware_runtime._build_eink_probe_summary_frame(app, now_s=18.5)
 
-    assert frame.rows == (
-        "C64U REST   FAIL",
-        "PIXEL4        OK",
-        "TELNET      FAIL",
-        "U64 REST      OK",
+    assert tuple(row.rsplit(None, 1)[0] for row in frame.rows) == (
+        "C64U FTP",
+        "C64U REST",
+        "C64U TELNET",
+        "PIXEL4 ADB",
+        "U64 FTP",
+        "U64 REST",
+        "U64 TELNET",
+    )
+    assert tuple(row.rsplit(None, 1)[1] for row in frame.rows) == (
+        "FAIL",
+        "FAIL",
+        "FAIL",
+        "OK",
+        "OK",
+        "OK",
+        "OK",
     )
     assert frame.failure_spans == (
         TextSpan(row_index=0, start_column=12, end_column=16),
+        TextSpan(row_index=1, start_column=12, end_column=16),
         TextSpan(row_index=2, start_column=12, end_column=16),
     )
-    assert frame.shift_offset == (0, 28)
+    assert frame.shift_offset == (0, 6)
     assert frame.bottom_pixels == (6,)
     assert frame.bottom_pixel_width_px == 2
     assert frame.bottom_pixel_height_px == 2
@@ -1313,25 +1324,87 @@ def test_run_eink_probe_summary_runs_checks_and_draws_frame():
     )
 
 
-def test_run_forever_runs_eink_summary_then_holds_static(monkeypatch):
+def test_render_eink_summary_frame_skips_redraw_when_summary_output_is_already_visible():
+    drawn_frames = []
+    propagation_logs = []
+    display = SimpleNamespace(height=16, font_height=8, draw_frame=lambda frame: drawn_frames.append(frame))
+    app = SimpleNamespace(
+        state=SimpleNamespace(
+            row_width=16,
+            checks=(CheckRuntime(identifier="router", name="Router", status=Status.FAIL),),
+        ),
+        display=display,
+        display_liveness={"bottom_heartbeat": {"enabled": False}},
+        pending_status_updates={"router": {"status": "FAIL", "observed_at_s": 5.0}},
+        display_retry_at_s=None,
+        last_rendered_frame=None,
+        _log_display_propagation=lambda now_s, reason: propagation_logs.append((now_s, reason)),
+    )
+    app.last_rendered_frame = firmware_runtime._build_eink_probe_summary_frame(app, now_s=5.0)
+
+    reason = firmware_runtime._render_eink_summary_frame(app, 6.0, "state")
+
+    assert reason == "none"
+    assert drawn_frames == []
+    assert propagation_logs == [(6.0, "state")]
+
+
+def test_run_eink_refresh_loop_renders_state_changes_without_waiting_for_periodic_refresh(monkeypatch):
+    class FakeApp:
+        def __init__(self):
+            self.page_interval_s = 180
+            self.last_rendered_frame = None
+            self.pending_status_updates = {}
+
+    fake_app = FakeApp()
+    tick_calls = []
+    render_calls = []
+    sleep_calls = []
+    steady_values = iter((18.7, 18.9, 19.1))
+    sentinel = RuntimeError("stop after third poll")
+
+    monkeypatch.setattr(
+        firmware_runtime,
+        "_tick_eink_summary_state",
+        lambda app, now_s, watchdog=None: (
+            tick_calls.append(now_s),
+            setattr(app, "pending_status_updates", {"c64u": {"status": "FAIL", "observed_at_s": now_s}})
+            if len(tick_calls) == 2
+            else None,
+        ),
+    )
+    monkeypatch.setattr(
+        firmware_runtime,
+        "_render_eink_summary_frame",
+        lambda app, now_s, reason: render_calls.append((now_s, reason)) or setattr(app, "last_rendered_frame", object()) or app.pending_status_updates.clear() or reason,
+    )
+    monkeypatch.setattr(firmware_runtime, "_steady_now_s", lambda: next(steady_values))
+    monkeypatch.setattr(
+        firmware_runtime,
+        "_sleep_ms",
+        lambda value: sleep_calls.append(value) if len(sleep_calls) < 2 else (_ for _ in ()).throw(sentinel),
+    )
+
+    with pytest.raises(RuntimeError, match="stop after third poll"):
+        firmware_runtime._run_eink_refresh_loop(fake_app, 18.5, poll_interval_ms=200, now_provider=firmware_runtime._steady_now_s, sleep_ms=firmware_runtime._sleep_ms)
+
+    assert tick_calls == [18.5, 18.7, 18.9]
+    assert render_calls == [(18.5, "startup"), (18.7, "state")]
+    assert sleep_calls == [200, 200]
+
+
+def test_run_forever_routes_eink_to_summary_refresh_loop(monkeypatch):
     class FakeApp:
         def __init__(self):
             self.boot_logo_until_s = 18.5
             self.display_family = "eink"
 
     fake_app = FakeApp()
-    called = {"run_loop": 0, "hold": 0, "summary": []}
+    called = {}
 
     monkeypatch.setattr(firmware_runtime, "build_runtime_app_from_path", lambda path: fake_app)
     monkeypatch.setattr(firmware_runtime, "_now_s", lambda: 12.5)
-    startup_network_calls = []
-    button_test_calls = []
-    monkeypatch.setattr(firmware_runtime, "_run_startup_network", lambda app, now_s: startup_network_calls.append((app, now_s)) or now_s)
-    monkeypatch.setattr(
-        firmware_runtime,
-        "_maybe_run_button_self_test_from_app",
-        lambda app, now_provider, sleep_ms, watchdog=None: button_test_calls.append((app, watchdog)),
-    )
+    monkeypatch.setattr(firmware_runtime, "_run_startup_network", lambda app, now_s: now_s)
     monkeypatch.setattr(
         firmware_runtime,
         "_wait_for_boot_logo",
@@ -1339,25 +1412,25 @@ def test_run_forever_runs_eink_summary_then_holds_static(monkeypatch):
     )
     monkeypatch.setattr(
         firmware_runtime,
-        "run_loop",
-        lambda app, poll_interval_ms=50, now_provider=None, watchdog=None: called.__setitem__("run_loop", called["run_loop"] + 1),
-    )
-    monkeypatch.setattr(
-        firmware_runtime,
-        "_run_eink_probe_summary",
-        lambda app, now_s, watchdog=None: called["summary"].append((app, now_s, watchdog)),
-    )
-    monkeypatch.setattr(
-        firmware_runtime,
-        "hold_safe_display",
-        lambda poll_interval_ms=20, sleep_ms=None, watchdog=None, iterations=None: called.__setitem__("hold", called["hold"] + 1),
+        "_run_eink_refresh_loop",
+        lambda app, now_s, poll_interval_ms=20, now_provider=None, sleep_ms=None, watchdog=None: called.update(
+            {
+                "app": app,
+                "now_s": now_s,
+                "poll_interval_ms": poll_interval_ms,
+                "watchdog": watchdog,
+            }
+        ),
     )
 
     firmware_runtime.run_forever(poll_interval_ms=75)
 
-    assert called == {"run_loop": 0, "hold": 1, "summary": [(fake_app, 18.5, None)]}
-    assert startup_network_calls == [(fake_app, 12.5)]
-    assert button_test_calls == []
+    assert called == {
+        "app": fake_app,
+        "now_s": 18.5,
+        "poll_interval_ms": 75,
+        "watchdog": None,
+    }
 
 
 def test_render_eink_safe_hold_screen_draws_sparse_text_frame():

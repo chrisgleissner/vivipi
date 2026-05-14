@@ -20,20 +20,12 @@ def _display_family_from_config(path="config.json"):
 
 
 def main():
-    if _display_family_from_config() == "eink":
-        try:
-            from eink_runtime import run_forever
-        except ImportError as error:  # pragma: no cover - used by CPython tests
-            if getattr(error, "name", None) != "eink_runtime":
-                raise
-            from firmware.eink_runtime import run_forever
-    else:
-        try:
-            from runtime import run_forever
-        except ImportError as error:  # pragma: no cover - used by CPython tests
-            if getattr(error, "name", None) != "runtime":
-                raise
-            from firmware.runtime import run_forever
+    try:
+        from runtime import run_forever
+    except ImportError as error:  # pragma: no cover - used by CPython tests
+        if getattr(error, "name", None) != "runtime":
+            raise
+        from firmware.runtime import run_forever
     run_forever()
 
 

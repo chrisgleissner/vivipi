@@ -498,6 +498,8 @@ Rendering must be:
 - flicker-free
 - stable
 - visually static while probes are healthy
+- On e-paper displays, checks MUST continue to run on their configured schedules even when unchanged screens use a slower periodic refresh cadence.
+- On e-paper displays, any visible summary change MUST trigger the next refresh immediately instead of waiting for the periodic refresh interval.
 - Bottom-row heartbeat MAY move a 1 to 3 pixel cluster along the unused bottom scanline without altering layout or text.
 - When enabled, the bottom-row heartbeat MUST advance left-to-right and wrap back to the left after reaching the final slot.
 - Bottom-row heartbeat progress MUST be driven by completed probes so continued movement proves the runtime is still issuing probes.

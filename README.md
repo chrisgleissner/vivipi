@@ -8,21 +8,45 @@ See your device health at a glance.
 [![Hardware](https://img.shields.io/badge/hardware-Raspberry%20Pi%20Pico-blue)](https://github.com/chrisgleissner/vivipi/releases)
 [![Runtime](https://img.shields.io/badge/runtime-MicroPython%20%7C%20Python-blue)](https://github.com/chrisgleissner/vivipi)
 
-ViviPi (pronounced "VEE-vee-pie", from the Latin *viv-* in *vivere*, "to live") is a minimal, glanceable monitoring system for Raspberry Pi Pico display modules. It is built around a deterministic fixed-width UI that lets you read health state at a glance and inspect details with two hardware buttons. The default target is a Pico 2W with a 128x64 SH1107 OLED, but the runtime and build pipeline also support Waveshare Pico OLED, LCD, and e-paper modules.
+ViviPi (pronounced "VEE-vee-pie", from the Latin *viv-* in *vivere*, "to live") is a minimal, glanceable monitoring system for Raspberry Pi Pico display modules. It is built around a deterministic fixed-width UI that lets you read health state at a glance and inspect details with two hardware buttons. The default target is a Pico 2W with a 128x64 SH1107 OLED, and the runtime and build pipeline also support a broader set of Waveshare Pico OLED, LCD, and e-paper modules.
 
 ## Features
 
 - Fixed-width, event-driven UI designed for glanceable device health.
 - Two-button navigation for overview, detail, diagnostics, and about screens.
-- Display support for Pico OLED, LCD, and e-paper modules; verified on the Waveshare Pico OLED 1.3.
+- Display support for Pico OLED, LCD, and e-paper modules; hardware-tested on the Waveshare Pico OLED 1.3 and Waveshare Pico ePaper 2.13-B V4.
 - Built-in `PING`, `TELNET`, `FTP`, `HTTP`, and `SERVICE` checks.
 - Dedicated `IDENT` and `DMA` probes for Ultimate 64 and Commodore 64 Ultimate targets.
 - Configurable scheduling and back-off so repeated checks do not overwhelm targets.
 - One-command local workflow for install, test, firmware build, and deploy.
 
-![Boot Logo](./docs/img/vivipi_boot_logo.jpg)
-![Checks all OK](./docs/img/vivipi_checks_all_ok.png)
-![Checks partially OK](./docs/img/vivipi_checks_partially_ok.png)
+## Tested Hardware
+
+Current physical test coverage in this repository is limited to these two Pico 2W display builds:
+
+- `waveshare-pico-oled-1.3`
+- `waveshare-pico-epaper-2.13-b-v4`
+
+<p align="center">
+  <img src="./docs/img/vivipi_tested_picos.jpg" alt="Two ViviPi test devices side by side: a Pico OLED 1.3 on the left and a Pico ePaper 2.13-B V4 on the right." width="720">
+</p>
+
+<table>
+  <tr>
+    <td align="center">
+      <img src="./docs/img/vivipi_tested_pico_oled.jpg" alt="Close-up of the ViviPi display on the tested Waveshare Pico OLED 1.3 module." width="420">
+      <br>
+      <em>Tested OLED build: Waveshare Pico OLED 1.3</em>
+    </td>
+    <td align="center">
+      <img src="./docs/img/vivipi_tested_pico_epaper.jpg" alt="Close-up of the ViviPi display on the tested Waveshare Pico ePaper 2.13-B V4 module." width="420">
+      <br>
+      <em>Tested e-paper build: Waveshare Pico ePaper 2.13-B V4</em>
+    </td>
+  </tr>
+</table>
+
+All other display configurations listed in this README are currently untested on physical hardware in this project. There are no planned validation runs for additional devices at the moment; contributions that add verified hardware coverage are welcome.
 
 ## System Architecture
 

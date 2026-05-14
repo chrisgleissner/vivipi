@@ -1603,7 +1603,13 @@ class RuntimeApp:
         if next_page != self.state.page_index:
             self.state = set_page_index(self.state, next_page, select_visible=True)
 
-    def tick(self, now_s: float, button_events: tuple[ButtonEvent, ...] | None = None) -> str:
+    def step(
+        self,
+        now_s: float,
+        button_events: tuple[ButtonEvent, ...] | None = None,
+        *,
+        render: bool = True,
+    ) -> str:
         cycle_started, cycle_timer_kind = start_timer()
         events = button_events
         if events is None:
@@ -1624,10 +1630,13 @@ class RuntimeApp:
         self._apply_page_rotation(frame_now_s)
         self._apply_shift(frame_now_s)
 
-        reason = self.render_once(frame_now_s)
+        reason = self.render_once(frame_now_s) if render else "none"
 
         self.last_cycle_ms = elapsed_ms(cycle_started, cycle_timer_kind)
         self.metrics.record_cycle(self.last_cycle_ms)
         self._maybe_capture_memory_snapshot(frame_now_s)
         self._assert_debug_invariants()
         return reason
+
+    def tick(self, now_s: float, button_events: tuple[ButtonEvent, ...] | None = None) -> str:
+        return self.step(now_s, button_events=button_events, render=True)

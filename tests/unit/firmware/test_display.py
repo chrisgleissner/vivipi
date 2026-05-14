@@ -264,6 +264,23 @@ def test_render_framebuffer_draws_bottom_heartbeat():
     assert list(buffer) == [0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x80, 0x80]
 
 
+def test_render_to_surface_honors_bottom_heartbeat_gap():
+    frame = SimpleNamespace(
+        rows=("        ",),
+        inverted_row=None,
+        shift_offset=(0, 0),
+        inverted_spans=(),
+        failure_spans=(),
+        bottom_pixels=(5,),
+        bottom_pixel_gap_px=2,
+    )
+    surface = MonochromeSurface(8, 8)
+
+    render_to_surface(frame, surface, 8, 8, fake_glyph_lookup)
+
+    assert lit_pixels(surface.buffer, 8, 8) == {(5, 5)}
+
+
 def test_render_to_surface_supports_180_degree_rotation():
     frame = SimpleNamespace(
         rows=("A ",),

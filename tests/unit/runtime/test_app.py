@@ -141,7 +141,13 @@ def test_runtime_app_executor_exception_replaces_previous_ok_state_on_display():
             )
         raise OSError("network down")
 
-    app = RuntimeApp(definitions=(definition,), executor=executor, display=display, page_interval_s=0)
+    app = RuntimeApp(
+        definitions=(definition,),
+        executor=executor,
+        display=display,
+        page_interval_s=0,
+        probe_time_provider=lambda: 0.0,
+    )
     app.background_workers_enabled = False
 
     app.tick(0.0)
@@ -330,6 +336,40 @@ def test_runtime_app_starts_with_unknown_rows_before_the_first_check_runs():
     assert reason == "bootstrap"
     assert display.frames[-1].rows[0].startswith("Router")
     assert display.frames[-1].rows[0].endswith(" ?")
+
+
+def test_runtime_app_step_can_advance_state_without_drawing():
+    display = FakeDisplay()
+    definition = make_definition("router")
+
+    def executor(check_definition, now_s):
+        return CheckExecutionResult(
+            source_identifier=check_definition.identifier,
+            observations=(
+                CheckObservation(
+                    identifier=check_definition.identifier,
+                    name=check_definition.name,
+                    status=Status.FAIL,
+                    details="timeout",
+                    observed_at_s=now_s,
+                ),
+            ),
+        )
+
+    app = RuntimeApp(
+        definitions=(definition,),
+        executor=executor,
+        display=display,
+        page_interval_s=0,
+        probe_time_provider=lambda: 0.0,
+    )
+
+    reason = app.step(0.0, button_events=(), render=False)
+
+    assert reason == "none"
+    assert display.frames == []
+    assert app.state.checks[0].status == Status.DEG
+    assert app.pending_status_updates == {"router": {"status": "FAIL", "observed_at_s": 0.0}}
 
 
 def test_runtime_app_renders_when_shift_changes_without_other_state_changes():

@@ -443,7 +443,8 @@ def render_to_surface(frame, surface, font_width, font_height, glyph_lookup, fai
 
     bottom_pixel_width = max(1, int(getattr(frame, "bottom_pixel_width_px", 1)))
     bottom_pixel_height = max(1, int(getattr(frame, "bottom_pixel_height_px", 1)))
-    bottom_pixel_y = max(0, surface.height - bottom_pixel_height)
+    bottom_pixel_gap = max(0, int(getattr(frame, "bottom_pixel_gap_px", 0)))
+    bottom_pixel_y = max(0, surface.height - bottom_pixel_height - bottom_pixel_gap)
     for pixel_x in getattr(frame, "bottom_pixels", ()):  # bottom-row liveness uses the reserved baseline band.
         surface.fill_rect(int(pixel_x), bottom_pixel_y, bottom_pixel_width, bottom_pixel_height, surface.foreground_color)
 

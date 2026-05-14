@@ -6,6 +6,8 @@ import gc
 import json
 
 from vivipi.core.liveness import bottom_heartbeat_pixels
+from vivipi.core.models import CheckRuntime
+from vivipi.core.state import sort_checks
 
 try:
     import machine  # type: ignore[import-not-found]
@@ -128,6 +130,27 @@ def _summary_bottom_pixels(app) -> tuple[int, ...]:
     )
 
 
+def _summary_checks(app) -> tuple[CheckRuntime, ...]:
+    state = getattr(app, "state", None)
+    state_checks = getattr(state, "checks", ())
+    if isinstance(state_checks, (tuple, list)) and state_checks:
+        return sort_checks(tuple(state_checks))
+
+    definitions = tuple(getattr(app, "definitions", ()))
+    registered_results = getattr(app, "registered_results", {})
+    fallback_checks = []
+    for definition in definitions:
+        current = registered_results.get(definition.identifier, {}) if isinstance(registered_results, dict) else {}
+        fallback_checks.append(
+            CheckRuntime(
+                identifier=str(getattr(definition, "identifier", "")),
+                name=str(current.get("name") or getattr(definition, "name", getattr(definition, "identifier", "CHECK"))),
+                status=current.get("status"),
+            )
+        )
+    return sort_checks(tuple(fallback_checks))
+
+
 def _connect_wifi(config, watchdog=None, timeout_s: int = DEFAULT_WIFI_CONNECT_TIMEOUT_S):
     if network is None:
         return
@@ -157,19 +180,12 @@ def _build_summary_frame(app):
 
     row_width = max(1, int(getattr(getattr(app, "state", None), "row_width", 16)))
     row_height = max(8, int(getattr(getattr(app, "display", None), "font_height", 8)))
-    definitions = tuple(getattr(app, "definitions", ()))
-    registered_results = getattr(app, "registered_results", {})
-    summary_rows = []
     rows = []
     failure_spans = []
 
-    for definition in definitions:
-        current = registered_results.get(definition.identifier, {}) if isinstance(registered_results, dict) else {}
-        name_text = str(current.get("name") or getattr(definition, "name", getattr(definition, "identifier", "CHECK")))
-        status_text = _status_text(current.get("status"))
-        summary_rows.append((_fold_text(name_text), _fold_text(getattr(definition, "identifier", "")), name_text, status_text))
-
-    for row_index, (_, _, name_text, status_text) in enumerate(sorted(summary_rows, key=lambda item: (item[0], item[1]))):
+    for row_index, check in enumerate(_summary_checks(app)):
+        name_text = str(getattr(check, "name", "CHECK"))
+        status_text = _status_text(getattr(check, "status", None))
         name_width = max(1, row_width - len(status_text) - 1)
         rows.append(f"{_fit_row(name_text[:name_width], name_width)} {status_text}")
         if status_text == "FAIL":
@@ -195,6 +211,13 @@ def _build_summary_frame(app):
     )
 
 
+def _run_summary_cycle(app, now_s: float):
+    app.run_all_checks(now_s)
+    summary_frame = _build_summary_frame(app)
+    app.last_rendered_frame = summary_frame
+    getattr(app, "display").draw_frame(summary_frame)
+
+
 def run_forever(config_path: str = "config.json", poll_interval_ms: int = 20):
     del poll_interval_ms
     config = _load_config(config_path)
@@ -203,6 +226,7 @@ def run_forever(config_path: str = "config.json", poll_interval_ms: int = 20):
     import vivipi.runtime.checks as runtime_checks_module
     from vivipi.core.input import InputController
     from vivipi.core.models import DisplayMode, TransitionThresholds
+    from vivipi.runtime import state as runtime_state
     from vivipi.runtime.app import RuntimeApp
     from vivipi.runtime.checks import build_executor, build_runtime_definitions
 
@@ -231,6 +255,7 @@ def run_forever(config_path: str = "config.json", poll_interval_ms: int = 20):
         1,
         (int(display_config.get("height_px", 64)) - reserved_bottom_indicator_px(display_config)) // max(1, font_height),
     )
+    refresh_interval_s = max(1, int(display_config.get("page_interval_s", 180)))
     row_width = max(1, int(display_config.get("width_px", 128)) // max(1, font_width))
     check_state = config.get("check_state") if isinstance(config.get("check_state"), dict) else {}
 
@@ -262,13 +287,18 @@ def run_forever(config_path: str = "config.json", poll_interval_ms: int = 20):
         display_family="eink",
     )
     app.background_workers_enabled = False
+    runtime_state.bind_app(app)
 
     _connect_wifi(config, watchdog=watchdog)
-    now_s = _steady_now_s()
-    _feed_watchdog(watchdog)
-    app.run_all_checks(now_s)
-    _feed_watchdog(watchdog)
-    display.draw_frame(_build_summary_frame(app))
     while True:
+        now_s = _steady_now_s()
         _feed_watchdog(watchdog)
-        _sleep_ms(20)
+        _connect_wifi(config, watchdog=watchdog)
+        _run_summary_cycle(app, now_s)
+        deadline_s = now_s + refresh_interval_s
+        while True:
+            _feed_watchdog(watchdog)
+            remaining_ms = int(max(0, round((deadline_s - _steady_now_s()) * 1000)))
+            if remaining_ms <= 0:
+                break
+            _sleep_ms(min(200, remaining_ms))

@@ -68,6 +68,10 @@ EPAPER_BOTTOM_HEARTBEAT = {
     "gap_px": 3,
 }
 
+EPAPER_213_B_V4_ROTATED_BOTTOM_HEARTBEAT_MIN_WIDTH_PX = 4
+EPAPER_213_B_V4_ROTATED_BOTTOM_HEARTBEAT_MIN_HEIGHT_PX = 4
+EPAPER_213_B_V4_ROTATED_BOTTOM_HEARTBEAT_MIN_GAP_PX = 6
+
 
 def _fold(value: object) -> str:
     return str(value).strip().lower()
@@ -782,6 +786,34 @@ def _reserved_bottom_indicator_px(family: str, liveness: Mapping[str, object]) -
     return max(0, int(heartbeat.get("pixel_height_px", 0))) + max(0, int(heartbeat.get("gap_px", 0)))
 
 
+def _calibrate_bottom_heartbeat(
+    display_type: str,
+    rotation: int,
+    liveness: Mapping[str, object],
+) -> dict[str, object]:
+    resolved = dict(liveness)
+    heartbeat = dict(resolved.get("bottom_heartbeat", {})) if isinstance(resolved.get("bottom_heartbeat"), Mapping) else {}
+    if (
+        display_type == "waveshare-pico-epaper-2.13-b-v4"
+        and rotation == 180
+        and bool(heartbeat.get("enabled"))
+    ):
+        heartbeat["pixel_width_px"] = max(
+            int(heartbeat.get("pixel_width_px", 0)),
+            EPAPER_213_B_V4_ROTATED_BOTTOM_HEARTBEAT_MIN_WIDTH_PX,
+        )
+        heartbeat["pixel_height_px"] = max(
+            int(heartbeat.get("pixel_height_px", 0)),
+            EPAPER_213_B_V4_ROTATED_BOTTOM_HEARTBEAT_MIN_HEIGHT_PX,
+        )
+        heartbeat["gap_px"] = max(
+            int(heartbeat.get("gap_px", 0)),
+            EPAPER_213_B_V4_ROTATED_BOTTOM_HEARTBEAT_MIN_GAP_PX,
+        )
+    resolved["bottom_heartbeat"] = heartbeat
+    return resolved
+
+
 def reserved_bottom_indicator_px(display_config: Mapping[str, object] | None) -> int:
     if not isinstance(display_config, Mapping):
         return 0
@@ -972,8 +1004,10 @@ def normalize_display_config(raw_display: object) -> dict[str, object]:
         raise ValueError("device.display.pins must be a mapping")
 
     font_size = _parse_font_size_name(font.get("size"))
+    rotation = _parse_rotation(display.get("rotation"))
     heartbeat_defaults = EPAPER_BOTTOM_HEARTBEAT if definition["family"] == "eink" else DEFAULT_BOTTOM_HEARTBEAT
     liveness = _parse_display_liveness(display.get("liveness"), heartbeat_defaults=heartbeat_defaults)
+    liveness = _calibrate_bottom_heartbeat(display_type, rotation, liveness)
     default_font = infer_default_font(
         definition["width_px"],
         definition["height_px"],
@@ -1009,7 +1043,7 @@ def normalize_display_config(raw_display: object) -> dict[str, object]:
         "columns": _parse_columns(display.get("columns")),
         "column_separator": _parse_column_separator(display.get("column_separator")),
         "failure_color": _parse_failure_color(display.get("failure_color")),
-        "rotation": _parse_rotation(display.get("rotation")),
+        "rotation": rotation,
         "page_interval_s": _parse_duration_s(page_interval_value, "device.display.page_interval"),
         "boot_logo_duration_s": DEFAULT_BOOT_LOGO_DURATION_S,
         "column_offset": _parse_non_negative_int(

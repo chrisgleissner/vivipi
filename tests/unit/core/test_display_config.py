@@ -209,6 +209,42 @@ def test_normalize_display_config_accepts_180_degree_rotation_only():
         normalize_display_config({"type": "waveshare-pico-oled-1.3", "rotation": 90})
 
 
+def test_normalize_display_config_calibrates_rotated_213_b_v4_bottom_heartbeat_gap():
+    config = normalize_display_config(
+        {
+            "type": "waveshare-pico-epaper-2.13-b-v4",
+            "rotation": 180,
+            "liveness": {
+                "bottom_heartbeat": {
+                    "enabled": True,
+                    "gap_px": 3,
+                }
+            },
+        }
+    )
+
+    assert config["liveness"]["bottom_heartbeat"]["pixel_width_px"] == 4
+    assert config["liveness"]["bottom_heartbeat"]["pixel_height_px"] == 4
+    assert config["liveness"]["bottom_heartbeat"]["gap_px"] == 6
+
+    unrotated = normalize_display_config(
+        {
+            "type": "waveshare-pico-epaper-2.13-b-v4",
+            "rotation": 0,
+            "liveness": {
+                "bottom_heartbeat": {
+                    "enabled": True,
+                    "gap_px": 3,
+                }
+            },
+        }
+    )
+
+    assert unrotated["liveness"]["bottom_heartbeat"]["pixel_width_px"] == 2
+    assert unrotated["liveness"]["bottom_heartbeat"]["pixel_height_px"] == 2
+    assert unrotated["liveness"]["bottom_heartbeat"]["gap_px"] == 3
+
+
 def test_normalize_display_config_keeps_pixel_font_overrides_for_backwards_compatibility():
     config = normalize_display_config(
         {
