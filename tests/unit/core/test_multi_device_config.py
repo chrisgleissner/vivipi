@@ -47,6 +47,7 @@ def test_expand_multi_device_settings_merges_defaults_and_device_overrides():
     assert expanded["epaper"]["device"]["display"]["type"] == "waveshare-pico-epaper-2.13-b-v4"
     assert expanded["oled"]["service"]["default_prefix"] == "adb"
     assert expanded["epaper"]["checks_config"] == "checks.epaper.yaml"
+    assert expanded["oled"]["selector"] == {"serial_by_id": "/dev/serial/by-id/usb-oled"}
 
 
 def test_expand_multi_device_settings_rejects_auto_selector_values():
@@ -122,4 +123,26 @@ def test_expand_multi_device_settings_supports_nested_display_liveness_overrides
     assert expanded["epaper"]["device"]["display"]["liveness"] == {
         "contrast_breathing": {"enabled": False},
         "bottom_heartbeat": {"enabled": False, "period_s": 1, "pixel_count": 1, "position": "left"},
+    }
+
+
+def test_expand_multi_device_settings_normalizes_selector_values():
+    settings = {
+        "device": {"board": "pico2w"},
+        "checks_config": "checks.local.yaml",
+        "devices": {
+            "oled": {
+                "selector": {
+                    "serial_by_id": "  /dev/serial/by-id/usb-oled  ",
+                    "bootsel_disk": "  /dev/disk/by-id/usb-oled  ",
+                },
+            },
+        },
+    }
+
+    expanded = expand_multi_device_settings(settings)
+
+    assert expanded["oled"]["selector"] == {
+        "serial_by_id": "/dev/serial/by-id/usb-oled",
+        "bootsel_disk": "/dev/disk/by-id/usb-oled",
     }

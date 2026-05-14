@@ -1571,6 +1571,23 @@ def test_build_deploy_main_dispatches_multi_device_deploy(monkeypatch):
     assert exit_code == 0
 
 
+def test_build_deploy_main_rejects_port_for_multi_device_deploy():
+    with pytest.raises(ValueError, match="single-device deploy-firmware"):
+        build_deploy.main(
+            [
+                "deploy-firmware",
+                "--config",
+                "config.yaml",
+                "--output-dir",
+                "release-dir",
+                "--device",
+                "epaper",
+                "--port",
+                "/dev/ttyACM0",
+            ]
+        )
+
+
 def test_build_deploy_main_dispatches_provision_firmware(monkeypatch):
     monkeypatch.setattr(
         build_deploy,
@@ -1637,6 +1654,9 @@ def test_resolve_bootsel_partition_path_handles_existing_partitions_and_missing(
 
     assert build_deploy._resolve_bootsel_partition_path(str(part_path)) == part_path
     assert build_deploy._resolve_bootsel_partition_path(str(tmp_path / "usb-RPI_RP2350")) == part_path
+
+    with pytest.raises(ValueError, match="could not resolve BOOTSEL partition"):
+        build_deploy._resolve_bootsel_partition_path(str(tmp_path / "missing-part1"))
 
     with pytest.raises(ValueError, match="could not resolve BOOTSEL partition"):
         build_deploy._resolve_bootsel_partition_path(str(tmp_path / "missing"))
@@ -1723,6 +1743,23 @@ def test_provision_device_copies_uf2_and_confirms_serial(tmp_path: Path, monkeyp
     assert recorded["commands"] == [
         (["mpremote", "connect", "/dev/ttyACM1", "fs", "ls", ":"], "/dev/ttyACM1", 0),
     ]
+
+
+def test_provision_device_requires_serial_identity_selector(tmp_path: Path, monkeypatch):
+    uf2_path = tmp_path / "firmware.uf2"
+    uf2_path.write_text("uf2", encoding="utf-8")
+    monkeypatch.setattr(build_deploy, "_resolve_bootstrap_uf2_path", lambda *args, **kwargs: uf2_path)
+    with pytest.raises(ValueError, match="selector.serial_by_id or selector.port"):
+        build_deploy.provision_device(
+            tmp_path / "config.yaml",
+            {
+                "bootstrap": {"serial_timeout_s": 45},
+                "selector": {"bootsel_disk": "/dev/disk/by-id/usb-RPI_RP2350"},
+            },
+            "/dev/disk/by-id/usb-RPI_RP2350",
+            tmp_path / "device",
+            run_command=lambda *args, **kwargs: None,
+        )
 
 
 def test_provision_firmware_targets_and_output_helpers_cover_remaining_result_paths(monkeypatch, capsys):

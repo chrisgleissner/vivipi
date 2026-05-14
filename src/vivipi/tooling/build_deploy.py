@@ -21,7 +21,7 @@ from urllib.request import urlretrieve
 import yaml
 
 from vivipi.core.config import parse_checks_config
-from vivipi.core.device_inventory import resolve_device_inventory_state
+from vivipi.core.device_inventory import DeviceInventoryState, resolve_device_inventory_state
 from vivipi.core.display import (
     _parse_brightness as _core_parse_brightness,
     _parse_column_separator as _core_parse_column_separator,
@@ -1019,7 +1019,7 @@ def resolve_configured_device_inventory(
     serial_candidates: list[str] | None = None,
     port_candidates: list[str] | None = None,
     bootsel_candidates: list[str] | None = None,
-) -> dict[str, object]:
+) -> dict[str, DeviceInventoryState]:
     selected_settings = load_selected_build_deploy_settings(
         config_path,
         env=env,
@@ -1085,7 +1085,9 @@ def _resolve_bootstrap_uf2_path(source_config_path: Path, settings: dict[str, ob
 def _resolve_bootsel_partition_path(bootsel_disk: str) -> Path:
     disk_path = Path(bootsel_disk)
     if disk_path.name.endswith("-part1"):
-        return disk_path
+        if disk_path.exists():
+            return disk_path
+        raise ValueError(f"could not resolve BOOTSEL partition for {bootsel_disk}")
     partition_path = disk_path.with_name(f"{disk_path.name}-part1")
     if partition_path.exists():
         return partition_path
@@ -1128,9 +1130,9 @@ def _wait_for_serial_state(
     serial_candidates: list[str] | None = None,
     port_candidates: list[str] | None = None,
     bootsel_candidates: list[str] | None = None,
-) -> object:
+) -> DeviceInventoryState:
     deadline = time.monotonic() + timeout_s
-    last_state = None
+    last_state: DeviceInventoryState | None = None
     while time.monotonic() <= deadline:
         last_state = resolve_device_inventory_state(
             selector,
@@ -1144,6 +1146,12 @@ def _wait_for_serial_state(
     raise TimeoutError(f"timed out waiting for serial device; last state was {getattr(last_state, 'state', 'unknown')}")
 
 
+def _require_serial_identity_selector(selector: dict[str, str]) -> dict[str, str]:
+    if "serial_by_id" in selector or "port" in selector:
+        return selector
+    raise ValueError("provisioning requires selector.serial_by_id or selector.port")
+
+
 def provision_device(
     config_path: str | Path,
     settings: dict[str, object],
@@ -1154,15 +1162,15 @@ def provision_device(
 ) -> str:
     effective_run_command = _default_run_command if run_command is None else run_command
     source_config_path = Path(config_path).resolve()
+    bootstrap = settings.get("bootstrap") if isinstance(settings.get("bootstrap"), dict) else {}
+    timeout_s = float(bootstrap.get("serial_timeout_s", 30))
+    selector = _require_serial_identity_selector(_selector_from_settings(settings))
     uf2_path = _resolve_bootstrap_uf2_path(source_config_path, settings, device_output_dir)
     partition_path = _resolve_bootsel_partition_path(bootsel_disk)
     mountpoint = _ensure_bootsel_mountpoint(partition_path, run_command=effective_run_command)
     shutil.copy2(uf2_path, mountpoint / uf2_path.name)
     os.sync()
 
-    bootstrap = settings.get("bootstrap") if isinstance(settings.get("bootstrap"), dict) else {}
-    timeout_s = float(bootstrap.get("serial_timeout_s", 30))
-    selector = _selector_from_settings(settings)
     serial_state = _wait_for_serial_state(selector, timeout_s=timeout_s)
     if serial_state.serial_path is None:
         raise RuntimeError("provisioning completed without a resolved serial path")
@@ -1544,6 +1552,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
     if args.command == "deploy-firmware":
+        if args.port and (args.all_devices or getattr(args, "device", None)):
+            raise ValueError("--port is only supported for single-device deploy-firmware")
         if args.all_devices or getattr(args, "device", None):
             return _report_operation_results(
                 deploy_firmware_targets(

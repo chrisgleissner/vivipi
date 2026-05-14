@@ -29,6 +29,7 @@ def expand_multi_device_settings(settings: Mapping[str, object]) -> dict[str, di
 
         merged = _deep_merge(defaults, override)
         selector = _normalize_selector(device_id, merged.get("selector"))
+        merged["selector"] = selector
         for selector_key, selector_value in selector.items():
             selector_identity = (selector_key, selector_value)
             existing_owner = seen_selectors.get(selector_identity)
