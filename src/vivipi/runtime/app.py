@@ -81,10 +81,10 @@ def _network_priority(definition: CheckDefinition) -> tuple[int, str]:
         "PING": 0,
         "IDENT": 1,
         "DMA": 2,
-        "TELNET": 3,
-        "FTP": 4,
-        "HTTP": 5,
-        "SERVICE": 6,
+        "FTP": 3,
+        "HTTP": 4,
+        "SERVICE": 5,
+        "TELNET": 6,
     }
     return (check_order.get(_enum_text(definition.check_type), 99), definition.identifier)
 
@@ -224,6 +224,26 @@ def _normalize_display_liveness(display_liveness: object) -> dict[str, dict[str,
     return normalized
 
 
+def _normalize_display_refresh(display_refresh: object) -> dict[str, int]:
+    if display_refresh is None:
+        raw = {}
+    elif isinstance(display_refresh, dict):
+        raw = dict(display_refresh)
+    else:
+        raise ValueError("display_refresh must be a mapping when provided")
+
+    min_interval_s = int(raw.get("min_interval_s", raw.get("min_interval", 0)))
+    probe_cycles_per_refresh = int(raw.get("probe_cycles_per_refresh", 1))
+    if min_interval_s < 0:
+        raise ValueError("display_refresh.min_interval_s must not be negative")
+    if probe_cycles_per_refresh < 1:
+        raise ValueError("display_refresh.probe_cycles_per_refresh must be at least 1")
+    return {
+        "min_interval_s": min_interval_s,
+        "probe_cycles_per_refresh": probe_cycles_per_refresh,
+    }
+
+
 class RuntimeApp:
     def __init__(
         self,
@@ -244,6 +264,7 @@ class RuntimeApp:
         visible_degraded: bool = True,
         highlight_selection: bool = True,
         display_liveness: dict[str, object] | None = None,
+        display_refresh: dict[str, object] | None = None,
         sleep_ms=_sleep_ms,
         probe_time_provider=_monotonic_now_s,
         version: str = "",
@@ -264,6 +285,7 @@ class RuntimeApp:
         self.visible_degraded = bool(visible_degraded)
         self.highlight_selection = bool(highlight_selection)
         self.display_liveness = _normalize_display_liveness(display_liveness)
+        self.display_refresh = _normalize_display_refresh(display_refresh)
         self.sleep_ms = sleep_ms
         self.probe_time_provider = probe_time_provider
         self.display_family = str(display_family).strip().lower()
@@ -355,7 +377,9 @@ class RuntimeApp:
         self.last_rendered_feedback = ""
         self.last_rendered_debug_mode = False
         self.last_success_at = {definition.identifier: None for definition in self.definitions}
+        self.completed_probe_counts = {definition.identifier: 0 for definition in self.definitions}
         self.pending_status_updates: dict[str, dict[str, object]] = {}
+        self.pending_status_cycle_started: int | None = None
         self.network_operation_inflight = False
         self.network_operation_result: dict[str, object] | None = None
 
@@ -1144,7 +1168,9 @@ class RuntimeApp:
     def _apply_completed_check(self, completed: CompletedCheckRun):
         definition = completed.definition
         previous_status = self.registered_results.get(definition.identifier, {}).get("status")
+        completed_cycles_before = self.completed_probe_cycles()
         self.last_completed_at[definition.identifier] = completed.completed_at_s
+        self.completed_probe_counts[definition.identifier] = self.completed_probe_counts.get(definition.identifier, 0) + 1
         if self.display_liveness["bottom_heartbeat"].get("enabled"):
             self.bottom_heartbeat_step += 1
         if completed.error is not None:
@@ -1175,7 +1201,13 @@ class RuntimeApp:
                 replace_source_identifier=definition.identifier if _enum_text(definition.check_type) == "SERVICE" else None,
             )
             self._record_exception("check", completed.error, observed_at_s=completed.completed_at_s, identifier=definition.identifier)
-            self._track_status_transition(definition.identifier, previous_status, "FAIL", completed.completed_at_s)
+            self._track_status_transition(
+                definition.identifier,
+                previous_status,
+                "FAIL",
+                completed.completed_at_s,
+                completed_cycles_before,
+            )
             return None
 
         result = completed.result
@@ -1193,6 +1225,7 @@ class RuntimeApp:
             previous_status,
             self.registered_results.get(definition.identifier, {}).get("status"),
             completed.completed_at_s,
+            completed_cycles_before,
         )
         return result
 
@@ -1290,7 +1323,7 @@ class RuntimeApp:
             return
         self.render_once(float(now_s))
 
-    def _run_due_checks(self, now_s: float):
+    def _run_due_checks(self, now_s: float, max_checks: int | None = None):
         # Hot path: keep metrics on every execution but only log state transitions.
         scheduled_checks = due_checks(self.definitions, self._copy_last_started_at(), now_s)
         host_order: list[str | None] = []
@@ -1306,7 +1339,10 @@ class RuntimeApp:
             group = groups[host_key]
             group.sort(key=lambda item: _network_priority(item.definition))
             ordered.extend(group)
-        for scheduled in ordered:
+        limit = None if max_checks is None else max(0, int(max_checks))
+        for index, scheduled in enumerate(ordered):
+            if limit is not None and index >= limit:
+                break
             self._queue_check(scheduled.definition, now_s)
 
     def prime_due_checks(self, now_s: float):
@@ -1371,7 +1407,9 @@ class RuntimeApp:
         self.last_logged_liveness_signature = None
         self.last_rendered_feedback = ""
         self.last_rendered_debug_mode = False
+        self.completed_probe_counts = {definition.identifier: 0 for definition in self.definitions}
         self.pending_status_updates.clear()
+        self.pending_status_cycle_started = None
         self.network_operation_inflight = False
         self.network_operation_result = None
         for definition in self.definitions:
@@ -1543,11 +1581,25 @@ class RuntimeApp:
             ),
         )
 
-    def _track_status_transition(self, identifier: str, previous_status: object, current_status: object, observed_at_s: float | None):
+    def completed_probe_cycles(self) -> int:
+        if not self.definitions:
+            return 0
+        return min(self.completed_probe_counts.get(definition.identifier, 0) for definition in self.definitions)
+
+    def _track_status_transition(
+        self,
+        identifier: str,
+        previous_status: object,
+        current_status: object,
+        observed_at_s: float | None,
+        completed_cycles_before: int = 0,
+    ):
         previous = "?" if previous_status is None else str(previous_status)
         current = "?" if current_status is None else str(current_status)
         if previous == current or observed_at_s is None:
             return
+        if self.pending_status_cycle_started is None:
+            self.pending_status_cycle_started = max(0, int(completed_cycles_before))
         self.pending_status_updates[identifier] = {
             "status": current,
             "observed_at_s": observed_at_s,
@@ -1581,6 +1633,8 @@ class RuntimeApp:
                 ),
             )
             self.pending_status_updates.pop(identifier, None)
+        if not self.pending_status_updates:
+            self.pending_status_cycle_started = None
 
     def _apply_shift(self, now_s: float):
         offset = self.shift_controller.offset_for_elapsed(now_s)
@@ -1609,6 +1663,7 @@ class RuntimeApp:
         button_events: tuple[ButtonEvent, ...] | None = None,
         *,
         render: bool = True,
+        max_due_checks: int | None = None,
     ) -> str:
         cycle_started, cycle_timer_kind = start_timer()
         events = button_events
@@ -1622,7 +1677,7 @@ class RuntimeApp:
         self._drain_probe_traces()
         self._drain_completed_checks()
         self._maybe_reconnect_network(now_s)
-        self._run_due_checks(now_s)
+        self._run_due_checks(now_s, max_checks=max_due_checks)
         self._drain_probe_traces()
         self._drain_completed_checks()
         self._drain_probe_traces()

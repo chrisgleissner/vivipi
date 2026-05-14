@@ -277,6 +277,7 @@ def test_build_runtime_app_uses_injected_factories_and_defers_wifi_startup():
             visible_degraded,
             highlight_selection,
             display_liveness,
+            display_refresh,
             sleep_ms,
             probe_time_provider,
             version="",
@@ -299,6 +300,7 @@ def test_build_runtime_app_uses_injected_factories_and_defers_wifi_startup():
             called["visible_degraded"] = visible_degraded
             called["highlight_selection"] = highlight_selection
             called["display_liveness"] = display_liveness
+            called["display_refresh"] = display_refresh
             called["sleep_ms"] = sleep_ms
             called["probe_time_provider"] = probe_time_provider
             called["version"] = version
@@ -395,6 +397,7 @@ def test_build_runtime_app_uses_injected_factories_and_defers_wifi_startup():
             "gap_px": 0,
         },
     }
+    assert called["display_refresh"] == {"min_interval_s": 0, "probe_cycles_per_refresh": 1}
     assert called["version"] == "1.2.3"
     assert called["build_time"] == "2025-04-05T12:00Z"
     assert called["display_family"] == "oled"
@@ -1391,6 +1394,119 @@ def test_run_eink_refresh_loop_renders_state_changes_without_waiting_for_periodi
     assert tick_calls == [18.5, 18.7, 18.9]
     assert render_calls == [(18.5, "startup"), (18.7, "state")]
     assert sleep_calls == [200, 200]
+
+
+def test_run_eink_refresh_loop_waits_for_a_completed_probe_cycle_before_rendering_state_change(monkeypatch):
+    class FakeApp:
+        def __init__(self):
+            self.page_interval_s = 180
+            self.last_rendered_frame = None
+            self.pending_status_updates = {}
+            self.pending_status_cycle_started = None
+            self.display_refresh = {"min_interval_s": 0, "probe_cycles_per_refresh": 1}
+            self.completed_cycles = 0
+
+        def completed_probe_cycles(self):
+            return self.completed_cycles
+
+    fake_app = FakeApp()
+    tick_calls = []
+    render_calls = []
+    sleep_calls = []
+    steady_values = iter((18.7, 18.9, 19.1))
+    sentinel = RuntimeError("stop after third poll")
+
+    def fake_tick(app, now_s, watchdog=None):
+        tick_calls.append(now_s)
+        if len(tick_calls) == 2:
+            app.pending_status_updates = {"c64u": {"status": "FAIL", "observed_at_s": now_s}}
+            app.pending_status_cycle_started = 0
+        elif len(tick_calls) == 3:
+            app.completed_cycles = 1
+
+    monkeypatch.setattr(firmware_runtime, "_tick_eink_summary_state", fake_tick)
+    monkeypatch.setattr(
+        firmware_runtime,
+        "_render_eink_summary_frame",
+        lambda app, now_s, reason: render_calls.append((now_s, reason))
+        or setattr(app, "last_rendered_frame", object())
+        or app.pending_status_updates.clear()
+        or setattr(app, "pending_status_cycle_started", None)
+        or reason,
+    )
+    monkeypatch.setattr(firmware_runtime, "_steady_now_s", lambda: next(steady_values))
+    monkeypatch.setattr(
+        firmware_runtime,
+        "_sleep_ms",
+        lambda value: sleep_calls.append(value) if len(sleep_calls) < 2 else (_ for _ in ()).throw(sentinel),
+    )
+
+    with pytest.raises(RuntimeError, match="stop after third poll"):
+        firmware_runtime._run_eink_refresh_loop(fake_app, 18.5, poll_interval_ms=200, now_provider=firmware_runtime._steady_now_s, sleep_ms=firmware_runtime._sleep_ms)
+
+    assert tick_calls == [18.5, 18.7, 18.9]
+    assert render_calls == [(18.5, "startup"), (18.9, "state")]
+    assert sleep_calls == [200, 200]
+
+
+def test_run_eink_refresh_loop_respects_minimum_refresh_interval_for_state_changes(monkeypatch):
+    class FakeApp:
+        def __init__(self):
+            self.page_interval_s = 180
+            self.last_rendered_frame = object()
+            self.last_render_at_s = 5.0
+            self.pending_status_updates = {"c64u": {"status": "FAIL", "observed_at_s": 5.0}}
+            self.pending_status_cycle_started = 0
+            self.display_refresh = {"min_interval_s": 10, "probe_cycles_per_refresh": 1}
+
+        def completed_probe_cycles(self):
+            return 1
+
+    fake_app = FakeApp()
+    tick_calls = []
+    render_calls = []
+    sleep_calls = []
+    steady_values = iter((10.0, 15.0, 20.0))
+    sentinel = RuntimeError("stop after third poll")
+
+    monkeypatch.setattr(
+        firmware_runtime,
+        "_tick_eink_summary_state",
+        lambda app, now_s, watchdog=None: tick_calls.append(now_s),
+    )
+    monkeypatch.setattr(
+        firmware_runtime,
+        "_render_eink_summary_frame",
+        lambda app, now_s, reason: render_calls.append((now_s, reason))
+        or app.pending_status_updates.clear()
+        or setattr(app, "pending_status_cycle_started", None)
+        or reason,
+    )
+    monkeypatch.setattr(firmware_runtime, "_steady_now_s", lambda: next(steady_values))
+    monkeypatch.setattr(
+        firmware_runtime,
+        "_sleep_ms",
+        lambda value: sleep_calls.append(value) if len(sleep_calls) < 2 else (_ for _ in ()).throw(sentinel),
+    )
+
+    with pytest.raises(RuntimeError, match="stop after third poll"):
+        firmware_runtime._run_eink_refresh_loop(fake_app, 6.0, poll_interval_ms=200, now_provider=firmware_runtime._steady_now_s, sleep_ms=firmware_runtime._sleep_ms)
+
+    assert tick_calls == [6.0, 10.0, 15.0]
+    assert render_calls == [(15.0, "state")]
+    assert sleep_calls == [200, 200]
+
+
+def test_tick_eink_summary_state_limits_runtime_step_to_one_due_check():
+    calls = []
+
+    class FakeApp:
+        def step(self, now_s, button_events=(), render=True, max_due_checks=None):
+            calls.append((now_s, button_events, render, max_due_checks))
+
+    firmware_runtime._tick_eink_summary_state(FakeApp(), 18.5)
+
+    assert calls == [(18.5, (), False, 1)]
 
 
 def test_run_forever_routes_eink_to_summary_refresh_loop(monkeypatch):

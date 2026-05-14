@@ -211,6 +211,10 @@ def test_load_build_deploy_settings_substitutes_environment_placeholders(tmp_pat
     assert settings["device"]["display"]["font"] == {"width_px": 8, "height_px": 8}
     assert settings["device"]["display"]["page_interval_s"] == 20
     assert settings["device"]["display"]["boot_logo_duration_s"] == 4
+    assert settings["device"]["display"]["refresh"] == {
+        "min_interval_s": 0,
+        "probe_cycles_per_refresh": 1,
+    }
     assert settings["device"]["display"]["brightness"] == 128
     assert settings["device"]["display"]["liveness"]["contrast_breathing"] == {"enabled": False, "period_s": 30, "amplitude": 16}
     assert settings["device"]["display"]["liveness"]["per_row_micro"] == {"enabled": False, "period_s": 15, "stagger": True}
@@ -1110,6 +1114,36 @@ def test_render_device_runtime_config_serializes_optional_check_state():
 
     assert rendered["check_state"]["failures_to_failed"] == 2
     assert rendered["check_state"]["visible_degraded"] is False
+
+
+def test_render_device_runtime_config_serializes_display_refresh():
+    settings = {
+        "device": {
+            "board": "pico2w",
+            "buttons": {"a": "GP15", "b": "GP17"},
+            "display": {
+                "type": "waveshare-pico-epaper-2.13-b-v4",
+                "refresh": {"min_interval_s": 10, "probe_cycles_per_refresh": 2},
+            },
+        },
+        "wifi": {"ssid": "wifi", "password": "secret"},
+        "service": {},
+    }
+    checks = (
+        CheckDefinition(
+            identifier="router",
+            name="Router",
+            check_type=CheckType.PING,
+            target="192.168.1.1",
+        ),
+    )
+
+    rendered = render_device_runtime_config(settings, checks)
+
+    assert rendered["device"]["display"]["refresh"] == {
+        "min_interval_s": 10,
+        "probe_cycles_per_refresh": 2,
+    }
 
 
 def test_render_device_runtime_config_serializes_probe_schedule():

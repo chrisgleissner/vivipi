@@ -195,6 +195,11 @@ def test_runtime_app_helper_parsers_cover_fallbacks_and_display_liveness_validat
         },
     }
 
+    assert runtime_app_module._normalize_display_refresh({"min_interval_s": 10, "probe_cycles_per_refresh": 2}) == {
+        "min_interval_s": 10,
+        "probe_cycles_per_refresh": 2,
+    }
+
     with pytest.raises(ValueError, match="display liveness settings must use boolean values"):
         runtime_app_module._coerce_bool("maybe", True)
 
@@ -203,6 +208,12 @@ def test_runtime_app_helper_parsers_cover_fallbacks_and_display_liveness_validat
 
     with pytest.raises(ValueError, match="display_liveness.contrast_breathing must be a mapping"):
         runtime_app_module._normalize_display_liveness({"contrast_breathing": []})
+
+    with pytest.raises(ValueError, match="display_refresh must be a mapping when provided"):
+        runtime_app_module._normalize_display_refresh([])
+
+    with pytest.raises(ValueError, match="display_refresh.probe_cycles_per_refresh must be at least 1"):
+        runtime_app_module._normalize_display_refresh({"probe_cycles_per_refresh": 0})
 
 
 def test_runtime_app_applies_immediate_failure_thresholds_when_configured():
@@ -370,6 +381,113 @@ def test_runtime_app_step_can_advance_state_without_drawing():
     assert display.frames == []
     assert app.state.checks[0].status == Status.DEG
     assert app.pending_status_updates == {"router": {"status": "FAIL", "observed_at_s": 0.0}}
+
+
+def test_runtime_app_step_can_limit_due_checks_to_one_per_call():
+    display = FakeDisplay()
+    definitions = (
+        CheckDefinition(identifier="ftp", name="Ftp", check_type=CheckType.FTP, target="router.local"),
+        CheckDefinition(identifier="http", name="Http", check_type=CheckType.HTTP, target="http://router.local/health"),
+    )
+    calls = []
+
+    def executor(check_definition, now_s):
+        calls.append(check_definition.identifier)
+        return CheckExecutionResult(
+            source_identifier=check_definition.identifier,
+            observations=(
+                CheckObservation(
+                    identifier=check_definition.identifier,
+                    name=check_definition.name,
+                    status=Status.OK,
+                    observed_at_s=now_s,
+                ),
+            ),
+        )
+
+    app = RuntimeApp(
+        definitions=definitions,
+        executor=executor,
+        display=display,
+        page_interval_s=0,
+        probe_time_provider=lambda: 0.0,
+    )
+
+    app.step(0.0, button_events=(), render=False, max_due_checks=1)
+
+    assert calls == ["ftp"]
+    assert app.state.checks[0].status == Status.OK
+    assert app.state.checks[1].status == Status.UNKNOWN
+
+
+def test_runtime_app_tracks_completed_probe_cycles_from_the_slowest_check():
+    display = FakeDisplay()
+    definitions = (
+        make_definition("alpha"),
+        make_definition("bravo"),
+    )
+    calls = []
+
+    def executor(check_definition, now_s):
+        calls.append(check_definition.identifier)
+        return CheckExecutionResult(
+            source_identifier=check_definition.identifier,
+            observations=(
+                CheckObservation(
+                    identifier=check_definition.identifier,
+                    name=check_definition.name,
+                    status=Status.OK,
+                    observed_at_s=now_s,
+                ),
+            ),
+        )
+
+    app = RuntimeApp(
+        definitions=definitions,
+        executor=executor,
+        display=display,
+        page_interval_s=0,
+        probe_time_provider=lambda: 0.0,
+    )
+
+    app._run_check(definitions[0], 0.0)
+    app._run_check(definitions[0], 1.0)
+    app._run_check(definitions[1], 2.0)
+
+    assert calls == ["alpha", "alpha", "bravo"]
+    assert app.completed_probe_cycles() == 1
+
+
+def test_runtime_app_status_transition_records_cycle_start_before_the_completing_probe():
+    display = FakeDisplay()
+    definition = make_definition("router")
+
+    def executor(check_definition, now_s):
+        return CheckExecutionResult(
+            source_identifier=check_definition.identifier,
+            observations=(
+                CheckObservation(
+                    identifier=check_definition.identifier,
+                    name=check_definition.name,
+                    status=Status.FAIL,
+                    details="timeout",
+                    observed_at_s=now_s,
+                ),
+            ),
+        )
+
+    app = RuntimeApp(
+        definitions=(definition,),
+        executor=executor,
+        display=display,
+        page_interval_s=0,
+        probe_time_provider=lambda: 0.0,
+    )
+
+    app.step(0.0, button_events=(), render=False)
+
+    assert app.completed_probe_cycles() == 1
+    assert app.pending_status_cycle_started == 0
 
 
 def test_runtime_app_renders_when_shift_changes_without_other_state_changes():
@@ -1584,6 +1702,7 @@ def test_runtime_app_waits_between_due_checks_for_the_same_host_by_default():
     definitions = (
         CheckDefinition(identifier="http", name="Http", check_type=CheckType.HTTP, target="http://router.local/health"),
         CheckDefinition(identifier="ftp", name="Ftp", check_type=CheckType.FTP, target="router.local"),
+        CheckDefinition(identifier="telnet", name="Telnet", check_type=CheckType.TELNET, target="router.local:23"),
         CheckDefinition(identifier="other", name="Other", check_type=CheckType.HTTP, target="http://nas.local/health"),
     )
     calls = []
@@ -1619,13 +1738,14 @@ def test_runtime_app_waits_between_due_checks_for_the_same_host_by_default():
 
     app.tick(0.0)
     for _ in range(20):
-        if len(calls) == 3:
+        if len(calls) == 4:
             break
         app.tick(0.05)
 
-    assert set(calls) == {"ftp", "http", "other"}
+    assert set(calls) == {"ftp", "http", "telnet", "other"}
     assert calls.index("ftp") < calls.index("http")
-    assert sleep_calls == [250]
+    assert calls.index("http") < calls.index("telnet")
+    assert sleep_calls == [250, 250]
 
 
 def test_runtime_app_can_disable_same_host_probe_backoff():

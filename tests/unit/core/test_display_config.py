@@ -43,6 +43,7 @@ def test_normalize_display_config_defaults_to_inferred_oled_geometry_and_font():
     assert config["rotation"] == 0
     assert config["page_interval_s"] == 20
     assert config["boot_logo_duration_s"] == 4
+    assert config["refresh"] == {"min_interval_s": 0, "probe_cycles_per_refresh": 1}
     assert config["liveness"]["contrast_breathing"]["enabled"] is False
     assert config["liveness"]["per_row_micro"]["enabled"] is False
     assert config["liveness"]["bottom_heartbeat"]["enabled"] is False
@@ -83,6 +84,23 @@ def test_normalize_display_config_accepts_liveness_configuration():
         "pixel_width_px": 1,
         "pixel_height_px": 1,
         "gap_px": 0,
+    }
+
+
+def test_normalize_display_config_accepts_refresh_configuration():
+    config = normalize_display_config(
+        {
+            "type": "waveshare-pico-epaper-2.13-b-v4",
+            "refresh": {
+                "min_interval": "10s",
+                "probe_cycles_per_refresh": "2",
+            },
+        }
+    )
+
+    assert config["refresh"] == {
+        "min_interval_s": 10,
+        "probe_cycles_per_refresh": 2,
     }
 
 
@@ -140,6 +158,25 @@ def test_normalize_display_config_parses_liveness_string_values_and_rejects_inva
             }
         )
 
+    with pytest.raises(ValueError, match="device.display.refresh must be a mapping"):
+        normalize_display_config({"type": "waveshare-pico-oled-1.3", "refresh": []})
+
+    with pytest.raises(ValueError, match="device.display.refresh.probe_cycles_per_refresh must be a positive integer"):
+        normalize_display_config(
+            {
+                "type": "waveshare-pico-epaper-2.13-b-v4",
+                "refresh": {"probe_cycles_per_refresh": 0},
+            }
+        )
+
+    with pytest.raises(ValueError, match="device.display.refresh.min_interval must not be negative"):
+        normalize_display_config(
+            {
+                "type": "waveshare-pico-epaper-2.13-b-v4",
+                "refresh": {"min_interval": -1},
+            }
+        )
+
 
 def test_display_parser_helpers_cover_numeric_and_error_branches():
     assert core_display._parse_positive_int(7.0, "device.display.width_px") == 7
@@ -171,6 +208,7 @@ def test_normalize_display_config_infers_epaper_defaults_from_type_only():
     assert config["font"] == {"width_px": 13, "height_px": 13}
     assert config["rotation"] == 0
     assert config["page_interval_s"] == 180
+    assert config["refresh"] == {"min_interval_s": 0, "probe_cycles_per_refresh": 1}
     assert config["pins"]["busy"] == "GP13"
     assert config["failure_color"] == "red"
     assert config["liveness"]["bottom_heartbeat"] == {

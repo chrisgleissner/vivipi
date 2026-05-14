@@ -738,6 +738,7 @@ def build_runtime_app(
         visible_degraded=_visible_degraded_from_config(config),
         highlight_selection=False,
         display_liveness=dict(display_config.get("liveness", {})),
+        display_refresh=dict(display_config.get("refresh", {})),
         sleep_ms=sleep_ms,
         probe_time_provider=_steady_now_s,
         version=version,
@@ -1064,7 +1065,7 @@ def _tick_eink_summary_state(app, now_s, watchdog=None):
     _feed_watchdog(watchdog)
     step = getattr(app, "step", None)
     if callable(step):
-        step(now_s, button_events=(), render=False)
+        step(now_s, button_events=(), render=False, max_due_checks=1)
         _feed_watchdog(watchdog)
         return
 
@@ -1094,6 +1095,39 @@ def _eink_summary_signature(frame) -> tuple[tuple[str, ...], tuple[TextSpan, ...
         tuple(getattr(frame, "failure_spans", ())),
         (int(shift_offset[0]), int(shift_offset[1])),
     )
+
+
+def _eink_refresh_policy(app) -> dict[str, int]:
+    raw = getattr(app, "display_refresh", {})
+    if not isinstance(raw, dict):
+        raw = {}
+    return {
+        "min_interval_s": max(0, int(raw.get("min_interval_s", 0) or 0)),
+        "probe_cycles_per_refresh": max(1, int(raw.get("probe_cycles_per_refresh", 1) or 1)),
+    }
+
+
+def _eink_completed_probe_cycles(app) -> int:
+    completed_probe_cycles = getattr(app, "completed_probe_cycles", None)
+    if callable(completed_probe_cycles):
+        return max(0, int(completed_probe_cycles()))
+    return 0
+
+
+def _eink_state_refresh_ready(app, now_s: float) -> bool:
+    cycle_started = getattr(app, "pending_status_cycle_started", None)
+    if cycle_started is not None:
+        policy = _eink_refresh_policy(app)
+        completed_cycles = _eink_completed_probe_cycles(app)
+        if completed_cycles < int(cycle_started) + policy["probe_cycles_per_refresh"]:
+            return False
+        min_interval_s = float(policy["min_interval_s"])
+    else:
+        min_interval_s = 0.0
+    last_render_at_s = getattr(app, "last_render_at_s", None)
+    if last_render_at_s is None:
+        return True
+    return now_s >= float(last_render_at_s) + min_interval_s
 
 
 def _render_eink_summary_frame(app, now_s: float, reason: str) -> str:
@@ -1146,7 +1180,8 @@ def _run_eink_refresh_loop(app, now_s, poll_interval_ms=20, now_provider=None, s
         if getattr(app, "last_rendered_frame", None) is None:
             render_reason = "startup"
         elif getattr(app, "pending_status_updates", {}):
-            render_reason = "state"
+            if _eink_state_refresh_ready(app, current_now_s):
+                render_reason = "state"
         elif current_now_s >= next_periodic_refresh_s:
             render_reason = "periodic"
         if render_reason is not None:

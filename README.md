@@ -8,7 +8,7 @@ See your device health at a glance.
 [![Hardware](https://img.shields.io/badge/hardware-Raspberry%20Pi%20Pico-blue)](https://github.com/chrisgleissner/vivipi/releases)
 [![Runtime](https://img.shields.io/badge/runtime-MicroPython%20%7C%20Python-blue)](https://github.com/chrisgleissner/vivipi)
 
-ViviPi (pronounced "VEE-vee-pie", from the Latin *viv-* in *vivere*, "to live") is a minimal, glanceable monitoring system for Raspberry Pi Pico display modules. It is built around a deterministic fixed-width UI that lets you read health state at a glance and inspect details with two hardware buttons. The default target is a Pico 2W with a 128x64 SH1107 OLED, and the runtime and build pipeline also support a broader set of Waveshare Pico OLED, LCD, and e-paper modules.
+ViviPi (pronounced "VEE-vee-pie", from the Latin *viv-* in *vivere*, "to live") is a minimal, glanceable monitoring system for Raspberry Pi Pico display modules.
 
 ## Features
 
@@ -26,6 +26,8 @@ Current physical test coverage in this repository is limited to these two Pico 2
 
 - `waveshare-pico-oled-1.3`
 - `waveshare-pico-epaper-2.13-b-v4`
+
+All testing was performed against an Ultimate 64 Elite I, a Commodore 64 Ultimate Founders Edition, and a Pixel 4 connected via ADB to a Kubuntu 24.04 machine running a custom service probe.
 
 <p align="center">
   <img src="./docs/img/vivipi_tested_picos.jpg" alt="Two ViviPi test devices side by side: a Pico OLED 1.3 on the left and a Pico ePaper 2.13-B V4 on the right." width="720">
@@ -567,6 +569,8 @@ device:
 ### Supported Display Types
 
 Published specs below are based on current The Pi Hut Waveshare product listings. The Waveshare column links directly to the corresponding developer wiki/manual page used for specs and code samples. Some retailer listings use portrait or raw-panel orientation, and some group multiple Waveshare hardware revisions under one product listing.
+
+Please note that only two of these devices are tested; see [Tested Hardware](#tested-hardware). Contributions / fixes are welcome.
 
 | `device.display.type` | The Pi Hut | Waveshare | Published display spec | Notes |
 | --- | --- | --- | --- | --- |

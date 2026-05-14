@@ -668,6 +668,28 @@ def _parse_liveness_position(value: object, context: str, default: str) -> str:
     return normalized
 
 
+def _parse_display_refresh(value: object) -> dict[str, int]:
+    if value is None:
+        raw = {}
+    elif isinstance(value, Mapping):
+        raw = dict(value)
+    else:
+        raise ValueError("device.display.refresh must be a mapping")
+
+    min_interval_value = raw.get("min_interval", raw.get("min_interval_s", 0))
+    probe_cycles_per_refresh = _parse_positive_int(
+        raw.get("probe_cycles_per_refresh", 1),
+        "device.display.refresh.probe_cycles_per_refresh",
+    )
+    return {
+        "min_interval_s": _parse_duration_s(
+            min_interval_value,
+            "device.display.refresh.min_interval",
+        ),
+        "probe_cycles_per_refresh": probe_cycles_per_refresh,
+    }
+
+
 def _parse_display_liveness(value: object, heartbeat_defaults: Mapping[str, object] | None = None) -> dict[str, object]:
     if value is None:
         raw = {}
@@ -1007,6 +1029,7 @@ def normalize_display_config(raw_display: object) -> dict[str, object]:
     rotation = _parse_rotation(display.get("rotation"))
     heartbeat_defaults = EPAPER_BOTTOM_HEARTBEAT if definition["family"] == "eink" else DEFAULT_BOTTOM_HEARTBEAT
     liveness = _parse_display_liveness(display.get("liveness"), heartbeat_defaults=heartbeat_defaults)
+    refresh = _parse_display_refresh(display.get("refresh"))
     liveness = _calibrate_bottom_heartbeat(display_type, rotation, liveness)
     default_font = infer_default_font(
         definition["width_px"],
@@ -1051,6 +1074,7 @@ def normalize_display_config(raw_display: object) -> dict[str, object]:
             "device.display.column_offset",
             int(definition.get("default_column_offset", 0)),
         ),
+        "refresh": refresh,
         "font_size": font_size,
         "font": {
             "width_px": _parse_font_size_px(font.get("width_px"), "device.display.font.width_px", default_font["width_px"]),

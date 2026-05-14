@@ -284,6 +284,7 @@ def run_forever(config_path: str = "config.json", poll_interval_ms: int = 20):
         version=str(dict(config.get("project", {})).get("version", "")),
         build_time=str(dict(config.get("project", {})).get("build_time", "")),
         display_liveness=dict(display_config.get("liveness", {})),
+        display_refresh=dict(display_config.get("refresh", {})),
         display_family="eink",
     )
     app.background_workers_enabled = False
