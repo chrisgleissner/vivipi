@@ -66,6 +66,12 @@ def test_runtime_app_tick_uses_monotonic_loop_time_for_boot_logo_deadline():
     assert display.frames == []
 
 
+def test_runtime_app_completed_probe_cycles_is_zero_without_definitions():
+    app = RuntimeApp(definitions=(), executor=lambda definition, now_s: None, display=FakeDisplay())
+
+    assert app.completed_probe_cycles() == 0
+
+
 def test_runtime_app_executes_due_checks_and_updates_state():
     display = FakeDisplay()
     definition = make_definition("router")
@@ -211,6 +217,9 @@ def test_runtime_app_helper_parsers_cover_fallbacks_and_display_liveness_validat
 
     with pytest.raises(ValueError, match="display_refresh must be a mapping when provided"):
         runtime_app_module._normalize_display_refresh([])
+
+    with pytest.raises(ValueError, match="display_refresh.min_interval_s must not be negative"):
+        runtime_app_module._normalize_display_refresh({"min_interval_s": -1})
 
     with pytest.raises(ValueError, match="display_refresh.probe_cycles_per_refresh must be at least 1"):
         runtime_app_module._normalize_display_refresh({"probe_cycles_per_refresh": 0})

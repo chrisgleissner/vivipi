@@ -146,3 +146,85 @@ def test_expand_multi_device_settings_normalizes_selector_values():
         "serial_by_id": "/dev/serial/by-id/usb-oled",
         "bootsel_disk": "/dev/disk/by-id/usb-oled",
     }
+
+
+def test_expand_multi_device_settings_returns_empty_mapping_when_devices_are_missing():
+    assert expand_multi_device_settings({"project": {"name": "vivipi"}}) == {}
+    assert expand_multi_device_settings({"devices": {}}) == {}
+
+
+@pytest.mark.parametrize(
+    ("settings", "message"),
+    [
+        (
+            {
+                "devices": {
+                    "  ": {
+                        "selector": {
+                            "port": "/dev/ttyACM0",
+                        }
+                    }
+                }
+            },
+            "non-empty strings",
+        ),
+        (
+            {
+                "devices": {
+                    "oled": [],
+                }
+            },
+            "must be a mapping",
+        ),
+        (
+            {
+                "project": "vivipi",
+                "devices": {
+                    "oled": {
+                        "selector": {
+                            "port": "/dev/ttyACM0",
+                        }
+                    }
+                },
+            },
+            "project must be a mapping",
+        ),
+        (
+            {
+                "devices": {
+                    "oled": {
+                        "selector": [],
+                    }
+                }
+            },
+            "must be a non-empty mapping",
+        ),
+        (
+            {
+                "devices": {
+                    "oled": {
+                        "selector": {
+                            "port": "   ",
+                        }
+                    }
+                }
+            },
+            "must be a non-empty string",
+        ),
+        (
+            {
+                "devices": {
+                    "oled": {
+                        "selector": {
+                            "hostname": "pico-oled",
+                        }
+                    }
+                }
+            },
+            "must include one of",
+        ),
+    ],
+)
+def test_expand_multi_device_settings_validates_device_and_selector_shapes(settings, message):
+    with pytest.raises(ValueError, match=message):
+        expand_multi_device_settings(settings)

@@ -247,6 +247,14 @@ def test_normalize_display_config_accepts_180_degree_rotation_only():
         normalize_display_config({"type": "waveshare-pico-oled-1.3", "rotation": 90})
 
 
+def test_display_rotation_helper_accepts_integer_like_floats_and_reserved_indicator_defaults_to_zero():
+    assert core_display._parse_rotation(180.0) == 180
+    assert core_display.reserved_bottom_indicator_px(None) == 0
+
+    with pytest.raises(ValueError, match="device.display.rotation"):
+        core_display._parse_rotation("quarter-turn")
+
+
 def test_normalize_display_config_calibrates_rotated_213_b_v4_bottom_heartbeat_gap():
     config = normalize_display_config(
         {

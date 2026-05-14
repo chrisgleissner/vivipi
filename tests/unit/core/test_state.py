@@ -20,18 +20,29 @@ def make_check(name: str, status: Status = Status.OK) -> CheckRuntime:
     return CheckRuntime(identifier=name.casefold(), name=name, status=status)
 
 
-def test_fold_text_falls_back_when_casefold_is_unavailable():
-    class LowerOnly:
-        def __init__(self, value: str):
-            self.value = value
+def test_fold_text_falls_back_to_lower_when_casefold_is_not_callable():
+    class LowerOnly(str):
+        @property
+        def casefold(self):
+            return None
 
         def lower(self):
-            return self.value.lower()
-
-        def __str__(self):
-            return self.value
+            return str(self).lower()
 
     assert state_module._fold_text(LowerOnly("Bravo")) == "bravo"
+
+
+def test_fold_text_falls_back_to_string_when_lower_is_not_callable():
+    class StringOnly(str):
+        @property
+        def casefold(self):
+            return None
+
+        @property
+        def lower(self):
+            return None
+
+    assert state_module._fold_text(StringOnly("Bravo")) == "Bravo"
 
 
 def test_failure_hysteresis_moves_from_ok_to_deg_to_fail():

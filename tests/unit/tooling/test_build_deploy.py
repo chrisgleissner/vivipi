@@ -263,6 +263,22 @@ def test_load_selected_build_deploy_settings_requires_device_selection_for_multi
     assert set(selected) == {"epaper"}
 
 
+def test_load_selected_build_deploy_settings_rejects_unknown_or_invalid_named_device_selection(tmp_path: Path):
+    multi_device_dir = tmp_path / "multi"
+    multi_device_dir.mkdir()
+    multi_device_path = write_multi_device_fixture_files(multi_device_dir)
+
+    with pytest.raises(ValueError, match="unknown device id: missing"):
+        load_selected_build_deploy_settings(multi_device_path, env=FIXTURE_ENV, device_id="missing")
+
+    single_device_dir = tmp_path / "single"
+    single_device_dir.mkdir()
+    single_device_path = write_fixture_files(single_device_dir)
+
+    with pytest.raises(ValueError, match="single-device config does not define named devices"):
+        load_selected_build_deploy_settings(single_device_path, env=FIXTURE_ENV, device_id="epaper")
+
+
 def test_build_firmware_bundles_isolates_multi_device_outputs_and_writes_manifest(tmp_path: Path):
     config_path = write_multi_device_fixture_files(tmp_path)
 
@@ -1462,6 +1478,78 @@ def test_build_deploy_main_prefers_local_config_for_render_config(monkeypatch, t
     assert called == {"config": str(local_path.resolve()), "output": str(output_path)}
 
 
+def test_build_deploy_main_dispatches_render_config_for_named_device(monkeypatch, tmp_path: Path):
+    output_path = tmp_path / "config.json"
+    called = {}
+
+    def fake_write_selected_runtime_config(config_path, destination_path, *, device_id=None, env=None):
+        called["config"] = config_path
+        called["output"] = destination_path
+        called["device_id"] = device_id
+        called["env"] = env
+
+    monkeypatch.setattr(build_deploy, "write_selected_runtime_config", fake_write_selected_runtime_config)
+
+    exit_code = build_deploy.main(
+        ["render-config", "--config", "config.yaml", "--output", str(output_path), "--device", "epaper"]
+    )
+
+    assert exit_code == 0
+    assert called == {
+        "config": "config.yaml",
+        "output": str(output_path),
+        "device_id": "epaper",
+        "env": None,
+    }
+
+
+def test_write_selected_runtime_config_uses_named_device_settings(monkeypatch, tmp_path: Path):
+    config_path = tmp_path / "build-deploy.yaml"
+    output_path = tmp_path / "config.json"
+    written = {}
+
+    monkeypatch.setattr(
+        build_deploy,
+        "load_selected_build_deploy_settings",
+        lambda *args, **kwargs: {
+            "epaper": {
+                "project": {"version": "0.2.1", "build_time": "2026-05-14T22:00:00Z"},
+                "selector": {"port": "/dev/ttyACM0"},
+            }
+        },
+    )
+    monkeypatch.setattr(
+        build_deploy,
+        "write_runtime_config_from_settings",
+        lambda source_config_path, settings, destination_path, *, env=None, version="", build_time="": written.update(
+            {
+                "config": source_config_path,
+                "settings": settings,
+                "output": destination_path,
+                "env": env,
+                "version": version,
+                "build_time": build_time,
+            }
+        )
+        or Path(destination_path),
+    )
+
+    returned = build_deploy.write_selected_runtime_config(config_path, output_path, device_id="epaper")
+
+    assert returned == output_path
+    assert written == {
+        "config": config_path.resolve(),
+        "settings": {
+            "project": {"version": "0.2.1", "build_time": "2026-05-14T22:00:00Z"},
+            "selector": {"port": "/dev/ttyACM0"},
+        },
+        "output": output_path,
+        "env": None,
+        "version": "0.2.1",
+        "build_time": "2026-05-14T22:00:00Z",
+    }
+
+
 def test_build_deploy_main_dispatches_build_firmware(monkeypatch, tmp_path: Path):
     called = {}
 
@@ -1609,6 +1697,52 @@ def test_selector_from_settings_falls_back_to_explicit_device_port_and_rejects_m
         build_deploy._selector_from_settings({"device": {"micropython_port": "auto"}})
 
 
+def test_device_candidate_helpers_cover_missing_and_present_paths(monkeypatch, tmp_path: Path):
+    present = {"serial": False, "disk": False}
+    serial_paths = [tmp_path / "usb-serial-b", tmp_path / "usb-serial-a"]
+    bootsel_paths = [tmp_path / "usb-bootsel-part1", tmp_path / "usb-bootsel"]
+    port_paths = [tmp_path / "dev" / "ttyUSB0", tmp_path / "dev" / "ttyACM1"]
+
+    original_exists = build_deploy.Path.exists
+    original_iterdir = build_deploy.Path.iterdir
+    original_glob = build_deploy.Path.glob
+
+    def fake_exists(path):
+        if str(path) == "/dev/serial/by-id":
+            return present["serial"]
+        if str(path) == "/dev/disk/by-id":
+            return present["disk"]
+        return original_exists(path)
+
+    def fake_iterdir(path):
+        if str(path) == "/dev/serial/by-id":
+            return iter(serial_paths)
+        if str(path) == "/dev/disk/by-id":
+            return iter(bootsel_paths)
+        return original_iterdir(path)
+
+    def fake_glob(path, pattern):
+        if str(path) == "/" and pattern == "dev/ttyACM*":
+            return [port_paths[1]]
+        if str(path) == "/" and pattern == "dev/ttyUSB*":
+            return [port_paths[0]]
+        return original_glob(path, pattern)
+
+    monkeypatch.setattr(build_deploy.Path, "exists", fake_exists, raising=False)
+    monkeypatch.setattr(build_deploy.Path, "iterdir", fake_iterdir, raising=False)
+    monkeypatch.setattr(build_deploy.Path, "glob", fake_glob, raising=False)
+
+    assert build_deploy._list_serial_by_id_candidates() == []
+    assert build_deploy._list_bootsel_disk_candidates() == []
+
+    present["serial"] = True
+    present["disk"] = True
+
+    assert build_deploy._list_serial_by_id_candidates() == sorted(str(path) for path in serial_paths)
+    assert build_deploy._list_port_candidates() == sorted(str(path) for path in port_paths)
+    assert build_deploy._list_bootsel_disk_candidates() == [str(tmp_path / "usb-bootsel")]
+
+
 def test_resolve_bootstrap_uf2_path_supports_local_path_and_download(tmp_path: Path, monkeypatch):
     local_uf2 = tmp_path / "firmware.uf2"
     local_uf2.write_text("uf2", encoding="utf-8")
@@ -1644,6 +1778,9 @@ def test_resolve_bootstrap_uf2_path_supports_local_path_and_download(tmp_path: P
             tmp_path / "device",
         )
 
+    with pytest.raises(ValueError, match="bootstrap mapping"):
+        build_deploy._resolve_bootstrap_uf2_path(tmp_path / "config.yaml", {"bootstrap": []}, tmp_path / "device")
+
     with pytest.raises(ValueError, match="bootstrap.uf2_path or bootstrap.uf2_url"):
         build_deploy._resolve_bootstrap_uf2_path(tmp_path / "config.yaml", {"bootstrap": {}}, tmp_path / "device")
 
@@ -1660,6 +1797,25 @@ def test_resolve_bootsel_partition_path_handles_existing_partitions_and_missing(
 
     with pytest.raises(ValueError, match="could not resolve BOOTSEL partition"):
         build_deploy._resolve_bootsel_partition_path(str(tmp_path / "missing"))
+
+
+def test_current_mountpoint_returns_path_or_none(tmp_path: Path):
+    partition_path = tmp_path / "disk-part1"
+    partition_path.write_text("", encoding="utf-8")
+    mountpoint = tmp_path / "media" / "RPI-RP2"
+    mountpoint.mkdir(parents=True)
+
+    resolved_mountpoint = build_deploy._current_mountpoint(
+        partition_path,
+        run_command=lambda command, check: subprocess.CompletedProcess(command, 0, stdout=f"{mountpoint}\n"),
+    )
+    empty_mountpoint = build_deploy._current_mountpoint(
+        partition_path,
+        run_command=lambda command, check: subprocess.CompletedProcess(command, 0, stdout="   \n"),
+    )
+
+    assert resolved_mountpoint == mountpoint
+    assert empty_mountpoint is None
 
 
 def test_ensure_bootsel_mountpoint_uses_existing_mount_and_parses_udisks_output(monkeypatch, tmp_path: Path):
@@ -1760,6 +1916,70 @@ def test_provision_device_requires_serial_identity_selector(tmp_path: Path, monk
             tmp_path / "device",
             run_command=lambda *args, **kwargs: None,
         )
+
+
+def test_provision_device_requires_resolved_serial_path_after_bootstrap(tmp_path: Path, monkeypatch):
+    uf2_path = tmp_path / "firmware.uf2"
+    uf2_path.write_text("uf2", encoding="utf-8")
+    mountpoint = tmp_path / "mount"
+    mountpoint.mkdir()
+
+    monkeypatch.setattr(build_deploy, "_resolve_bootstrap_uf2_path", lambda *args, **kwargs: uf2_path)
+    monkeypatch.setattr(build_deploy, "_resolve_bootsel_partition_path", lambda bootsel_disk: tmp_path / "disk-part1")
+    monkeypatch.setattr(build_deploy, "_ensure_bootsel_mountpoint", lambda partition_path, run_command: mountpoint)
+    monkeypatch.setattr(build_deploy.os, "sync", lambda: None)
+    monkeypatch.setattr(
+        build_deploy,
+        "_wait_for_serial_state",
+        lambda selector, timeout_s: DeviceInventoryState(state="serial-ready"),
+    )
+
+    with pytest.raises(RuntimeError, match="without a resolved serial path"):
+        build_deploy.provision_device(
+            tmp_path / "config.yaml",
+            {"bootstrap": {"serial_timeout_s": 45}, "selector": {"port": "/dev/ttyACM1"}},
+            "/dev/disk/by-id/usb-RPI_RP2350_AAAE129318B6B9B6-0:0",
+            tmp_path / "device",
+            run_command=lambda *args, **kwargs: None,
+        )
+
+
+def test_deploy_firmware_targets_reports_missing_ambiguous_and_unresolved_serial_states(tmp_path: Path, monkeypatch):
+    bundles = {
+        "missing": {"staging_dir": tmp_path / "missing" / "vivipi-device-fs", "bundle": tmp_path / "missing.zip"},
+        "ambiguous": {"staging_dir": tmp_path / "ambiguous" / "vivipi-device-fs", "bundle": tmp_path / "ambiguous.zip"},
+        "serial": {"staging_dir": tmp_path / "serial" / "vivipi-device-fs", "bundle": tmp_path / "serial.zip"},
+    }
+
+    monkeypatch.setattr(
+        build_deploy,
+        "load_selected_build_deploy_settings",
+        lambda *args, **kwargs: {
+            "missing": {"selector": {"port": "/dev/ttyACM9"}},
+            "ambiguous": {"selector": {"port": "/dev/ttyACM2"}},
+            "serial": {"selector": {"port": "/dev/ttyACM0"}},
+        },
+    )
+    monkeypatch.setattr(
+        build_deploy,
+        "resolve_configured_device_inventory",
+        lambda *args, **kwargs: {
+            "missing": DeviceInventoryState(state="missing"),
+            "ambiguous": DeviceInventoryState(state="ambiguous"),
+            "serial": DeviceInventoryState(state="serial-ready"),
+        },
+    )
+    monkeypatch.setattr(build_deploy, "build_firmware_bundles", lambda *args, **kwargs: bundles)
+    monkeypatch.setattr(build_deploy, "_deploy_staged_device_root", lambda *args, **kwargs: None)
+
+    results = deploy_firmware_targets("config.yaml", tmp_path / "release", all_devices=True)
+
+    assert results["missing"]["status"] == "error"
+    assert "did not match any connected hardware" in results["missing"]["error"]
+    assert results["ambiguous"]["status"] == "error"
+    assert "matched multiple connected devices" in results["ambiguous"]["error"]
+    assert results["serial"]["status"] == "error"
+    assert "could not resolve a serial port for deploy" in results["serial"]["error"]
 
 
 def test_provision_firmware_targets_and_output_helpers_cover_remaining_result_paths(monkeypatch, capsys):
