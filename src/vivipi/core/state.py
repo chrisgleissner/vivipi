@@ -7,10 +7,21 @@ from vivipi.core.diagnostics import append_diagnostic_lines
 from vivipi.core.models import AppMode, AppState, CheckObservation, CheckRuntime, DiagnosticEvent, DisplayMode, Status, TransitionThresholds
 
 
+def _fold_text(value: object) -> str:
+    text = value if isinstance(value, str) else str(value)
+    casefold = getattr(text, "casefold", None)
+    if callable(casefold):
+        return casefold()
+    lower = getattr(text, "lower", None)
+    if callable(lower):
+        return lower()
+    return str(text)
+
+
 def _check_sort_key(check: CheckRuntime) -> tuple[str, str]:
     name = check.name if isinstance(check.name, str) else str(check.name)
     identifier = check.identifier if isinstance(check.identifier, str) else str(check.identifier)
-    return (name.casefold(), identifier.casefold())
+    return (_fold_text(name), _fold_text(identifier))
 
 
 def sort_checks(checks: tuple[CheckRuntime, ...]) -> tuple[CheckRuntime, ...]:

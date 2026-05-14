@@ -102,17 +102,8 @@ def test_build_runtime_watchdog_uses_supported_timeout_when_machine_wdt_accepts_
     assert watchdog.timeout_ms == firmware_runtime.WATCHDOG_MAX_TIMEOUT_MS
 
 
-def test_main_bootstrap_watchdog_feeds_before_runtime_import(monkeypatch):
+def test_main_non_eink_imports_runtime_without_bootstrap_watchdog(monkeypatch):
     events = []
-
-    class FakeWDT:
-        def __init__(self, timeout=None):
-            events.append(("wdt-init", timeout))
-
-        def feed(self):
-            events.append("wdt-feed")
-
-    monkeypatch.setattr(firmware_main, "WDT", FakeWDT)
     monkeypatch.setattr(firmware_main, "_display_family_from_config", lambda path="config.json": "lcd")
 
     run_forever_calls = []
@@ -128,23 +119,12 @@ def test_main_bootstrap_watchdog_feeds_before_runtime_import(monkeypatch):
 
     firmware_main.main()
 
-    assert events[0] == ("wdt-init", 8388)
-    assert "wdt-feed" in events[:3]
-    assert "runtime-import" in events[:4]
+    assert events == ["runtime-import"]
     assert run_forever_calls == [True]
 
 
-def test_main_skips_bootstrap_watchdog_for_oled(monkeypatch):
+def test_main_oled_uses_runtime_entrypoint(monkeypatch):
     events = []
-
-    class FakeWDT:
-        def __init__(self, timeout=None):
-            events.append(("wdt-init", timeout))
-
-        def feed(self):
-            events.append("wdt-feed")
-
-    monkeypatch.setattr(firmware_main, "WDT", FakeWDT)
     monkeypatch.setattr(firmware_main, "_display_family_from_config", lambda path="config.json": "oled")
 
     run_forever_calls = []

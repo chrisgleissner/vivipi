@@ -484,42 +484,48 @@ def test_epaper_v4_initialize_matches_vendor_landscape_profile():
     assert waits == [20_000, 20_000, 20_000]
     assert commands == [0x12, 0x01, 0x11, 0x44, 0x45, 0x4E, 0x4F, 0x3C, 0x18, 0x21]
     assert payloads == [
-        b"\xF9\x00\x00",
-        b"\x07",
-        b"\x00\x0F",
-        b"\x00\x00\xF9\x00",
+        b"\xF9",
         b"\x00",
-        b"\x00\x00",
+        b"\x00",
+        b"\x07",
+        b"\x00",
+        b"\x0F",
+        b"\x00",
+        b"\x00",
+        b"\xF9",
+        b"\x00",
+        b"\x00",
+        b"\x00",
+        b"\x00",
         b"\x05",
         b"\x80",
-        b"\x80\x80",
+        b"\x80",
+        b"\x80",
     ]
 
 
-def test_epaper_v4_show_buffers_clears_once_then_streams_vendor_landscape_order():
+def test_epaper_v4_show_buffers_streams_vendor_landscape_order_and_sleeps():
     display = WaveshareEPaper213BV4Display.__new__(WaveshareEPaper213BV4Display)
     display.width = 4
     display.height = 9
     display.surface_height = 16
-    display._panel_primed = False
 
     phases = []
 
-    display._clear_panel = lambda: phases.append("clear")
     display._initialize = lambda: phases.append("init")
     display._send_landscape_plane = lambda command, buffer: phases.append((command, list(buffer)))
     display._refresh = lambda: phases.append("refresh")
+    display._sleep = lambda: phases.append("sleep")
 
     display._show_buffers(bytearray(range(8)), bytearray(range(20, 28)))
 
     assert phases == [
-        "clear",
         "init",
         (0x24, list(range(8))),
         (0x26, list(range(20, 28))),
         "refresh",
+        "sleep",
     ]
-    assert display._panel_primed is True
 
 
 def test_epaper_v4_wait_until_idle_matches_vendor_polling(monkeypatch):
@@ -559,12 +565,13 @@ def test_epaper_v4_constructor_uses_busy_pull_up_when_available(monkeypatch):
             return 0
 
     class FakeSPI:
-        def __init__(self, bus):
+        def __init__(self, bus, **kwargs):
             self.bus = bus
-            self.init_calls = []
+            self.kwargs = dict(kwargs)
+            self.init_kwargs = None
 
         def init(self, **kwargs):
-            self.init_calls.append(kwargs)
+            self.init_kwargs = dict(kwargs)
 
         def write(self, values):
             return None
@@ -594,14 +601,12 @@ def test_epaper_v4_constructor_uses_busy_pull_up_when_available(monkeypatch):
     assert display.busy.number == 13
     assert display.busy.mode == FakePin.IN
     assert display.busy.pull == FakePin.PULL_UP
-    assert len(display.spi.init_calls) == 1
-    init_kwargs = display.spi.init_calls[0]
-    assert init_kwargs["baudrate"] == 4_000_000
+    assert display.spi.init_kwargs == {"baudrate": 4_000_000}
     assert glyph_modes == ["coverage"]
     assert init_calls == [True]
 
 
-def test_epaper_show_boot_logo_uses_framebuf_text_when_available(monkeypatch):
+def test_epaper_show_boot_logo_uses_shared_render_path(monkeypatch):
     display = WaveshareEPaper213BV4Display.__new__(WaveshareEPaper213BV4Display)
     display.width = 250
     display.height = 122
@@ -613,47 +618,66 @@ def test_epaper_show_boot_logo_uses_framebuf_text_when_available(monkeypatch):
     monkeypatch.setattr(
         waveshare_epaper_module,
         "render_boot_logo_to_surface",
-        lambda *args, **kwargs: called.update({"scaled": True}),
+        lambda surface, version, glyph_builder=None, rotation=0: called.update(
+            {"surface": surface, "version": version, "rotation": rotation},
+        ),
     )
-    display._surface_supports_framebuf_text = lambda surface: True
-    display._render_text_with_framebuf = lambda surface, frame: called.update({"surface": surface, "frame": frame})
     display._show_buffers = lambda black, accent: called.update({"black": black, "accent": accent})
 
     display.show_boot_logo("0.1.0")
 
-    assert called.get("scaled") is None
     assert called["surface"] is display._surface
-    assert called["frame"].rows == ("ViviPi", "0.1.0")
+    assert called["version"] == "0.1.0"
+    assert called["rotation"] == 180
     assert called["black"] is display._surface.black_buffer
     assert called["accent"] is display._surface.accent_buffer
 
 
-def test_epaper_render_text_with_framebuf_feeds_watchdog_during_large_render(monkeypatch):
+def test_epaper_send_landscape_plane_streams_vendor_byte_order():
+    display = WaveshareEPaper213BV4Display.__new__(WaveshareEPaper213BV4Display)
+    display.width = 4
+    display.height = 9
+    display.surface_height = 16
+
+    surface_width = display.width
+    panel_x_bytes = display.row_bytes
+    buffer = bytearray(surface_width * panel_x_bytes)
+    for index in range(len(buffer)):
+        buffer[index] = (index * 7 + 3) & 0xFF
+
+    commands = []
+    data_calls = []
+
+    display._command = lambda value: commands.append(value)
+    display._data = lambda value: data_calls.append(value)
+    display._feed_watchdog = lambda: None
+
+    display._send_landscape_plane(0x24, buffer)
+
+    expected = [
+        buffer[column_group * surface_width + row]
+        for column_group in range(panel_x_bytes - 1, -1, -1)
+        for row in range(surface_width)
+    ]
+    assert commands == [0x24]
+    assert data_calls == expected
+
+
+def test_epaper_send_landscape_plane_feeds_watchdog_periodically():
     display = WaveshareEPaper213BV4Display.__new__(WaveshareEPaper213BV4Display)
     display.width = 250
     display.height = 122
-    display.font_width = 16
-    display.font_height = 16
-    display.rotation = 0
-    display._glyph_lookup = lambda character: tuple((x, y) for y in range(16) for x in range(16))
-    display._glyph_builder = lambda width, height: display._glyph_lookup
-    display._feed_watchdog_calls = 0
-    display._feed_watchdog = lambda: setattr(display, "_feed_watchdog_calls", display._feed_watchdog_calls + 1)
-    surface = WaveshareEPaper213BV4Surface(250, 122)
+    display.surface_height = 128
 
-    display._render_text_with_framebuf(
-        surface,
-        SimpleNamespace(
-            rows=("PIXEL4      OK ", "U64         OK ", "C64U        FAIL"),
-            shift_offset=(0, 0),
-            failure_spans=(),
-            bottom_pixels=(),
-            bottom_pixel_width_px=1,
-            bottom_pixel_height_px=1,
-        ),
-    )
+    buffer = bytearray(display.width * display.row_bytes)
+    feed_calls = []
+    display._command = lambda value: None
+    display._data = lambda value: None
+    display._feed_watchdog = lambda: feed_calls.append(True)
 
-    assert display._feed_watchdog_calls > 3
+    display._send_landscape_plane(0x24, buffer)
+
+    assert len(feed_calls) > 3
 
 
 def test_boot_logo_font_sizes_scale_to_screen_dimensions():

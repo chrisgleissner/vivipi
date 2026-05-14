@@ -87,6 +87,17 @@ def _status_text(value) -> str:
     return "OK" if str(candidate).strip().upper() == "OK" else "FAIL"
 
 
+def _fold_text(value: object) -> str:
+    text = value if isinstance(value, str) else str(value)
+    casefold = getattr(text, "casefold", None)
+    if callable(casefold):
+        return casefold()
+    lower = getattr(text, "lower", None)
+    if callable(lower):
+        return lower()
+    return str(text)
+
+
 def _summary_bottom_indicator_px(app) -> int:
     display_liveness = getattr(app, "display_liveness", {})
     if not isinstance(display_liveness, dict):
@@ -156,7 +167,7 @@ def _build_summary_frame(app):
         current = registered_results.get(definition.identifier, {}) if isinstance(registered_results, dict) else {}
         name_text = str(current.get("name") or getattr(definition, "name", getattr(definition, "identifier", "CHECK")))
         status_text = _status_text(current.get("status"))
-        summary_rows.append((name_text.casefold(), str(getattr(definition, "identifier", "")), name_text, status_text))
+        summary_rows.append((_fold_text(name_text), _fold_text(getattr(definition, "identifier", "")), name_text, status_text))
 
     for row_index, (_, _, name_text, status_text) in enumerate(sorted(summary_rows, key=lambda item: (item[0], item[1]))):
         name_width = max(1, row_width - len(status_text) - 1)

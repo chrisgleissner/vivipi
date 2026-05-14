@@ -38,12 +38,11 @@ def test_main_routes_eink_to_lightweight_runner(monkeypatch):
     assert called == {"count": 1}
 
 
-def test_main_collects_gc_before_runtime_import(monkeypatch):
+def test_main_non_eink_matches_main_branch_runtime_import_path(monkeypatch):
     events = []
     original_import = __import__
 
     monkeypatch.setattr(firmware_main, "_display_family_from_config", lambda path="config.json": "oled")
-    monkeypatch.setattr(firmware_main, "gc", SimpleNamespace(collect=lambda: events.append("gc-collect")))
 
     def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
         if name == "runtime":
@@ -55,4 +54,4 @@ def test_main_collects_gc_before_runtime_import(monkeypatch):
 
     firmware_main.main()
 
-    assert events == ["gc-collect", "runtime-import", "run-forever"]
+    assert events == ["runtime-import", "run-forever"]

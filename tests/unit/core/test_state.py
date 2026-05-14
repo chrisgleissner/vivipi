@@ -1,4 +1,5 @@
 from vivipi.core.models import AppState, CheckObservation, CheckRuntime, DiagnosticEvent, DisplayMode, Status, TransitionThresholds
+import vivipi.core.state as state_module
 from vivipi.core.state import (
     _sorted_selected_index,
     apply_observation,
@@ -17,6 +18,20 @@ from vivipi.core.state import (
 
 def make_check(name: str, status: Status = Status.OK) -> CheckRuntime:
     return CheckRuntime(identifier=name.casefold(), name=name, status=status)
+
+
+def test_fold_text_falls_back_when_casefold_is_unavailable():
+    class LowerOnly:
+        def __init__(self, value: str):
+            self.value = value
+
+        def lower(self):
+            return self.value.lower()
+
+        def __str__(self):
+            return self.value
+
+    assert state_module._fold_text(LowerOnly("Bravo")) == "bravo"
 
 
 def test_failure_hysteresis_moves_from_ok_to_deg_to_fail():
