@@ -11,6 +11,7 @@ except ImportError:  # pragma: no cover - MicroPython fallback
 DEFAULT_DISPLAY_TYPE = "waveshare-pico-oled-1.3"
 DEFAULT_GRID_COLUMNS = 16
 DEFAULT_GRID_ROWS = 8
+EPAPER_DEFAULT_ROW_CANDIDATES = (7, 8, 9, 10)
 MIN_FONT_SIZE_PX = 6
 MAX_FONT_SIZE_PX = 32
 DEFAULT_FAILURE_COLOR = "red"
@@ -18,6 +19,7 @@ DEFAULT_FONT_SIZE = "medium"
 DEFAULT_BOOT_LOGO_DURATION_S = 4
 DISPLAY_MODES = frozenset({"standard", "compact"})
 LIVENESS_POSITIONS = frozenset({"left", "center", "right"})
+DISPLAY_ROTATIONS = frozenset({0, 180})
 BRIGHTNESS_PRESETS = {
     "low": 64,
     "medium": 128,
@@ -45,6 +47,30 @@ LCD_SPI_PINS = dict(DEFAULT_SPI_PINS)
 LCD_SPI_PINS["bl"] = "GP13"
 EPAPER_SPI_PINS = dict(DEFAULT_SPI_PINS)
 EPAPER_SPI_PINS["busy"] = "GP13"
+
+DEFAULT_BOTTOM_HEARTBEAT = {
+    "enabled": False,
+    "period_s": 20,
+    "pixel_count": 1,
+    "position": "left",
+    "pixel_width_px": 1,
+    "pixel_height_px": 1,
+    "gap_px": 0,
+}
+
+EPAPER_BOTTOM_HEARTBEAT = {
+    "enabled": False,
+    "period_s": 20,
+    "pixel_count": 1,
+    "position": "left",
+    "pixel_width_px": 2,
+    "pixel_height_px": 2,
+    "gap_px": 3,
+}
+
+EPAPER_213_B_V4_ROTATED_BOTTOM_HEARTBEAT_MIN_WIDTH_PX = 4
+EPAPER_213_B_V4_ROTATED_BOTTOM_HEARTBEAT_MIN_HEIGHT_PX = 4
+EPAPER_213_B_V4_ROTATED_BOTTOM_HEARTBEAT_MIN_GAP_PX = 6
 
 
 def _fold(value: object) -> str:
@@ -571,6 +597,23 @@ def _parse_failure_color(value: object) -> str:
     return normalized
 
 
+def _parse_rotation(value: object) -> int:
+    if value is None:
+        rotation = 0
+    elif isinstance(value, int):
+        rotation = value
+    elif isinstance(value, float) and value.is_integer():
+        rotation = int(value)
+    elif isinstance(value, str) and value.strip().isdigit():
+        rotation = int(value.strip())
+    else:
+        raise ValueError("device.display.rotation must be 0 or 180")
+
+    if rotation not in DISPLAY_ROTATIONS:
+        raise ValueError("device.display.rotation must be 0 or 180")
+    return rotation
+
+
 def _parse_bool(value: object, context: str, default: bool) -> bool:
     if value is None:
         return default
@@ -606,6 +649,14 @@ def _parse_bottom_pixel_count(value: object, context: str, default: int) -> int:
     return count
 
 
+def _parse_bottom_pixel_size(value: object, context: str, default: int) -> int:
+    return _parse_positive_int(default if value is None else value, context)
+
+
+def _parse_bottom_gap_px(value: object, context: str, default: int) -> int:
+    return _parse_non_negative_int(value, context, default)
+
+
 def _parse_liveness_position(value: object, context: str, default: str) -> str:
     if value is None:
         return default
@@ -617,7 +668,29 @@ def _parse_liveness_position(value: object, context: str, default: str) -> str:
     return normalized
 
 
-def _parse_display_liveness(value: object) -> dict[str, object]:
+def _parse_display_refresh(value: object) -> dict[str, int]:
+    if value is None:
+        raw = {}
+    elif isinstance(value, Mapping):
+        raw = dict(value)
+    else:
+        raise ValueError("device.display.refresh must be a mapping")
+
+    min_interval_value = raw.get("min_interval", raw.get("min_interval_s", 0))
+    probe_cycles_per_refresh = _parse_positive_int(
+        raw.get("probe_cycles_per_refresh", 1),
+        "device.display.refresh.probe_cycles_per_refresh",
+    )
+    return {
+        "min_interval_s": _parse_duration_s(
+            min_interval_value,
+            "device.display.refresh.min_interval",
+        ),
+        "probe_cycles_per_refresh": probe_cycles_per_refresh,
+    }
+
+
+def _parse_display_liveness(value: object, heartbeat_defaults: Mapping[str, object] | None = None) -> dict[str, object]:
     if value is None:
         raw = {}
     elif isinstance(value, Mapping):
@@ -648,6 +721,10 @@ def _parse_display_liveness(value: object) -> dict[str, object]:
         heartbeat = dict(heartbeat_raw)
     else:
         raise ValueError("device.display.liveness.bottom_heartbeat must be a mapping")
+
+    resolved_heartbeat_defaults = dict(DEFAULT_BOTTOM_HEARTBEAT)
+    if heartbeat_defaults is not None:
+        resolved_heartbeat_defaults.update(dict(heartbeat_defaults))
 
     return {
         "contrast_breathing": {
@@ -688,25 +765,101 @@ def _parse_display_liveness(value: object) -> dict[str, object]:
             "enabled": _parse_bool(
                 heartbeat.get("enabled"),
                 "device.display.liveness.bottom_heartbeat.enabled",
-                False,
+                bool(resolved_heartbeat_defaults["enabled"]),
             ),
             "period_s": _parse_liveness_period_s(
                 heartbeat.get("period_s"),
                 "device.display.liveness.bottom_heartbeat.period_s",
-                20,
+                int(resolved_heartbeat_defaults["period_s"]),
             ),
             "pixel_count": _parse_bottom_pixel_count(
                 heartbeat.get("pixel_count"),
                 "device.display.liveness.bottom_heartbeat.pixel_count",
-                1,
+                int(resolved_heartbeat_defaults["pixel_count"]),
             ),
             "position": _parse_liveness_position(
                 heartbeat.get("position"),
                 "device.display.liveness.bottom_heartbeat.position",
-                "right",
+                str(resolved_heartbeat_defaults["position"]),
+            ),
+            "pixel_width_px": _parse_bottom_pixel_size(
+                heartbeat.get("pixel_width_px"),
+                "device.display.liveness.bottom_heartbeat.pixel_width_px",
+                int(resolved_heartbeat_defaults["pixel_width_px"]),
+            ),
+            "pixel_height_px": _parse_bottom_pixel_size(
+                heartbeat.get("pixel_height_px"),
+                "device.display.liveness.bottom_heartbeat.pixel_height_px",
+                int(resolved_heartbeat_defaults["pixel_height_px"]),
+            ),
+            "gap_px": _parse_bottom_gap_px(
+                heartbeat.get("gap_px"),
+                "device.display.liveness.bottom_heartbeat.gap_px",
+                int(resolved_heartbeat_defaults["gap_px"]),
             ),
         },
     }
+
+
+def _reserved_bottom_indicator_px(family: str, liveness: Mapping[str, object]) -> int:
+    if family != "eink":
+        return 0
+    heartbeat = dict(liveness.get("bottom_heartbeat", {})) if isinstance(liveness, Mapping) else {}
+    return max(0, int(heartbeat.get("pixel_height_px", 0))) + max(0, int(heartbeat.get("gap_px", 0)))
+
+
+def _calibrate_bottom_heartbeat(
+    display_type: str,
+    rotation: int,
+    liveness: Mapping[str, object],
+) -> dict[str, object]:
+    resolved = dict(liveness)
+    heartbeat = dict(resolved.get("bottom_heartbeat", {})) if isinstance(resolved.get("bottom_heartbeat"), Mapping) else {}
+    if (
+        display_type == "waveshare-pico-epaper-2.13-b-v4"
+        and rotation == 180
+        and bool(heartbeat.get("enabled"))
+    ):
+        heartbeat["pixel_width_px"] = max(
+            int(heartbeat.get("pixel_width_px", 0)),
+            EPAPER_213_B_V4_ROTATED_BOTTOM_HEARTBEAT_MIN_WIDTH_PX,
+        )
+        heartbeat["pixel_height_px"] = max(
+            int(heartbeat.get("pixel_height_px", 0)),
+            EPAPER_213_B_V4_ROTATED_BOTTOM_HEARTBEAT_MIN_HEIGHT_PX,
+        )
+        heartbeat["gap_px"] = max(
+            int(heartbeat.get("gap_px", 0)),
+            EPAPER_213_B_V4_ROTATED_BOTTOM_HEARTBEAT_MIN_GAP_PX,
+        )
+    resolved["bottom_heartbeat"] = heartbeat
+    return resolved
+
+
+def reserved_bottom_indicator_px(display_config: Mapping[str, object] | None) -> int:
+    if not isinstance(display_config, Mapping):
+        return 0
+    return _reserved_bottom_indicator_px(
+        _fold(display_config.get("family", "")),
+        display_config.get("liveness", {}),
+    )
+
+
+def _infer_eink_medium_font(width_px: int, height_px: int, target_size_px: int, reserved_bottom_px: int) -> dict[str, int]:
+    usable_height_px = max(MIN_FONT_SIZE_PX, int(height_px) - max(0, int(reserved_bottom_px)))
+    candidates = []
+    for row_count in EPAPER_DEFAULT_ROW_CANDIDATES:
+        cell_height = usable_height_px // row_count
+        if cell_height < MIN_FONT_SIZE_PX or cell_height > MAX_FONT_SIZE_PX:
+            continue
+        candidates.append((usable_height_px % row_count, abs(cell_height - target_size_px), abs(row_count - DEFAULT_GRID_ROWS), row_count, cell_height))
+
+    if not candidates:
+        fallback = max(MIN_FONT_SIZE_PX, min(MAX_FONT_SIZE_PX, target_size_px))
+        return {"width_px": fallback, "height_px": fallback}
+
+    _, _, _, _, cell_height = min(candidates)
+    return {"width_px": cell_height, "height_px": cell_height}
 
 
 def _canonical_display_type(value: str) -> str:
@@ -817,7 +970,10 @@ def _validate_inferred_value(value: object, expected: object, context: str):
     if value is None:
         return
     if isinstance(expected, int):
-        parsed = _parse_positive_int(value, context)
+        if expected < 1:
+            parsed = _parse_non_negative_int(value, context, expected)
+        else:
+            parsed = _parse_positive_int(value, context)
     elif isinstance(expected, str):
         if not isinstance(value, str):
             raise ValueError(f"{context} is inferred from device.display.type")
@@ -870,12 +1026,24 @@ def normalize_display_config(raw_display: object) -> dict[str, object]:
         raise ValueError("device.display.pins must be a mapping")
 
     font_size = _parse_font_size_name(font.get("size"))
+    rotation = _parse_rotation(display.get("rotation"))
+    heartbeat_defaults = EPAPER_BOTTOM_HEARTBEAT if definition["family"] == "eink" else DEFAULT_BOTTOM_HEARTBEAT
+    liveness = _parse_display_liveness(display.get("liveness"), heartbeat_defaults=heartbeat_defaults)
+    refresh = _parse_display_refresh(display.get("refresh"))
+    liveness = _calibrate_bottom_heartbeat(display_type, rotation, liveness)
     default_font = infer_default_font(
         definition["width_px"],
         definition["height_px"],
         float(definition["diagonal_in"]),
         size_name=font_size,
     )
+    if definition["family"] == "eink" and font.get("width_px") is None and font.get("height_px") is None and font_size == DEFAULT_FONT_SIZE:
+        default_font = _infer_eink_medium_font(
+            definition["width_px"],
+            definition["height_px"],
+            int(default_font["height_px"]),
+            _reserved_bottom_indicator_px(definition["family"], liveness),
+        )
     resolved_pins = dict(definition["pins"])
     for pin_name, pin_value in pins.items():
         if not isinstance(pin_value, str) or not pin_value.strip():
@@ -898,6 +1066,7 @@ def normalize_display_config(raw_display: object) -> dict[str, object]:
         "columns": _parse_columns(display.get("columns")),
         "column_separator": _parse_column_separator(display.get("column_separator")),
         "failure_color": _parse_failure_color(display.get("failure_color")),
+        "rotation": rotation,
         "page_interval_s": _parse_duration_s(page_interval_value, "device.display.page_interval"),
         "boot_logo_duration_s": DEFAULT_BOOT_LOGO_DURATION_S,
         "column_offset": _parse_non_negative_int(
@@ -905,12 +1074,13 @@ def normalize_display_config(raw_display: object) -> dict[str, object]:
             "device.display.column_offset",
             int(definition.get("default_column_offset", 0)),
         ),
+        "refresh": refresh,
         "font_size": font_size,
         "font": {
             "width_px": _parse_font_size_px(font.get("width_px"), "device.display.font.width_px", default_font["width_px"]),
             "height_px": _parse_font_size_px(font.get("height_px"), "device.display.font.height_px", default_font["height_px"]),
         },
-        "liveness": _parse_display_liveness(display.get("liveness")),
+        "liveness": liveness,
         "pins": resolved_pins,
     }
 

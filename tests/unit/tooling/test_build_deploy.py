@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from vivipi.core.device_inventory import DeviceInventoryState
 from vivipi.core.models import CheckDefinition, CheckType
 from vivipi.runtime.checks import build_runtime_definitions
 from vivipi.tooling import build_deploy
@@ -28,12 +29,17 @@ from vivipi.tooling.build_deploy import (
     _run_mpremote_command,
     _wrap_with_dialout,
     build_firmware_bundle,
+    build_firmware_bundles,
     build_service_bundle,
     build_source_archives,
+    deploy_firmware_targets,
     deploy_firmware,
     load_build_deploy_settings,
+    load_multi_device_build_deploy_settings,
+    load_selected_build_deploy_settings,
     load_runtime_checks,
     render_device_runtime_config,
+    resolve_configured_device_inventory,
     resolve_config_path,
     stage_release_assets,
     validate_runtime_settings,
@@ -121,6 +127,71 @@ checks:
     return config_path
 
 
+def write_multi_device_fixture_files(tmp_path: Path) -> Path:
+    (tmp_path / "checks-oled.yaml").write_text(
+        """
+checks:
+  - name: Router
+    type: ping
+    target: 192.168.1.1
+    interval_s: 15
+    timeout_s: 10
+""".strip(),
+        encoding="utf-8",
+    )
+    (tmp_path / "checks-epaper.yaml").write_text(
+        """
+checks:
+  - name: API
+    type: http
+    target: https://api.example.test/health
+    interval_s: 15
+    timeout_s: 10
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "build-deploy.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "project:",
+                "  name: vivipi",
+                "device:",
+                "  board: pico2w",
+                "  micropython:",
+                "    version: 1.25.0",
+                "    download_page: https://micropython.org/download/RPI_PICO2_W/",
+                "  buttons:",
+                "    a: GP15",
+                "    b: GP17",
+                "  display:",
+                "    type: waveshare-pico-oled-1.3",
+                "wifi:",
+                "  ssid: ${VIVIPI_WIFI_SSID}",
+                "  password: ${VIVIPI_WIFI_PASSWORD}",
+                "service:",
+                "  base_url: ${VIVIPI_SERVICE_BASE_URL}",
+                "checks_config: checks-oled.yaml",
+                "devices:",
+                "  oled:",
+                "    selector:",
+                "      serial_by_id: /dev/serial/by-id/usb-oled",
+                "  epaper:",
+                "    selector:",
+                "      serial_by_id: /dev/serial/by-id/usb-epaper",
+                "      bootsel_disk: /dev/disk/by-id/usb-RPI_RP2350_AAAE129318B6B9B6-0:0",
+                "    device:",
+                "      display:",
+                "        type: waveshare-pico-epaper-2.13-b-v4",
+                "    checks_config: checks-epaper.yaml",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return config_path
+
+
 def test_load_build_deploy_settings_substitutes_environment_placeholders(tmp_path: Path):
     config_path = write_fixture_files(tmp_path)
 
@@ -140,6 +211,10 @@ def test_load_build_deploy_settings_substitutes_environment_placeholders(tmp_pat
     assert settings["device"]["display"]["font"] == {"width_px": 8, "height_px": 8}
     assert settings["device"]["display"]["page_interval_s"] == 20
     assert settings["device"]["display"]["boot_logo_duration_s"] == 4
+    assert settings["device"]["display"]["refresh"] == {
+        "min_interval_s": 0,
+        "probe_cycles_per_refresh": 1,
+    }
     assert settings["device"]["display"]["brightness"] == 128
     assert settings["device"]["display"]["liveness"]["contrast_breathing"] == {"enabled": False, "period_s": 30, "amplitude": 16}
     assert settings["device"]["display"]["liveness"]["per_row_micro"] == {"enabled": False, "period_s": 15, "stagger": True}
@@ -148,6 +223,9 @@ def test_load_build_deploy_settings_substitutes_environment_placeholders(tmp_pat
         "period_s": 1,
         "pixel_count": 1,
         "position": "left",
+        "pixel_width_px": 1,
+        "pixel_height_px": 1,
+        "gap_px": 0,
     }
     assert settings["device"]["display"]["mode"] == "standard"
     assert settings["device"]["display"]["columns"] == 1
@@ -160,6 +238,169 @@ def test_load_build_deploy_settings_substitutes_environment_placeholders(tmp_pat
         "same_host_backoff_ms": 250,
         "interval_grace_ms": 1000,
     }
+
+
+def test_load_multi_device_build_deploy_settings_expands_named_devices(tmp_path: Path):
+    config_path = write_multi_device_fixture_files(tmp_path)
+
+    settings = load_multi_device_build_deploy_settings(config_path, env=FIXTURE_ENV)
+
+    assert set(settings) == {"oled", "epaper"}
+    assert settings["oled"]["project"]["device_id"] == "oled"
+    assert settings["epaper"]["project"]["device_id"] == "epaper"
+    assert settings["oled"]["device"]["display"]["type"] == "waveshare-pico-oled-1.3"
+    assert settings["epaper"]["device"]["display"]["type"] == "waveshare-pico-epaper-2.13-b-v4"
+
+
+def test_load_selected_build_deploy_settings_requires_device_selection_for_multi_device_config(tmp_path: Path):
+    config_path = write_multi_device_fixture_files(tmp_path)
+
+    with pytest.raises(ValueError, match="--device or --all-devices"):
+        load_selected_build_deploy_settings(config_path, env=FIXTURE_ENV)
+
+    selected = load_selected_build_deploy_settings(config_path, env=FIXTURE_ENV, device_id="epaper")
+
+    assert set(selected) == {"epaper"}
+
+
+def test_load_selected_build_deploy_settings_rejects_unknown_or_invalid_named_device_selection(tmp_path: Path):
+    multi_device_dir = tmp_path / "multi"
+    multi_device_dir.mkdir()
+    multi_device_path = write_multi_device_fixture_files(multi_device_dir)
+
+    with pytest.raises(ValueError, match="unknown device id: missing"):
+        load_selected_build_deploy_settings(multi_device_path, env=FIXTURE_ENV, device_id="missing")
+
+    single_device_dir = tmp_path / "single"
+    single_device_dir.mkdir()
+    single_device_path = write_fixture_files(single_device_dir)
+
+    with pytest.raises(ValueError, match="single-device config does not define named devices"):
+        load_selected_build_deploy_settings(single_device_path, env=FIXTURE_ENV, device_id="epaper")
+
+
+def test_build_firmware_bundles_isolates_multi_device_outputs_and_writes_manifest(tmp_path: Path):
+    config_path = write_multi_device_fixture_files(tmp_path)
+
+    outputs = build_firmware_bundles(
+        config_path,
+        tmp_path / "release",
+        env=FIXTURE_ENV,
+        version_resolver=lambda: "0.2.1-rc0",
+        build_time_resolver=lambda: "2026-05-13T12:00Z",
+        all_devices=True,
+    )
+
+    assert set(outputs) == {"oled", "epaper"}
+    assert outputs["oled"]["bundle"] == tmp_path / "release" / "devices" / "oled" / "vivipi-device-filesystem-0.2.1-rc0.zip"
+    assert outputs["epaper"]["bundle"] == tmp_path / "release" / "devices" / "epaper" / "vivipi-device-filesystem-0.2.1-rc0.zip"
+    assert (tmp_path / "release" / "devices" / "oled" / "config.json").exists()
+    assert (tmp_path / "release" / "devices" / "epaper" / "config.json").exists()
+
+    oled_config = json.loads((tmp_path / "release" / "devices" / "oled" / "config.json").read_text(encoding="utf-8"))
+    epaper_config = json.loads((tmp_path / "release" / "devices" / "epaper" / "config.json").read_text(encoding="utf-8"))
+    manifest = json.loads((tmp_path / "release" / "devices" / "manifest.json").read_text(encoding="utf-8"))
+
+    assert oled_config["project"]["device_id"] == "oled"
+    assert epaper_config["project"]["device_id"] == "epaper"
+    assert oled_config["device"]["display"]["type"] == "waveshare-pico-oled-1.3"
+    assert epaper_config["device"]["display"]["type"] == "waveshare-pico-epaper-2.13-b-v4"
+    assert manifest["devices"]["oled"]["display_type"] == "waveshare-pico-oled-1.3"
+    assert manifest["devices"]["epaper"]["display_type"] == "waveshare-pico-epaper-2.13-b-v4"
+
+
+def test_resolve_configured_device_inventory_reports_serial_ready_and_bootsel(tmp_path: Path):
+    config_path = write_multi_device_fixture_files(tmp_path)
+
+    inventory = resolve_configured_device_inventory(
+        config_path,
+        env=FIXTURE_ENV,
+        all_devices=True,
+        serial_candidates=["/dev/serial/by-id/usb-oled"],
+        port_candidates=["/dev/ttyACM0"],
+        bootsel_candidates=["/dev/disk/by-id/usb-RPI_RP2350_AAAE129318B6B9B6-0:0"],
+    )
+
+    assert inventory["oled"].state == "serial-ready"
+    assert inventory["epaper"].state == "bootsel"
+
+
+def test_deploy_firmware_targets_reports_partial_success_without_provision(tmp_path: Path, monkeypatch):
+    config_path = write_multi_device_fixture_files(tmp_path)
+    deploy_calls = []
+
+    monkeypatch.setattr(
+        build_deploy,
+        "_deploy_staged_device_root",
+        lambda device_root, resolved_port, *, run_command: deploy_calls.append((Path(device_root), resolved_port)),
+    )
+
+    results = deploy_firmware_targets(
+        config_path,
+        tmp_path / "release",
+        env=FIXTURE_ENV,
+        all_devices=True,
+        serial_candidates=["/dev/serial/by-id/usb-oled"],
+        port_candidates=["/dev/ttyACM0"],
+        bootsel_candidates=["/dev/disk/by-id/usb-RPI_RP2350_AAAE129318B6B9B6-0:0"],
+    )
+
+    assert results["oled"]["status"] == "ok"
+    assert results["epaper"]["status"] == "error"
+    assert "BOOTSEL" in results["epaper"]["error"]
+    assert deploy_calls == [
+        (tmp_path / "release" / "devices" / "oled" / "vivipi-device-fs", "/dev/serial/by-id/usb-oled"),
+    ]
+
+
+def test_deploy_firmware_targets_provisions_bootsel_device_before_deploy(tmp_path: Path, monkeypatch):
+    config_path = write_multi_device_fixture_files(tmp_path)
+    deploy_calls = []
+    provision_calls = []
+
+    monkeypatch.setattr(
+        build_deploy,
+        "resolve_configured_device_inventory",
+        lambda *args, **kwargs: {
+            "oled": DeviceInventoryState(state="serial-ready", serial_path="/dev/serial/by-id/usb-oled"),
+            "epaper": DeviceInventoryState(
+                state="bootsel",
+                bootsel_disk="/dev/disk/by-id/usb-RPI_RP2350_AAAE129318B6B9B6-0:0",
+            ),
+        },
+    )
+    monkeypatch.setattr(
+        build_deploy,
+        "provision_device",
+        lambda config_path_arg, settings, bootsel_disk, device_output_dir, *, run_command=None: provision_calls.append((bootsel_disk, Path(device_output_dir)))
+        or "/dev/serial/by-id/usb-epaper",
+    )
+    monkeypatch.setattr(
+        build_deploy,
+        "_deploy_staged_device_root",
+        lambda device_root, resolved_port, *, run_command: deploy_calls.append((Path(device_root), resolved_port)),
+    )
+
+    results = deploy_firmware_targets(
+        config_path,
+        tmp_path / "release",
+        env=FIXTURE_ENV,
+        all_devices=True,
+        provision_missing=True,
+    )
+
+    assert results["oled"]["status"] == "ok"
+    assert results["epaper"]["status"] == "ok"
+    assert provision_calls == [
+        (
+            "/dev/disk/by-id/usb-RPI_RP2350_AAAE129318B6B9B6-0:0",
+            tmp_path / "release" / "devices" / "epaper",
+        ),
+    ]
+    assert deploy_calls == [
+        (tmp_path / "release" / "devices" / "oled" / "vivipi-device-fs", "/dev/serial/by-id/usb-oled"),
+        (tmp_path / "release" / "devices" / "epaper" / "vivipi-device-fs", "/dev/serial/by-id/usb-epaper"),
+    ]
 
 
 def test_resolve_config_path_prefers_existing_local_override_when_requested(tmp_path: Path):
@@ -667,7 +908,7 @@ def test_load_build_deploy_settings_infers_epaper_metadata_from_type(tmp_path: P
     assert settings["device"]["display"]["width_px"] == 250
     assert settings["device"]["display"]["height_px"] == 122
     assert settings["device"]["display"]["font_size"] == "medium"
-    assert settings["device"]["display"]["font"] == {"width_px": 10, "height_px": 10}
+    assert settings["device"]["display"]["font"] == {"width_px": 13, "height_px": 13}
     assert settings["device"]["display"]["page_interval_s"] == 180
     assert settings["device"]["display"]["pins"]["busy"] == "GP13"
 
@@ -691,6 +932,25 @@ def test_load_build_deploy_settings_accepts_symbolic_font_size(tmp_path: Path):
     assert settings["device"]["display"]["font_size"] == "extralarge"
     assert settings["device"]["display"]["font"]["width_px"] >= 12
     assert settings["device"]["display"]["font"]["height_px"] >= 12
+
+
+def test_load_build_deploy_settings_accepts_display_rotation_180(tmp_path: Path):
+    config_path = tmp_path / "build-deploy.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "device:",
+                "  display:",
+                "    type: waveshare-pico-epaper-2.13-b-v4",
+                "    rotation: 180",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    settings = load_build_deploy_settings(config_path, env={})
+
+    assert settings["device"]["display"]["rotation"] == 180
 
 
 def test_load_build_deploy_settings_rejects_oled_geometry_override(tmp_path: Path):
@@ -870,6 +1130,36 @@ def test_render_device_runtime_config_serializes_optional_check_state():
 
     assert rendered["check_state"]["failures_to_failed"] == 2
     assert rendered["check_state"]["visible_degraded"] is False
+
+
+def test_render_device_runtime_config_serializes_display_refresh():
+    settings = {
+        "device": {
+            "board": "pico2w",
+            "buttons": {"a": "GP15", "b": "GP17"},
+            "display": {
+                "type": "waveshare-pico-epaper-2.13-b-v4",
+                "refresh": {"min_interval_s": 10, "probe_cycles_per_refresh": 2},
+            },
+        },
+        "wifi": {"ssid": "wifi", "password": "secret"},
+        "service": {},
+    }
+    checks = (
+        CheckDefinition(
+            identifier="router",
+            name="Router",
+            check_type=CheckType.PING,
+            target="192.168.1.1",
+        ),
+    )
+
+    rendered = render_device_runtime_config(settings, checks)
+
+    assert rendered["device"]["display"]["refresh"] == {
+        "min_interval_s": 10,
+        "probe_cycles_per_refresh": 2,
+    }
 
 
 def test_render_device_runtime_config_serializes_probe_schedule():
@@ -1188,6 +1478,78 @@ def test_build_deploy_main_prefers_local_config_for_render_config(monkeypatch, t
     assert called == {"config": str(local_path.resolve()), "output": str(output_path)}
 
 
+def test_build_deploy_main_dispatches_render_config_for_named_device(monkeypatch, tmp_path: Path):
+    output_path = tmp_path / "config.json"
+    called = {}
+
+    def fake_write_selected_runtime_config(config_path, destination_path, *, device_id=None, env=None):
+        called["config"] = config_path
+        called["output"] = destination_path
+        called["device_id"] = device_id
+        called["env"] = env
+
+    monkeypatch.setattr(build_deploy, "write_selected_runtime_config", fake_write_selected_runtime_config)
+
+    exit_code = build_deploy.main(
+        ["render-config", "--config", "config.yaml", "--output", str(output_path), "--device", "epaper"]
+    )
+
+    assert exit_code == 0
+    assert called == {
+        "config": "config.yaml",
+        "output": str(output_path),
+        "device_id": "epaper",
+        "env": None,
+    }
+
+
+def test_write_selected_runtime_config_uses_named_device_settings(monkeypatch, tmp_path: Path):
+    config_path = tmp_path / "build-deploy.yaml"
+    output_path = tmp_path / "config.json"
+    written = {}
+
+    monkeypatch.setattr(
+        build_deploy,
+        "load_selected_build_deploy_settings",
+        lambda *args, **kwargs: {
+            "epaper": {
+                "project": {"version": "0.2.1", "build_time": "2026-05-14T22:00:00Z"},
+                "selector": {"port": "/dev/ttyACM0"},
+            }
+        },
+    )
+    monkeypatch.setattr(
+        build_deploy,
+        "write_runtime_config_from_settings",
+        lambda source_config_path, settings, destination_path, *, env=None, version="", build_time="": written.update(
+            {
+                "config": source_config_path,
+                "settings": settings,
+                "output": destination_path,
+                "env": env,
+                "version": version,
+                "build_time": build_time,
+            }
+        )
+        or Path(destination_path),
+    )
+
+    returned = build_deploy.write_selected_runtime_config(config_path, output_path, device_id="epaper")
+
+    assert returned == output_path
+    assert written == {
+        "config": config_path.resolve(),
+        "settings": {
+            "project": {"version": "0.2.1", "build_time": "2026-05-14T22:00:00Z"},
+            "selector": {"port": "/dev/ttyACM0"},
+        },
+        "output": output_path,
+        "env": None,
+        "version": "0.2.1",
+        "build_time": "2026-05-14T22:00:00Z",
+    }
+
+
 def test_build_deploy_main_dispatches_build_firmware(monkeypatch, tmp_path: Path):
     called = {}
 
@@ -1202,6 +1564,41 @@ def test_build_deploy_main_dispatches_build_firmware(monkeypatch, tmp_path: Path
 
     assert exit_code == 0
     assert called == {"config": "config.yaml", "output_dir": "release-dir"}
+
+
+def test_build_deploy_main_dispatches_multi_device_build_firmware(monkeypatch):
+    called = {}
+
+    def fake_build_firmware_bundles(config_path, output_dir, device_id=None, all_devices=False):
+        called["config"] = config_path
+        called["output_dir"] = output_dir
+        called["device_id"] = device_id
+        called["all_devices"] = all_devices
+        return {}
+
+    monkeypatch.setattr(build_deploy, "build_firmware_bundles", fake_build_firmware_bundles)
+
+    exit_code = build_deploy.main(["build-firmware", "--config", "config.yaml", "--output-dir", "release-dir", "--all-devices"])
+
+    assert exit_code == 0
+    assert called == {"config": "config.yaml", "output_dir": "release-dir", "device_id": None, "all_devices": True}
+
+
+def test_build_deploy_main_dispatches_list_devices(monkeypatch):
+    called = {}
+
+    def fake_list_devices(config_path, device_id=None, all_devices=False):
+        called["config"] = config_path
+        called["device_id"] = device_id
+        called["all_devices"] = all_devices
+        return {}
+
+    monkeypatch.setattr(build_deploy, "list_devices", fake_list_devices)
+
+    exit_code = build_deploy.main(["list-devices", "--config", "config.yaml", "--all-devices"])
+
+    assert exit_code == 0
+    assert called == {"config": "config.yaml", "device_id": None, "all_devices": True}
 
 
 def test_build_deploy_main_dispatches_stage_release_assets(monkeypatch):
@@ -1236,6 +1633,413 @@ def test_build_deploy_main_dispatches_deploy_firmware(monkeypatch):
 
     assert exit_code == 0
     assert called == {"config": "config.yaml", "output_dir": "release-dir", "port": "/dev/ttyACM0"}
+
+
+def test_build_deploy_main_dispatches_multi_device_deploy(monkeypatch):
+    monkeypatch.setattr(
+        build_deploy,
+        "deploy_firmware_targets",
+        lambda config_path, output_dir, device_id=None, all_devices=False, provision_missing=False: {
+            "oled": {"status": "ok", "state": "serial-ready", "port": "/dev/ttyACM0"}
+        },
+    )
+
+    exit_code = build_deploy.main(
+        [
+            "deploy-firmware",
+            "--config",
+            "config.yaml",
+            "--output-dir",
+            "release-dir",
+            "--all-devices",
+            "--provision-missing",
+        ]
+    )
+
+    assert exit_code == 0
+
+
+def test_build_deploy_main_rejects_port_for_multi_device_deploy():
+    with pytest.raises(ValueError, match="single-device deploy-firmware"):
+        build_deploy.main(
+            [
+                "deploy-firmware",
+                "--config",
+                "config.yaml",
+                "--output-dir",
+                "release-dir",
+                "--device",
+                "epaper",
+                "--port",
+                "/dev/ttyACM0",
+            ]
+        )
+
+
+def test_build_deploy_main_dispatches_provision_firmware(monkeypatch):
+    monkeypatch.setattr(
+        build_deploy,
+        "provision_firmware_targets",
+        lambda config_path, output_dir, device_id=None, all_devices=False: {
+            "epaper": {"status": "ok", "state": "bootsel", "port": "/dev/ttyACM1"}
+        },
+    )
+
+    exit_code = build_deploy.main(["provision-firmware", "--config", "config.yaml", "--output-dir", "release-dir", "--device", "epaper"])
+
+    assert exit_code == 0
+
+
+def test_selector_from_settings_falls_back_to_explicit_device_port_and_rejects_missing():
+    assert build_deploy._selector_from_settings({"device": {"micropython_port": "/dev/ttyACM1"}}) == {"port": "/dev/ttyACM1"}
+
+    with pytest.raises(ValueError, match="device inventory"):
+        build_deploy._selector_from_settings({"device": {"micropython_port": "auto"}})
+
+
+def test_device_candidate_helpers_cover_missing_and_present_paths(monkeypatch, tmp_path: Path):
+    present = {"serial": False, "disk": False}
+    serial_paths = [tmp_path / "usb-serial-b", tmp_path / "usb-serial-a"]
+    bootsel_paths = [tmp_path / "usb-bootsel-part1", tmp_path / "usb-bootsel"]
+    port_paths = [tmp_path / "dev" / "ttyUSB0", tmp_path / "dev" / "ttyACM1"]
+
+    original_exists = build_deploy.Path.exists
+    original_iterdir = build_deploy.Path.iterdir
+    original_glob = build_deploy.Path.glob
+
+    def fake_exists(path):
+        if str(path) == "/dev/serial/by-id":
+            return present["serial"]
+        if str(path) == "/dev/disk/by-id":
+            return present["disk"]
+        return original_exists(path)
+
+    def fake_iterdir(path):
+        if str(path) == "/dev/serial/by-id":
+            return iter(serial_paths)
+        if str(path) == "/dev/disk/by-id":
+            return iter(bootsel_paths)
+        return original_iterdir(path)
+
+    def fake_glob(path, pattern):
+        if str(path) == "/" and pattern == "dev/ttyACM*":
+            return [port_paths[1]]
+        if str(path) == "/" and pattern == "dev/ttyUSB*":
+            return [port_paths[0]]
+        return original_glob(path, pattern)
+
+    monkeypatch.setattr(build_deploy.Path, "exists", fake_exists, raising=False)
+    monkeypatch.setattr(build_deploy.Path, "iterdir", fake_iterdir, raising=False)
+    monkeypatch.setattr(build_deploy.Path, "glob", fake_glob, raising=False)
+
+    assert build_deploy._list_serial_by_id_candidates() == []
+    assert build_deploy._list_bootsel_disk_candidates() == []
+
+    present["serial"] = True
+    present["disk"] = True
+
+    assert build_deploy._list_serial_by_id_candidates() == sorted(str(path) for path in serial_paths)
+    assert build_deploy._list_port_candidates() == sorted(str(path) for path in port_paths)
+    assert build_deploy._list_bootsel_disk_candidates() == [str(tmp_path / "usb-bootsel")]
+
+
+def test_resolve_bootstrap_uf2_path_supports_local_path_and_download(tmp_path: Path, monkeypatch):
+    local_uf2 = tmp_path / "firmware.uf2"
+    local_uf2.write_text("uf2", encoding="utf-8")
+
+    resolved_local = build_deploy._resolve_bootstrap_uf2_path(
+        tmp_path / "config.yaml",
+        {"bootstrap": {"uf2_path": "firmware.uf2"}},
+        tmp_path / "device",
+    )
+    assert resolved_local == local_uf2
+
+    downloaded = {}
+
+    def fake_urlretrieve(url, destination):
+        destination.write_text("downloaded", encoding="utf-8")
+        downloaded["url"] = url
+        downloaded["destination"] = destination
+
+    monkeypatch.setattr(build_deploy, "urlretrieve", fake_urlretrieve)
+    resolved_download = build_deploy._resolve_bootstrap_uf2_path(
+        tmp_path / "config.yaml",
+        {"bootstrap": {"uf2_url": "https://example.test/RPI_PICO2_W.uf2"}},
+        tmp_path / "device",
+    )
+
+    assert downloaded["url"] == "https://example.test/RPI_PICO2_W.uf2"
+    assert resolved_download == tmp_path / "device" / "RPI_PICO2_W.uf2"
+
+    with pytest.raises(ValueError, match="bootstrap UF2 not found"):
+        build_deploy._resolve_bootstrap_uf2_path(
+            tmp_path / "config.yaml",
+            {"bootstrap": {"uf2_path": "missing.uf2"}},
+            tmp_path / "device",
+        )
+
+    with pytest.raises(ValueError, match="bootstrap mapping"):
+        build_deploy._resolve_bootstrap_uf2_path(tmp_path / "config.yaml", {"bootstrap": []}, tmp_path / "device")
+
+    with pytest.raises(ValueError, match="bootstrap.uf2_path or bootstrap.uf2_url"):
+        build_deploy._resolve_bootstrap_uf2_path(tmp_path / "config.yaml", {"bootstrap": {}}, tmp_path / "device")
+
+
+def test_resolve_bootsel_partition_path_handles_existing_partitions_and_missing(tmp_path: Path):
+    part_path = tmp_path / "usb-RPI_RP2350-part1"
+    part_path.write_text("", encoding="utf-8")
+
+    assert build_deploy._resolve_bootsel_partition_path(str(part_path)) == part_path
+    assert build_deploy._resolve_bootsel_partition_path(str(tmp_path / "usb-RPI_RP2350")) == part_path
+
+    with pytest.raises(ValueError, match="could not resolve BOOTSEL partition"):
+        build_deploy._resolve_bootsel_partition_path(str(tmp_path / "missing-part1"))
+
+    with pytest.raises(ValueError, match="could not resolve BOOTSEL partition"):
+        build_deploy._resolve_bootsel_partition_path(str(tmp_path / "missing"))
+
+
+def test_current_mountpoint_returns_path_or_none(tmp_path: Path):
+    partition_path = tmp_path / "disk-part1"
+    partition_path.write_text("", encoding="utf-8")
+    mountpoint = tmp_path / "media" / "RPI-RP2"
+    mountpoint.mkdir(parents=True)
+
+    resolved_mountpoint = build_deploy._current_mountpoint(
+        partition_path,
+        run_command=lambda command, check: subprocess.CompletedProcess(command, 0, stdout=f"{mountpoint}\n"),
+    )
+    empty_mountpoint = build_deploy._current_mountpoint(
+        partition_path,
+        run_command=lambda command, check: subprocess.CompletedProcess(command, 0, stdout="   \n"),
+    )
+
+    assert resolved_mountpoint == mountpoint
+    assert empty_mountpoint is None
+
+
+def test_ensure_bootsel_mountpoint_uses_existing_mount_and_parses_udisks_output(monkeypatch, tmp_path: Path):
+    partition_path = tmp_path / "disk-part1"
+    partition_path.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(build_deploy, "_current_mountpoint", lambda *args, **kwargs: tmp_path / "mounted")
+    assert build_deploy._ensure_bootsel_mountpoint(partition_path, run_command=lambda *args, **kwargs: None) == tmp_path / "mounted"
+
+    monkeypatch.setattr(build_deploy, "_current_mountpoint", lambda *args, **kwargs: None)
+    mount_root = tmp_path / "media" / "RP2350"
+    mount_root.mkdir(parents=True)
+    assert build_deploy._ensure_bootsel_mountpoint(
+        partition_path,
+        run_command=lambda command, check: subprocess.CompletedProcess(command, 0, stdout=f"Mounted {partition_path} at {mount_root}.\n"),
+    ) == mount_root
+
+    with pytest.raises(RuntimeError, match="could not determine BOOTSEL mountpoint"):
+        build_deploy._ensure_bootsel_mountpoint(
+            partition_path,
+            run_command=lambda command, check: subprocess.CompletedProcess(command, 0, stdout="mounted\n"),
+        )
+
+
+def test_wait_for_serial_state_returns_ready_and_times_out(monkeypatch):
+    states = iter(
+        [
+            DeviceInventoryState(state="bootsel"),
+            DeviceInventoryState(state="serial-ready", serial_path="/dev/ttyACM1"),
+        ]
+    )
+    monkeypatch.setattr(build_deploy, "resolve_device_inventory_state", lambda *args, **kwargs: next(states))
+    monkeypatch.setattr(build_deploy.time, "sleep", lambda _: None)
+    monotonic_values = iter([0.0, 0.1, 0.2])
+    monkeypatch.setattr(build_deploy.time, "monotonic", lambda: next(monotonic_values))
+
+    ready = build_deploy._wait_for_serial_state({"port": "/dev/ttyACM1"}, timeout_s=1.0, serial_candidates=[], port_candidates=[], bootsel_candidates=[])
+    assert ready.serial_path == "/dev/ttyACM1"
+
+    monkeypatch.setattr(build_deploy, "resolve_device_inventory_state", lambda *args, **kwargs: DeviceInventoryState(state="missing"))
+    monotonic_timeout = iter([0.0, 0.5, 1.5])
+    monkeypatch.setattr(build_deploy.time, "monotonic", lambda: next(monotonic_timeout))
+
+    with pytest.raises(TimeoutError, match="timed out waiting for serial device"):
+        build_deploy._wait_for_serial_state({"port": "/dev/ttyACM1"}, timeout_s=1.0, serial_candidates=[], port_candidates=[], bootsel_candidates=[])
+
+
+def test_provision_device_copies_uf2_and_confirms_serial(tmp_path: Path, monkeypatch):
+    uf2_path = tmp_path / "firmware.uf2"
+    uf2_path.write_text("uf2", encoding="utf-8")
+    mountpoint = tmp_path / "mount"
+    mountpoint.mkdir()
+    recorded = {}
+
+    monkeypatch.setattr(build_deploy, "_resolve_bootstrap_uf2_path", lambda *args, **kwargs: uf2_path)
+    monkeypatch.setattr(build_deploy, "_resolve_bootsel_partition_path", lambda bootsel_disk: tmp_path / "disk-part1")
+    monkeypatch.setattr(build_deploy, "_ensure_bootsel_mountpoint", lambda partition_path, run_command: mountpoint)
+    monkeypatch.setattr(build_deploy.os, "sync", lambda: recorded.setdefault("synced", True))
+    monkeypatch.setattr(
+        build_deploy,
+        "_wait_for_serial_state",
+        lambda selector, timeout_s: DeviceInventoryState(state="serial-ready", serial_path="/dev/ttyACM1"),
+    )
+    monkeypatch.setattr(
+        build_deploy,
+        "_run_mpremote_command",
+        lambda command, *, run_command, recovery_port, attempts=0: recorded.setdefault("commands", []).append((command, recovery_port, attempts)),
+    )
+
+    serial_path = build_deploy.provision_device(
+        tmp_path / "config.yaml",
+        {"bootstrap": {"serial_timeout_s": 45}, "selector": {"port": "/dev/ttyACM1"}},
+        "/dev/disk/by-id/usb-RPI_RP2350_AAAE129318B6B9B6-0:0",
+        tmp_path / "device",
+        run_command=lambda *args, **kwargs: None,
+    )
+
+    assert serial_path == "/dev/ttyACM1"
+    assert (mountpoint / "firmware.uf2").exists()
+    assert recorded["synced"] is True
+    assert recorded["commands"] == [
+        (["mpremote", "connect", "/dev/ttyACM1", "fs", "ls", ":"], "/dev/ttyACM1", 0),
+    ]
+
+
+def test_provision_device_requires_serial_identity_selector(tmp_path: Path, monkeypatch):
+    uf2_path = tmp_path / "firmware.uf2"
+    uf2_path.write_text("uf2", encoding="utf-8")
+    monkeypatch.setattr(build_deploy, "_resolve_bootstrap_uf2_path", lambda *args, **kwargs: uf2_path)
+    with pytest.raises(ValueError, match="selector.serial_by_id or selector.port"):
+        build_deploy.provision_device(
+            tmp_path / "config.yaml",
+            {
+                "bootstrap": {"serial_timeout_s": 45},
+                "selector": {"bootsel_disk": "/dev/disk/by-id/usb-RPI_RP2350"},
+            },
+            "/dev/disk/by-id/usb-RPI_RP2350",
+            tmp_path / "device",
+            run_command=lambda *args, **kwargs: None,
+        )
+
+
+def test_provision_device_requires_resolved_serial_path_after_bootstrap(tmp_path: Path, monkeypatch):
+    uf2_path = tmp_path / "firmware.uf2"
+    uf2_path.write_text("uf2", encoding="utf-8")
+    mountpoint = tmp_path / "mount"
+    mountpoint.mkdir()
+
+    monkeypatch.setattr(build_deploy, "_resolve_bootstrap_uf2_path", lambda *args, **kwargs: uf2_path)
+    monkeypatch.setattr(build_deploy, "_resolve_bootsel_partition_path", lambda bootsel_disk: tmp_path / "disk-part1")
+    monkeypatch.setattr(build_deploy, "_ensure_bootsel_mountpoint", lambda partition_path, run_command: mountpoint)
+    monkeypatch.setattr(build_deploy.os, "sync", lambda: None)
+    monkeypatch.setattr(
+        build_deploy,
+        "_wait_for_serial_state",
+        lambda selector, timeout_s: DeviceInventoryState(state="serial-ready"),
+    )
+
+    with pytest.raises(RuntimeError, match="without a resolved serial path"):
+        build_deploy.provision_device(
+            tmp_path / "config.yaml",
+            {"bootstrap": {"serial_timeout_s": 45}, "selector": {"port": "/dev/ttyACM1"}},
+            "/dev/disk/by-id/usb-RPI_RP2350_AAAE129318B6B9B6-0:0",
+            tmp_path / "device",
+            run_command=lambda *args, **kwargs: None,
+        )
+
+
+def test_deploy_firmware_targets_reports_missing_ambiguous_and_unresolved_serial_states(tmp_path: Path, monkeypatch):
+    bundles = {
+        "missing": {"staging_dir": tmp_path / "missing" / "vivipi-device-fs", "bundle": tmp_path / "missing.zip"},
+        "ambiguous": {"staging_dir": tmp_path / "ambiguous" / "vivipi-device-fs", "bundle": tmp_path / "ambiguous.zip"},
+        "serial": {"staging_dir": tmp_path / "serial" / "vivipi-device-fs", "bundle": tmp_path / "serial.zip"},
+    }
+
+    monkeypatch.setattr(
+        build_deploy,
+        "load_selected_build_deploy_settings",
+        lambda *args, **kwargs: {
+            "missing": {"selector": {"port": "/dev/ttyACM9"}},
+            "ambiguous": {"selector": {"port": "/dev/ttyACM2"}},
+            "serial": {"selector": {"port": "/dev/ttyACM0"}},
+        },
+    )
+    monkeypatch.setattr(
+        build_deploy,
+        "resolve_configured_device_inventory",
+        lambda *args, **kwargs: {
+            "missing": DeviceInventoryState(state="missing"),
+            "ambiguous": DeviceInventoryState(state="ambiguous"),
+            "serial": DeviceInventoryState(state="serial-ready"),
+        },
+    )
+    monkeypatch.setattr(build_deploy, "build_firmware_bundles", lambda *args, **kwargs: bundles)
+    monkeypatch.setattr(build_deploy, "_deploy_staged_device_root", lambda *args, **kwargs: None)
+
+    results = deploy_firmware_targets("config.yaml", tmp_path / "release", all_devices=True)
+
+    assert results["missing"]["status"] == "error"
+    assert "did not match any connected hardware" in results["missing"]["error"]
+    assert results["ambiguous"]["status"] == "error"
+    assert "matched multiple connected devices" in results["ambiguous"]["error"]
+    assert results["serial"]["status"] == "error"
+    assert "could not resolve a serial port for deploy" in results["serial"]["error"]
+
+
+def test_provision_firmware_targets_and_output_helpers_cover_remaining_result_paths(monkeypatch, capsys):
+    monkeypatch.setattr(
+        build_deploy,
+        "load_selected_build_deploy_settings",
+        lambda *args, **kwargs: {
+            "serial": {"selector": {"port": "/dev/ttyACM0"}},
+            "bootsel": {"selector": {"bootsel_disk": "/dev/disk/by-id/bootsel"}},
+            "missing": {"selector": {"port": "/dev/ttyACM9"}},
+            "ambiguous": {"selector": {"port": "/dev/ttyACM2"}},
+        },
+    )
+    monkeypatch.setattr(
+        build_deploy,
+        "resolve_configured_device_inventory",
+        lambda *args, **kwargs: {
+            "serial": DeviceInventoryState(state="serial-ready", serial_path="/dev/ttyACM0"),
+            "bootsel": DeviceInventoryState(state="bootsel", bootsel_disk="/dev/disk/by-id/bootsel"),
+            "missing": DeviceInventoryState(state="missing"),
+            "ambiguous": DeviceInventoryState(state="ambiguous"),
+        },
+    )
+    monkeypatch.setattr(
+        build_deploy,
+        "provision_device",
+        lambda *args, **kwargs: "/dev/ttyACM1",
+    )
+
+    results = build_deploy.provision_firmware_targets("config.yaml", "release-dir", all_devices=True)
+
+    assert results["serial"]["status"] == "ok"
+    assert results["bootsel"]["port"] == "/dev/ttyACM1"
+    assert results["missing"]["status"] == "error"
+    assert results["ambiguous"]["status"] == "error"
+
+    monkeypatch.setattr(
+        build_deploy,
+        "resolve_configured_device_inventory",
+        lambda *args, **kwargs: {
+            "oled": DeviceInventoryState(state="serial-ready", serial_path="/dev/ttyACM0"),
+            "epaper": DeviceInventoryState(state="bootsel", bootsel_disk="/dev/disk/by-id/bootsel"),
+        },
+    )
+    inventory = build_deploy.list_devices("config.yaml", all_devices=True)
+    output = capsys.readouterr().out
+    assert inventory["oled"].state == "serial-ready"
+    assert "oled serial-ready serial=/dev/ttyACM0" in output
+    assert "epaper bootsel bootsel=/dev/disk/by-id/bootsel" in output
+
+    exit_code = build_deploy._report_operation_results(
+        {
+            "oled": {"status": "ok", "state": "serial-ready", "port": "/dev/ttyACM0"},
+            "epaper": {"status": "error", "state": "bootsel", "error": "timeout"},
+        }
+    )
+    report_output = capsys.readouterr().out
+    assert exit_code == 1
+    assert "oled ok state=serial-ready port=/dev/ttyACM0" in report_output
+    assert "epaper error state=bootsel error=timeout" in report_output
 
 
 def test_write_install_manifest_records_supported_install_metadata(tmp_path: Path):

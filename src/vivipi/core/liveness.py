@@ -68,6 +68,7 @@ def bottom_heartbeat_pixels(
     width_px: int,
     pixel_count: int,
     position: str,
+    pixel_width_px: int = 1,
     step_index: int | None = None,
     step_px: int = HEARTBEAT_STEP_PX,
     now_s: float | None = None,
@@ -75,10 +76,12 @@ def bottom_heartbeat_pixels(
 ) -> tuple[int, ...]:
     width = max(1, int(width_px))
     count = max(1, min(3, int(pixel_count)))
+    pixel_width = max(1, int(pixel_width_px))
     normalized_position = str(position).strip().lower()
-    max_start = max(0, width - count)
+    total_width = count * pixel_width
+    max_start = max(0, width - total_width)
     if step_index is not None:
-        step = max(1, int(step_px))
+        step = max(pixel_width, int(step_px))
         slot_count = max(1, (max_start // step) + 1)
         base_slot = {
             "left": 0,
@@ -87,18 +90,18 @@ def bottom_heartbeat_pixels(
         }.get(normalized_position, 0)
         start = ((base_slot + int(step_index)) % slot_count) * step
         start = min(max_start, start)
-        return tuple(start + offset for offset in range(count))
+        return tuple(start + (offset * pixel_width) for offset in range(count))
 
     anchors = {
         "left": 0,
-        "center": max(0, (width - count) // 2),
+        "center": max(0, (width - total_width) // 2),
         "right": max_start,
     }
     start = anchors.get(normalized_position, anchors["left"])
     if now_s is not None and period_s is not None:
         phase = _heartbeat_phase(float(now_s), int(period_s), 5)
-        start = min(max_start, max(0, start + phase))
+        start = min(max_start, max(0, start + (phase * pixel_width)))
     return tuple(
-        max(0, min(width - 1, start + offset))
+        max(0, min(width - pixel_width, start + (offset * pixel_width)))
         for offset in range(count)
     )

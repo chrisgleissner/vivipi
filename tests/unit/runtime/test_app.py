@@ -66,6 +66,12 @@ def test_runtime_app_tick_uses_monotonic_loop_time_for_boot_logo_deadline():
     assert display.frames == []
 
 
+def test_runtime_app_completed_probe_cycles_is_zero_without_definitions():
+    app = RuntimeApp(definitions=(), executor=lambda definition, now_s: None, display=FakeDisplay())
+
+    assert app.completed_probe_cycles() == 0
+
+
 def test_runtime_app_executes_due_checks_and_updates_state():
     display = FakeDisplay()
     definition = make_definition("router")
@@ -141,7 +147,13 @@ def test_runtime_app_executor_exception_replaces_previous_ok_state_on_display():
             )
         raise OSError("network down")
 
-    app = RuntimeApp(definitions=(definition,), executor=executor, display=display, page_interval_s=0)
+    app = RuntimeApp(
+        definitions=(definition,),
+        executor=executor,
+        display=display,
+        page_interval_s=0,
+        probe_time_provider=lambda: 0.0,
+    )
     app.background_workers_enabled = False
 
     app.tick(0.0)
@@ -163,14 +175,35 @@ def test_runtime_app_helper_parsers_cover_fallbacks_and_display_liveness_validat
         {
             "contrast_breathing": {"enabled": "yes", "period_s": 30, "amplitude": 16},
             "per_row_micro": {"enabled": "no", "period_s": 15, "stagger": "off"},
-            "bottom_heartbeat": {"enabled": "1", "period_s": 2, "pixel_count": 3, "position": "center"},
+            "bottom_heartbeat": {
+                "enabled": "1",
+                "period_s": 2,
+                "pixel_count": 3,
+                "position": "center",
+                "pixel_width_px": 2,
+                "pixel_height_px": 2,
+                "gap_px": 3,
+            },
         }
     )
 
     assert normalized == {
         "contrast_breathing": {"enabled": True, "period_s": 30, "amplitude": 16},
         "per_row_micro": {"enabled": False, "period_s": 15, "stagger": False},
-        "bottom_heartbeat": {"enabled": True, "period_s": 2, "pixel_count": 3, "position": "center"},
+        "bottom_heartbeat": {
+            "enabled": True,
+            "period_s": 2,
+            "pixel_count": 3,
+            "position": "center",
+            "pixel_width_px": 2,
+            "pixel_height_px": 2,
+            "gap_px": 3,
+        },
+    }
+
+    assert runtime_app_module._normalize_display_refresh({"min_interval_s": 10, "probe_cycles_per_refresh": 2}) == {
+        "min_interval_s": 10,
+        "probe_cycles_per_refresh": 2,
     }
 
     with pytest.raises(ValueError, match="display liveness settings must use boolean values"):
@@ -181,6 +214,15 @@ def test_runtime_app_helper_parsers_cover_fallbacks_and_display_liveness_validat
 
     with pytest.raises(ValueError, match="display_liveness.contrast_breathing must be a mapping"):
         runtime_app_module._normalize_display_liveness({"contrast_breathing": []})
+
+    with pytest.raises(ValueError, match="display_refresh must be a mapping when provided"):
+        runtime_app_module._normalize_display_refresh([])
+
+    with pytest.raises(ValueError, match="display_refresh.min_interval_s must not be negative"):
+        runtime_app_module._normalize_display_refresh({"min_interval_s": -1})
+
+    with pytest.raises(ValueError, match="display_refresh.probe_cycles_per_refresh must be at least 1"):
+        runtime_app_module._normalize_display_refresh({"probe_cycles_per_refresh": 0})
 
 
 def test_runtime_app_applies_immediate_failure_thresholds_when_configured():
@@ -314,6 +356,147 @@ def test_runtime_app_starts_with_unknown_rows_before_the_first_check_runs():
     assert reason == "bootstrap"
     assert display.frames[-1].rows[0].startswith("Router")
     assert display.frames[-1].rows[0].endswith(" ?")
+
+
+def test_runtime_app_step_can_advance_state_without_drawing():
+    display = FakeDisplay()
+    definition = make_definition("router")
+
+    def executor(check_definition, now_s):
+        return CheckExecutionResult(
+            source_identifier=check_definition.identifier,
+            observations=(
+                CheckObservation(
+                    identifier=check_definition.identifier,
+                    name=check_definition.name,
+                    status=Status.FAIL,
+                    details="timeout",
+                    observed_at_s=now_s,
+                ),
+            ),
+        )
+
+    app = RuntimeApp(
+        definitions=(definition,),
+        executor=executor,
+        display=display,
+        page_interval_s=0,
+        probe_time_provider=lambda: 0.0,
+    )
+
+    reason = app.step(0.0, button_events=(), render=False)
+
+    assert reason == "none"
+    assert display.frames == []
+    assert app.state.checks[0].status == Status.DEG
+    assert app.pending_status_updates == {"router": {"status": "FAIL", "observed_at_s": 0.0}}
+
+
+def test_runtime_app_step_can_limit_due_checks_to_one_per_call():
+    display = FakeDisplay()
+    definitions = (
+        CheckDefinition(identifier="ftp", name="Ftp", check_type=CheckType.FTP, target="router.local"),
+        CheckDefinition(identifier="http", name="Http", check_type=CheckType.HTTP, target="http://router.local/health"),
+    )
+    calls = []
+
+    def executor(check_definition, now_s):
+        calls.append(check_definition.identifier)
+        return CheckExecutionResult(
+            source_identifier=check_definition.identifier,
+            observations=(
+                CheckObservation(
+                    identifier=check_definition.identifier,
+                    name=check_definition.name,
+                    status=Status.OK,
+                    observed_at_s=now_s,
+                ),
+            ),
+        )
+
+    app = RuntimeApp(
+        definitions=definitions,
+        executor=executor,
+        display=display,
+        page_interval_s=0,
+        probe_time_provider=lambda: 0.0,
+    )
+
+    app.step(0.0, button_events=(), render=False, max_due_checks=1)
+
+    assert calls == ["ftp"]
+    assert app.state.checks[0].status == Status.OK
+    assert app.state.checks[1].status == Status.UNKNOWN
+
+
+def test_runtime_app_tracks_completed_probe_cycles_from_the_slowest_check():
+    display = FakeDisplay()
+    definitions = (
+        make_definition("alpha"),
+        make_definition("bravo"),
+    )
+    calls = []
+
+    def executor(check_definition, now_s):
+        calls.append(check_definition.identifier)
+        return CheckExecutionResult(
+            source_identifier=check_definition.identifier,
+            observations=(
+                CheckObservation(
+                    identifier=check_definition.identifier,
+                    name=check_definition.name,
+                    status=Status.OK,
+                    observed_at_s=now_s,
+                ),
+            ),
+        )
+
+    app = RuntimeApp(
+        definitions=definitions,
+        executor=executor,
+        display=display,
+        page_interval_s=0,
+        probe_time_provider=lambda: 0.0,
+    )
+
+    app._run_check(definitions[0], 0.0)
+    app._run_check(definitions[0], 1.0)
+    app._run_check(definitions[1], 2.0)
+
+    assert calls == ["alpha", "alpha", "bravo"]
+    assert app.completed_probe_cycles() == 1
+
+
+def test_runtime_app_status_transition_records_cycle_start_before_the_completing_probe():
+    display = FakeDisplay()
+    definition = make_definition("router")
+
+    def executor(check_definition, now_s):
+        return CheckExecutionResult(
+            source_identifier=check_definition.identifier,
+            observations=(
+                CheckObservation(
+                    identifier=check_definition.identifier,
+                    name=check_definition.name,
+                    status=Status.FAIL,
+                    details="timeout",
+                    observed_at_s=now_s,
+                ),
+            ),
+        )
+
+    app = RuntimeApp(
+        definitions=(definition,),
+        executor=executor,
+        display=display,
+        page_interval_s=0,
+        probe_time_provider=lambda: 0.0,
+    )
+
+    app.step(0.0, button_events=(), render=False)
+
+    assert app.completed_probe_cycles() == 1
+    assert app.pending_status_cycle_started == 0
 
 
 def test_runtime_app_renders_when_shift_changes_without_other_state_changes():
@@ -1007,6 +1190,63 @@ def test_runtime_app_advances_bottom_heartbeat_when_probes_complete():
     assert decorated.bottom_pixels == (2, 3, 4)
 
 
+def test_runtime_app_advances_bottom_heartbeat_by_configured_width():
+    app = RuntimeApp(
+        definitions=(),
+        executor=lambda definition, now_s: None,
+        display=FakeDisplay(),
+        page_interval_s=0,
+        display_liveness={
+            "bottom_heartbeat": {
+                "enabled": True,
+                "period_s": 1,
+                "pixel_count": 3,
+                "position": "left",
+                "pixel_width_px": 2,
+                "pixel_height_px": 2,
+                "gap_px": 3,
+            },
+        },
+    )
+
+    app.bottom_heartbeat_step = 2
+
+    decorated = app._decorate_frame(
+        Frame(
+            rows=(" " * app.state.row_width,),
+        ),
+        now_s=14.0,
+    )
+
+    assert decorated.bottom_pixels == (4, 6, 8)
+    assert decorated.bottom_pixel_width_px == 2
+    assert decorated.bottom_pixel_height_px == 2
+    assert decorated.bottom_pixel_gap_px == 3
+
+
+def test_runtime_app_skips_immediate_probe_progress_render_for_eink():
+    display = FakeDisplay()
+    app = RuntimeApp(
+        definitions=(),
+        executor=lambda definition, now_s: None,
+        display=display,
+        page_interval_s=0,
+        display_family="eink",
+        display_liveness={
+            "bottom_heartbeat": {
+                "enabled": True,
+                "period_s": 1,
+                "pixel_count": 1,
+                "position": "left",
+            },
+        },
+    )
+
+    app._render_probe_progress(5.0)
+
+    assert display.frames == []
+
+
 def test_runtime_app_records_heartbeat_progress_from_completed_probes():
     definition = make_definition("router")
     result = CheckExecutionResult(
@@ -1471,6 +1711,7 @@ def test_runtime_app_waits_between_due_checks_for_the_same_host_by_default():
     definitions = (
         CheckDefinition(identifier="http", name="Http", check_type=CheckType.HTTP, target="http://router.local/health"),
         CheckDefinition(identifier="ftp", name="Ftp", check_type=CheckType.FTP, target="router.local"),
+        CheckDefinition(identifier="telnet", name="Telnet", check_type=CheckType.TELNET, target="router.local:23"),
         CheckDefinition(identifier="other", name="Other", check_type=CheckType.HTTP, target="http://nas.local/health"),
     )
     calls = []
@@ -1506,13 +1747,14 @@ def test_runtime_app_waits_between_due_checks_for_the_same_host_by_default():
 
     app.tick(0.0)
     for _ in range(20):
-        if len(calls) == 3:
+        if len(calls) == 4:
             break
         app.tick(0.05)
 
-    assert set(calls) == {"ftp", "http", "other"}
+    assert set(calls) == {"ftp", "http", "telnet", "other"}
     assert calls.index("ftp") < calls.index("http")
-    assert sleep_calls == [250]
+    assert calls.index("http") < calls.index("telnet")
+    assert sleep_calls == [250, 250]
 
 
 def test_runtime_app_can_disable_same_host_probe_backoff():

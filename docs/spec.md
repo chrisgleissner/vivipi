@@ -48,6 +48,7 @@ Default font behavior:
 Display configuration:
 
 - `device.display.type` selects the display backend and MUST infer controller, interface, SPI mode, pixel geometry, and default pins
+- `device.display.rotation` MAY be set to `0` or `180` to flip the rendered content; quarter-turn rotation is not supported
 - Controller-native visible-window calibration such as SH1107 column origin MAY be inferred from `device.display.type` and MAY be overridden for advanced hardware tuning
 - `device.display.font` SHOULD use symbolic size presets at build time
 - Exact character cell width and height MAY still be overridden for backward-compatible advanced tuning and remain constrained to 6 to 32 pixels
@@ -70,6 +71,8 @@ Display brightness MUST be configurable at build time for display types that sup
 - E-paper display types do not expose brightness control
 - `device.display.liveness` MAY configure an optional bottom-row device-health indicator
 - When enabled on the default OLED overview, the bottom heartbeat SHOULD use a single pixel that advances by one pixel for each completed probe
+- `device.display.liveness.bottom_heartbeat` MAY configure `pixel_count`, `pixel_width_px`, `pixel_height_px`, and `gap_px`
+- When `pixel_width_px` is greater than `1`, heartbeat progress MUST advance in steps of that configured width
 - If `device.display.liveness` is omitted, all liveness indicators MUST default to disabled
 
 [VIVIPI-DISPLAY-002]
@@ -495,6 +498,9 @@ Rendering must be:
 - flicker-free
 - stable
 - visually static while probes are healthy
+- On e-paper displays, checks MUST continue to run on their configured schedules even when unchanged screens use a slower periodic refresh cadence.
+- On e-paper displays, visible summary changes MUST be allowed to coalesce until a configured number of full probe cycles has completed and any configured minimum refresh interval has elapsed.
+- On e-paper displays, once the configured probe-cycle and minimum-interval gates are satisfied, the next refresh MUST render the latest visible summary state instead of waiting for the periodic refresh interval.
 - Bottom-row heartbeat MAY move a 1 to 3 pixel cluster along the unused bottom scanline without altering layout or text.
 - When enabled, the bottom-row heartbeat MUST advance left-to-right and wrap back to the left after reaching the final slot.
 - Bottom-row heartbeat progress MUST be driven by completed probes so continued movement proves the runtime is still issuing probes.

@@ -141,6 +141,7 @@ class ST77xxDisplay:
         self.font_width = int(font.get("width_px", 8)) if isinstance(font, dict) else 8
         self.font_height = int(font.get("height_px", 8)) if isinstance(font, dict) else 8
         self.failure_color = str(display_config.get("failure_color", "red"))
+        self.rotation = int(display_config.get("rotation", 0))
         self.brightness = int(display_config.get("brightness", 192))
         self.color_values = dict(self.profile["color_values"])
         pins = display_config["pins"]
@@ -229,12 +230,13 @@ class ST77xxDisplay:
             self.font_height,
             self._glyph_lookup,
             failure_color=self.failure_color,
+            rotation=getattr(self, "rotation", 0),
         )
         self.buffer[:] = surface.buffer
         self._show()
 
     def show_boot_logo(self, version, glyph_builder=None):
         surface = RGB565Surface(self.width, self.height, color_values=self.color_values)
-        render_boot_logo_to_surface(surface, version, glyph_builder=glyph_builder)
+        render_boot_logo_to_surface(surface, version, glyph_builder=glyph_builder, rotation=getattr(self, "rotation", 0))
         self.buffer[:] = surface.buffer
         self._show()

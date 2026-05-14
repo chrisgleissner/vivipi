@@ -37,6 +37,68 @@ def _sample_source_coordinates(target_size):
     )
 
 
+def _source_overlap_weights(target_size):
+    weights = []
+    for target_index in range(target_size):
+        start = target_index * BASE_GLYPH_SIZE
+        end = start + BASE_GLYPH_SIZE
+        overlaps = []
+        source_start = start // target_size
+        source_end = min(BASE_GLYPH_SIZE - 1, (end - 1) // target_size)
+        for source_index in range(source_start, source_end + 1):
+            overlap_start = max(start, source_index * target_size)
+            overlap_end = min(end, (source_index + 1) * target_size)
+            overlap = overlap_end - overlap_start
+            if overlap > 0:
+                overlaps.append((source_index, overlap))
+        weights.append(tuple(overlaps))
+    return tuple(weights)
+
+
+def _sample_glyph_pixels(source_rows, font_width, font_height):
+    scaled_x = _sample_source_coordinates(font_width)
+    scaled_y = _sample_source_coordinates(font_height)
+    pixels = []
+
+    for y, source_y in enumerate(scaled_y):
+        row_bits = source_rows[source_y]
+        for x, source_x in enumerate(scaled_x):
+            if row_bits & (1 << source_x):
+                pixels.append((x, y))
+
+    return tuple(pixels)
+
+
+def _scale_glyph_pixels(source_rows, font_width, font_height, raster_mode="coverage"):
+    if raster_mode == "sampled":
+        return _sample_glyph_pixels(source_rows, font_width, font_height)
+    if raster_mode != "coverage":
+        raise ValueError(f"unsupported glyph raster mode: {raster_mode}")
+
+    x_weights = _source_overlap_weights(font_width)
+    y_weights = _source_overlap_weights(font_height)
+    center_x = _sample_source_coordinates(font_width)
+    center_y = _sample_source_coordinates(font_height)
+    pixels = []
+
+    for y, row_weights in enumerate(y_weights):
+        center_row_bits = source_rows[center_y[y]]
+        for x, column_weights in enumerate(x_weights):
+            coverage = 0
+            for source_y, overlap_y in row_weights:
+                row_bits = source_rows[source_y]
+                for source_x, overlap_x in column_weights:
+                    if row_bits & (1 << source_x):
+                        coverage += overlap_x * overlap_y
+            if coverage >= 24:
+                pixels.append((x, y))
+                continue
+            if coverage >= 8 and (center_row_bits & (1 << center_x[x])):
+                pixels.append((x, y))
+
+    return tuple(pixels)
+
+
 def _normalize_character(value):
     if value == ELLIPSIS:
         return value
@@ -48,7 +110,7 @@ def _normalize_character(value):
     return "?"
 
 
-def _build_glyph_lookup(font_width, font_height):
+def _build_glyph_lookup(font_width, font_height, raster_mode="coverage"):
     if framebuf is None:
         raise RuntimeError("framebuf is required when no glyph_lookup is provided")
 
@@ -61,8 +123,6 @@ def _build_glyph_lookup(font_width, font_height):
     )
     glyph_rows_cache = {}
     scaled_glyph_cache = {}
-    scaled_x = _sample_source_coordinates(font_width)
-    scaled_y = _sample_source_coordinates(font_height)
 
     def glyph_rows(value):
         character = _normalize_character(value)
@@ -95,13 +155,7 @@ def _build_glyph_lookup(font_width, font_height):
             return cached
 
         source_rows = glyph_rows(character)
-        pixels = []
-        for y, source_y in enumerate(scaled_y):
-            row_bits = source_rows[source_y]
-            for x, source_x in enumerate(scaled_x):
-                if row_bits & (1 << source_x):
-                    pixels.append((x, y))
-        scaled = tuple(pixels)
+        scaled = _scale_glyph_pixels(source_rows, font_width, font_height, raster_mode=raster_mode)
         scaled_glyph_cache[character] = scaled
         return scaled
 
@@ -296,6 +350,43 @@ class TriColorSurface:
                 self.set_pixel(x + delta_x, pixel_y, color_name)
 
 
+class _RotatedSurface:
+    def __init__(self, surface, rotation):
+        self._surface = surface
+        self.width = surface.width
+        self.height = surface.height
+        self.background_color = surface.background_color
+        self.foreground_color = surface.foreground_color
+        self.rotation = rotation
+
+    def __getattr__(self, name):
+        return getattr(self._surface, name)
+
+    def clear(self, color_name):
+        self._surface.clear(color_name)
+
+    def can_render_color(self, color_name):
+        return self._surface.can_render_color(color_name)
+
+    def set_pixel(self, x, y, color_name):
+        if self.rotation == 180:
+            x = self.width - 1 - x
+            y = self.height - 1 - y
+        self._surface.set_pixel(x, y, color_name)
+
+    def fill_rect(self, x, y, rect_width, rect_height, color_name):
+        if self.rotation == 180:
+            x = self.width - x - rect_width
+            y = self.height - y - rect_height
+        self._surface.fill_rect(x, y, rect_width, rect_height, color_name)
+
+
+def _render_surface(surface, rotation):
+    if rotation == 0:
+        return surface
+    return _RotatedSurface(surface, rotation)
+
+
 def _draw_text(surface, value, origin_x, origin_y, font_width, text_color, glyph_lookup):
     for column_index, character in enumerate(value):
         glyph = glyph_lookup(character)
@@ -307,7 +398,8 @@ def _draw_text(surface, value, origin_x, origin_y, font_width, text_color, glyph
             surface.set_pixel(cell_x + delta_x, origin_y + delta_y, text_color(column_index))
 
 
-def render_to_surface(frame, surface, font_width, font_height, glyph_lookup, failure_color="red"):
+def render_to_surface(frame, surface, font_width, font_height, glyph_lookup, failure_color="red", rotation=0):
+    surface = _render_surface(surface, int(rotation))
     surface.clear(surface.background_color)
     x_offset, y_offset = frame.shift_offset
     inverted_by_row = {}
@@ -349,8 +441,12 @@ def render_to_surface(frame, surface, font_width, font_height, glyph_lookup, fai
 
         _draw_text(surface, row, x_offset, y, font_width, text_color, glyph_lookup)
 
-    for pixel_x in getattr(frame, "bottom_pixels", ()):  # bottom-row liveness uses the reserved baseline scanline.
-        surface.set_pixel(int(pixel_x), surface.height - 1, surface.foreground_color)
+    bottom_pixel_width = max(1, int(getattr(frame, "bottom_pixel_width_px", 1)))
+    bottom_pixel_height = max(1, int(getattr(frame, "bottom_pixel_height_px", 1)))
+    bottom_pixel_gap = max(0, int(getattr(frame, "bottom_pixel_gap_px", 0)))
+    bottom_pixel_y = max(0, surface.height - bottom_pixel_height - bottom_pixel_gap)
+    for pixel_x in getattr(frame, "bottom_pixels", ()):  # bottom-row liveness uses the reserved baseline band.
+        surface.fill_rect(int(pixel_x), bottom_pixel_y, bottom_pixel_width, bottom_pixel_height, surface.foreground_color)
 
     return surface
 
@@ -399,8 +495,9 @@ def boot_logo_font_sizes(width, height, version):
     return title_font, version_font
 
 
-def render_boot_logo_to_surface(surface, version, glyph_builder=None):
+def render_boot_logo_to_surface(surface, version, glyph_builder=None, rotation=0):
     builder = glyph_builder or _build_glyph_lookup
+    surface = _render_surface(surface, int(rotation))
     surface.clear(surface.background_color)
 
     title_font, version_font = boot_logo_font_sizes(surface.width, surface.height, version)
@@ -437,7 +534,7 @@ def render_framebuffer(frame, width, height, font_width, font_height, glyph_look
     return surface.buffer
 
 
-def render_boot_logo(width, height, version, glyph_builder=None):
+def render_boot_logo(width, height, version, glyph_builder=None, rotation=0):
     surface = MonochromeSurface(width, height)
-    render_boot_logo_to_surface(surface, version, glyph_builder=glyph_builder)
+    render_boot_logo_to_surface(surface, version, glyph_builder=glyph_builder, rotation=rotation)
     return surface.buffer

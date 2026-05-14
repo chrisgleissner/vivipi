@@ -1,9 +1,11 @@
 from vivipi.core.models import AppState, CheckObservation, CheckRuntime, DiagnosticEvent, DisplayMode, Status, TransitionThresholds
+import vivipi.core.state as state_module
 from vivipi.core.state import (
     _sorted_selected_index,
     apply_observation,
     integrate_observations,
     move_selection,
+    overview_checks,
     set_page_index,
     record_diagnostic_events,
     selected_check,
@@ -16,6 +18,31 @@ from vivipi.core.state import (
 
 def make_check(name: str, status: Status = Status.OK) -> CheckRuntime:
     return CheckRuntime(identifier=name.casefold(), name=name, status=status)
+
+
+def test_fold_text_falls_back_to_lower_when_casefold_is_not_callable():
+    class LowerOnly(str):
+        @property
+        def casefold(self):
+            return None
+
+        def lower(self):
+            return str(self).lower()
+
+    assert state_module._fold_text(LowerOnly("Bravo")) == "bravo"
+
+
+def test_fold_text_falls_back_to_string_when_lower_is_not_callable():
+    class StringOnly(str):
+        @property
+        def casefold(self):
+            return None
+
+        @property
+        def lower(self):
+            return None
+
+    assert state_module._fold_text(StringOnly("Bravo")) == "Bravo"
 
 
 def test_failure_hysteresis_moves_from_ok_to_deg_to_fail():
@@ -150,6 +177,20 @@ def test_with_checks_preserves_identity_and_falls_back_to_first_visible_check():
 
     assert preserved.selected_id == "zulu"
     assert replaced.selected_id == "bravo"
+
+
+def test_overview_checks_sort_alphabetically_by_display_name():
+    state = AppState(
+        checks=(
+            make_check("U64"),
+            make_check("PIXEL4"),
+            make_check("C64U"),
+        )
+    )
+
+    visible = overview_checks(state)
+
+    assert [check.name for check in visible] == ["C64U", "PIXEL4", "U64"]
 
 
 def test_visible_checks_uses_explicit_page_index():
@@ -307,7 +348,7 @@ def test_integrate_observations_replaces_previous_service_children_by_source_ide
     )
 
     assert [check.identifier for check in updated.checks] == ["router", "adb:pixel-10"]
-    assert updated.selected_id == "router"
+    assert updated.selected_id == "adb:pixel-10"
 
 
 def test_record_diagnostic_events_deduplicates_and_can_activate_mode():

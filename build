@@ -12,6 +12,9 @@ RUNTIME_CONFIG_OUTPUT="$ROOT_DIR/artifacts/device/config.json"
 HOST="0.0.0.0"
 PORT="8080"
 DEVICE_PORT=""
+DEVICE_ID=""
+ALL_DEVICES=0
+PROVISION_MISSING=0
 COMMAND=""
 VERBOSE=0
 USE_VENV=1
@@ -61,10 +64,12 @@ Commands:
   lint             Run Ruff
   test             Run pytest
   coverage         Run pytest with branch coverage output
+  list-devices     Show configured device selectors and their current state
   render-config    Render artifacts/device/config.json from the build config
   build-firmware   Build the zipped firmware bundle into artifacts/release
-    deploy           Build the firmware bundle and copy it to the first connected Pico via mpremote
-    release-assets   Build the versioned GitHub release artifacts
+  provision        Provision configured BOOTSEL devices with a base UF2
+  deploy           Build the firmware bundle and copy it to the configured Pico target(s) via mpremote
+  release-assets   Build the versioned GitHub release artifacts
   service          Run the default ADB-backed Vivi Service
   all              Alias for ci
   help             Show this help text
@@ -73,7 +78,10 @@ Options:
   -c, --config PATH          Build/deploy config path
   -o, --output-dir PATH      Release output directory
   --runtime-config PATH      Runtime config JSON output path
-    --device-port PATH         Optional serial or USB path for mpremote deploy; defaults to auto
+  --device-port PATH         Optional serial or USB path for single-device mpremote deploy; defaults to auto
+  --device ID               Select one named device from a multi-device config
+  --all-devices             Select all named devices from a multi-device config
+  --provision-missing       Provision BOOTSEL devices before deploy when bootstrap metadata is present
   --host HOST                Host for the Vivi Service
   --port PORT                Port for the Vivi Service
   --python PATH              Python executable to use when not in venv
@@ -187,6 +195,29 @@ build_firmware_bundle() {
     require_runtime_env
     with_wifi_env
     local args=(vivipi.tooling.build_deploy build-firmware --config "$CONFIG_PATH" --output-dir "$OUTPUT_DIR")
+    if [[ -n "$DEVICE_ID" ]]; then
+        args+=(--device "$DEVICE_ID")
+    fi
+    if [[ "$ALL_DEVICES" -eq 1 ]]; then
+        args+=(--all-devices)
+    fi
+    if should_prefer_local_config; then
+        args+=(--prefer-local-config)
+    fi
+    run_python_module "${args[@]}"
+}
+
+list_devices() {
+    ensure_dependencies
+    require_runtime_env
+    with_wifi_env
+    local args=(vivipi.tooling.build_deploy list-devices --config "$CONFIG_PATH")
+    if [[ -n "$DEVICE_ID" ]]; then
+        args+=(--device "$DEVICE_ID")
+    fi
+    if [[ "$ALL_DEVICES" -eq 1 ]]; then
+        args+=(--all-devices)
+    fi
     if should_prefer_local_config; then
         args+=(--prefer-local-config)
     fi
@@ -198,6 +229,9 @@ render_runtime_config() {
     require_runtime_env
     with_wifi_env
     local args=(vivipi.tooling.build_deploy render-config --config "$CONFIG_PATH" --output "$RUNTIME_CONFIG_OUTPUT")
+    if [[ -n "$DEVICE_ID" ]]; then
+        args+=(--device "$DEVICE_ID")
+    fi
     if should_prefer_local_config; then
         args+=(--prefer-local-config)
     fi
@@ -225,11 +259,41 @@ deploy_bundle() {
     require_runtime_env
     with_wifi_env
     local args=(vivipi.tooling.build_deploy deploy-firmware --config "$CONFIG_PATH" --output-dir "$OUTPUT_DIR")
+    if [[ -n "$DEVICE_ID" ]]; then
+        args+=(--device "$DEVICE_ID")
+    fi
+    if [[ "$ALL_DEVICES" -eq 1 ]]; then
+        args+=(--all-devices)
+    fi
+    if [[ "$PROVISION_MISSING" -eq 1 ]]; then
+        args+=(--provision-missing)
+    fi
     if should_prefer_local_config; then
         args+=(--prefer-local-config)
     fi
     if [[ -n "$DEVICE_PORT" ]]; then
+        if [[ -n "$DEVICE_ID" || "$ALL_DEVICES" -eq 1 ]]; then
+            log "--device-port is only supported for single-device deploy"
+            exit 2
+        fi
         args+=(--port "$DEVICE_PORT")
+    fi
+    run_python_module "${args[@]}"
+}
+
+provision_bundle() {
+    ensure_dependencies
+    require_runtime_env
+    with_wifi_env
+    local args=(vivipi.tooling.build_deploy provision-firmware --config "$CONFIG_PATH" --output-dir "$OUTPUT_DIR")
+    if [[ -n "$DEVICE_ID" ]]; then
+        args+=(--device "$DEVICE_ID")
+    fi
+    if [[ "$ALL_DEVICES" -eq 1 ]]; then
+        args+=(--all-devices)
+    fi
+    if should_prefer_local_config; then
+        args+=(--prefer-local-config)
     fi
     run_python_module "${args[@]}"
 }
@@ -237,7 +301,7 @@ deploy_bundle() {
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            install|lint|test|coverage|ci|render-config|build-firmware|release-assets|deploy|service|all|help)
+            install|lint|test|coverage|ci|list-devices|render-config|build-firmware|provision|release-assets|deploy|service|all|help)
                 COMMAND="$1"
                 shift
                 ;;
@@ -265,6 +329,18 @@ parse_args() {
             --device-port)
                 DEVICE_PORT="$2"
                 shift 2
+                ;;
+            --device)
+                DEVICE_ID="$2"
+                shift 2
+                ;;
+            --all-devices)
+                ALL_DEVICES=1
+                shift
+                ;;
+            --provision-missing)
+                PROVISION_MISSING=1
+                shift
                 ;;
             --python)
                 PYTHON_BIN="$2"
@@ -331,6 +407,9 @@ main() {
             ensure_dependencies
             run_python_module pytest --cov=src/vivipi --cov-branch --cov-report=term-missing --cov-report=xml
             ;;
+        list-devices)
+            list_devices
+            ;;
         ci)
             run_ci_workflow
             ;;
@@ -339,6 +418,9 @@ main() {
             ;;
         build-firmware)
             build_firmware_bundle
+            ;;
+        provision)
+            provision_bundle
             ;;
         release-assets)
             build_python_wheel

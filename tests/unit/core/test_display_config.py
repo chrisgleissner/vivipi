@@ -40,8 +40,10 @@ def test_normalize_display_config_defaults_to_inferred_oled_geometry_and_font():
     assert config["height_px"] == 64
     assert config["column_offset"] == 32
     assert config["font"] == {"width_px": 8, "height_px": 8}
+    assert config["rotation"] == 0
     assert config["page_interval_s"] == 20
     assert config["boot_logo_duration_s"] == 4
+    assert config["refresh"] == {"min_interval_s": 0, "probe_cycles_per_refresh": 1}
     assert config["liveness"]["contrast_breathing"]["enabled"] is False
     assert config["liveness"]["per_row_micro"]["enabled"] is False
     assert config["liveness"]["bottom_heartbeat"]["enabled"] is False
@@ -79,6 +81,26 @@ def test_normalize_display_config_accepts_liveness_configuration():
         "period_s": 20,
         "pixel_count": 3,
         "position": "center",
+        "pixel_width_px": 1,
+        "pixel_height_px": 1,
+        "gap_px": 0,
+    }
+
+
+def test_normalize_display_config_accepts_refresh_configuration():
+    config = normalize_display_config(
+        {
+            "type": "waveshare-pico-epaper-2.13-b-v4",
+            "refresh": {
+                "min_interval": "10s",
+                "probe_cycles_per_refresh": "2",
+            },
+        }
+    )
+
+    assert config["refresh"] == {
+        "min_interval_s": 10,
+        "probe_cycles_per_refresh": 2,
     }
 
 
@@ -101,6 +123,9 @@ def test_normalize_display_config_parses_liveness_string_values_and_rejects_inva
         "period_s": 3,
         "pixel_count": 2,
         "position": "left",
+        "pixel_width_px": 1,
+        "pixel_height_px": 1,
+        "gap_px": 0,
     }
 
     with pytest.raises(ValueError, match="device.display.liveness must be a mapping"):
@@ -133,6 +158,25 @@ def test_normalize_display_config_parses_liveness_string_values_and_rejects_inva
             }
         )
 
+    with pytest.raises(ValueError, match="device.display.refresh must be a mapping"):
+        normalize_display_config({"type": "waveshare-pico-oled-1.3", "refresh": []})
+
+    with pytest.raises(ValueError, match="device.display.refresh.probe_cycles_per_refresh must be a positive integer"):
+        normalize_display_config(
+            {
+                "type": "waveshare-pico-epaper-2.13-b-v4",
+                "refresh": {"probe_cycles_per_refresh": 0},
+            }
+        )
+
+    with pytest.raises(ValueError, match="device.display.refresh.min_interval must not be negative"):
+        normalize_display_config(
+            {
+                "type": "waveshare-pico-epaper-2.13-b-v4",
+                "refresh": {"min_interval": -1},
+            }
+        )
+
 
 def test_display_parser_helpers_cover_numeric_and_error_branches():
     assert core_display._parse_positive_int(7.0, "device.display.width_px") == 7
@@ -161,10 +205,21 @@ def test_normalize_display_config_infers_epaper_defaults_from_type_only():
     assert config["width_px"] == 250
     assert config["height_px"] == 122
     assert config["font_size"] == "medium"
-    assert config["font"] == {"width_px": 10, "height_px": 10}
+    assert config["font"] == {"width_px": 13, "height_px": 13}
+    assert config["rotation"] == 0
     assert config["page_interval_s"] == 180
+    assert config["refresh"] == {"min_interval_s": 0, "probe_cycles_per_refresh": 1}
     assert config["pins"]["busy"] == "GP13"
     assert config["failure_color"] == "red"
+    assert config["liveness"]["bottom_heartbeat"] == {
+        "enabled": False,
+        "period_s": 20,
+        "pixel_count": 1,
+        "position": "left",
+        "pixel_width_px": 2,
+        "pixel_height_px": 2,
+        "gap_px": 3,
+    }
 
 
 def test_supported_font_sizes_expose_symbolic_presets():
@@ -179,6 +234,61 @@ def test_normalize_display_config_accepts_symbolic_font_size_strings():
     assert expanded["font_size"] == "extralarge"
     assert compact["font"]["width_px"] < expanded["font"]["width_px"]
     assert compact["font"]["height_px"] < expanded["font"]["height_px"]
+
+
+def test_normalize_display_config_accepts_180_degree_rotation_only():
+    oled = normalize_display_config({"type": "waveshare-pico-oled-1.3", "rotation": "180"})
+    epaper = normalize_display_config({"type": "waveshare-pico-epaper-2.13-b-v4", "rotation": 180})
+
+    assert oled["rotation"] == 180
+    assert epaper["rotation"] == 180
+
+    with pytest.raises(ValueError, match="device.display.rotation"):
+        normalize_display_config({"type": "waveshare-pico-oled-1.3", "rotation": 90})
+
+
+def test_display_rotation_helper_accepts_integer_like_floats_and_reserved_indicator_defaults_to_zero():
+    assert core_display._parse_rotation(180.0) == 180
+    assert core_display.reserved_bottom_indicator_px(None) == 0
+
+    with pytest.raises(ValueError, match="device.display.rotation"):
+        core_display._parse_rotation("quarter-turn")
+
+
+def test_normalize_display_config_calibrates_rotated_213_b_v4_bottom_heartbeat_gap():
+    config = normalize_display_config(
+        {
+            "type": "waveshare-pico-epaper-2.13-b-v4",
+            "rotation": 180,
+            "liveness": {
+                "bottom_heartbeat": {
+                    "enabled": True,
+                    "gap_px": 3,
+                }
+            },
+        }
+    )
+
+    assert config["liveness"]["bottom_heartbeat"]["pixel_width_px"] == 4
+    assert config["liveness"]["bottom_heartbeat"]["pixel_height_px"] == 4
+    assert config["liveness"]["bottom_heartbeat"]["gap_px"] == 6
+
+    unrotated = normalize_display_config(
+        {
+            "type": "waveshare-pico-epaper-2.13-b-v4",
+            "rotation": 0,
+            "liveness": {
+                "bottom_heartbeat": {
+                    "enabled": True,
+                    "gap_px": 3,
+                }
+            },
+        }
+    )
+
+    assert unrotated["liveness"]["bottom_heartbeat"]["pixel_width_px"] == 2
+    assert unrotated["liveness"]["bottom_heartbeat"]["pixel_height_px"] == 2
+    assert unrotated["liveness"]["bottom_heartbeat"]["gap_px"] == 3
 
 
 def test_normalize_display_config_keeps_pixel_font_overrides_for_backwards_compatibility():
@@ -284,6 +394,12 @@ def test_normalize_display_config_validates_inferred_string_and_numeric_fields()
 
     with pytest.raises(ValueError, match="device.display.column_offset"):
         normalize_display_config({"type": "waveshare-pico-oled-1.3", "column_offset": -1})
+
+
+def test_normalize_display_config_accepts_zero_spi_mode_for_epaper_displays():
+    config = normalize_display_config({"type": "waveshare-pico-epaper-2.13-b-v4", "spi_mode": 0})
+
+    assert config["spi_mode"] == 0
 
 
 def test_normalize_display_config_rejects_mismatched_inferred_values():

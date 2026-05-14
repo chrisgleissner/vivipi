@@ -21,11 +21,12 @@ except ImportError:  # pragma: no cover - imported on-device
 
 from vivipi.core.input import InputController
 from vivipi.core.config import parse_probe_schedule_config
-from vivipi.core.display import normalize_display_config
+from vivipi.core.display import normalize_display_config, reserved_bottom_indicator_px
 from vivipi.core.logging import bound_text
-from vivipi.core.models import DiagnosticEvent, DisplayMode, TransitionThresholds
+from vivipi.core.models import CheckRuntime, DiagnosticEvent, DisplayMode, TransitionThresholds
 from vivipi.core.probe_trace import ProbeTraceCollector
-from vivipi.core.render import Frame
+from vivipi.core.render import Frame, TextSpan
+from vivipi.core.state import sort_checks
 import vivipi.runtime.checks as runtime_checks_module
 from vivipi.runtime import state as runtime_state
 from vivipi.runtime.syslog import build_syslog_sink, resolve_syslog_config
@@ -386,6 +387,20 @@ def _build_runtime_watchdog(definitions, boot_logo_duration_s: float, button_sel
     return _RuntimeWatchdog(handle, timeout_ms=timeout_ms, reset_fn=getattr(machine, "reset", None))
 
 
+def _build_bootstrap_watchdog():
+    if machine is None or not hasattr(machine, "WDT"):
+        return _NoopRuntimeWatchdog()
+
+    try:
+        handle = machine.WDT(timeout=WATCHDOG_MAX_TIMEOUT_MS)
+    except TypeError:
+        handle = machine.WDT(WATCHDOG_MAX_TIMEOUT_MS)
+    except Exception:
+        return _NoopRuntimeWatchdog()
+
+    return _RuntimeWatchdog(handle, timeout_ms=WATCHDOG_MAX_TIMEOUT_MS, reset_fn=getattr(machine, "reset", None))
+
+
 def _feed_watchdog(watchdog):
     if watchdog is None:
         return False
@@ -637,18 +652,29 @@ def build_runtime_app(
     _serial_log("BOOT", "display ready", backend=display_config.get("backend", "?"))
     collected_diagnostics.extend(display_diagnostics)
     collected_errors.extend(display_errors)
+    bootstrap_watchdog = _build_bootstrap_watchdog()
+    if hasattr(display, "_watchdog_feed"):
+        display._watchdog_feed = bootstrap_watchdog.feed if getattr(bootstrap_watchdog, "enabled", False) else None
     font = display_config.get("font", {}) if isinstance(display_config, dict) else {}
-    font_width = int(font.get("width_px", 8)) if isinstance(font, dict) else 8
-    font_height = int(font.get("height_px", 8)) if isinstance(font, dict) else 8
-    page_size = max(1, int(display_config.get("height_px", 64)) // font_height)
+    font_width = int(getattr(display, "font_width", int(font.get("width_px", 8)) if isinstance(font, dict) else 8))
+    font_height = int(getattr(display, "font_height", int(font.get("height_px", 8)) if isinstance(font, dict) else 8))
+    text_height_px = max(1, int(display_config.get("height_px", 64)) - reserved_bottom_indicator_px(display_config))
+    page_size = max(1, text_height_px // font_height)
     row_width = max(1, int(display_config.get("width_px", 128)) // font_width)
 
     project = config.get("project", {}) if isinstance(config.get("project"), dict) else {}
     version = str(project.get("version", ""))
     build_time_value = str(project.get("build_time", ""))
     boot_start_s = now_provider()
-    logo_diagnostics, logo_errors = _safe_show_boot_logo(display, version)
-    _serial_log("BOOT", "boot logo shown", version=version or "-")
+    if str(display_config.get("family", "")).strip().lower() == "eink":
+        logo_diagnostics = ()
+        logo_errors = ()
+        _serial_log("BOOT", "boot logo skipped", reason="eink-single-refresh")
+    else:
+        _feed_watchdog(bootstrap_watchdog)
+        logo_diagnostics, logo_errors = _safe_show_boot_logo(display, version)
+        _feed_watchdog(bootstrap_watchdog)
+        _serial_log("BOOT", "boot logo shown", version=version or "-")
     collected_diagnostics.extend(logo_diagnostics)
     collected_errors.extend(logo_errors)
 
@@ -662,13 +688,15 @@ def build_runtime_app(
     collected_diagnostics.extend(definition_diagnostics)
     collected_errors.extend(definition_errors)
 
-    boot_logo_duration_s = float(display_config.get("boot_logo_duration_s", 4.0))
+    boot_logo_duration_s = 0.0 if str(display_config.get("family", "")).strip().lower() == "eink" else float(display_config.get("boot_logo_duration_s", 4.0))
     runtime_watchdog = _build_runtime_watchdog(
         definitions,
         boot_logo_duration_s=boot_logo_duration_s,
         button_self_test_s=_button_self_test_duration_s(button_input),
     )
     runtime_checks_module.set_probe_activity_callback(runtime_watchdog.feed if getattr(runtime_watchdog, "enabled", False) else None)
+    if hasattr(display, "_watchdog_feed"):
+        display._watchdog_feed = runtime_watchdog.feed if getattr(runtime_watchdog, "enabled", False) else None
     try:
         button_self_test_ran = _run_button_self_test(
             display,
@@ -710,10 +738,12 @@ def build_runtime_app(
         visible_degraded=_visible_degraded_from_config(config),
         highlight_selection=False,
         display_liveness=dict(display_config.get("liveness", {})),
+        display_refresh=dict(display_config.get("refresh", {})),
         sleep_ms=sleep_ms,
         probe_time_provider=_steady_now_s,
         version=version,
         build_time=build_time_value,
+        display_family=str(display_config.get("family", "oled")),
     )
     app = _force_serial_probe_execution(app)
     syslog_settings = resolve_syslog_config(config, definitions)
@@ -913,10 +943,286 @@ def run_loop(
         sleep_ms(poll_interval_ms)
 
 
+def hold_safe_display(poll_interval_ms=20, sleep_ms=_sleep_ms, watchdog=None, iterations=None):
+    iteration = 0
+    while iterations is None or iteration < iterations:
+        _feed_watchdog(watchdog)
+        sleep_ms(poll_interval_ms)
+        iteration += 1
+
+
+def _eink_status_text(value) -> str:
+    candidate = getattr(value, "value", value)
+    return "OK" if str(candidate).strip().upper() == "OK" else "FAIL"
+
+
+def _fold_text(value: object) -> str:
+    text = value if isinstance(value, str) else str(value)
+    casefold = getattr(text, "casefold", None)
+    if callable(casefold):
+        return casefold()
+    lower = getattr(text, "lower", None)
+    if callable(lower):
+        return lower()
+    return str(text)
+
+
+def _summary_bottom_indicator_px(app) -> int:
+    display_liveness = getattr(app, "display_liveness", {})
+    if not isinstance(display_liveness, dict):
+        return 0
+    heartbeat = display_liveness.get("bottom_heartbeat", {})
+    if not isinstance(heartbeat, dict):
+        return 0
+    return max(0, int(heartbeat.get("pixel_height_px", 0))) + max(0, int(heartbeat.get("gap_px", 0)))
+
+
+def _summary_bottom_pixels(app, now_s: float) -> tuple[int, ...]:
+    frame_bottom_pixels = getattr(app, "_frame_bottom_pixels", None)
+    if callable(frame_bottom_pixels):
+        return tuple(int(pixel_x) for pixel_x in frame_bottom_pixels(now_s))
+    return ()
+
+
+def _summary_checks(app) -> tuple[CheckRuntime, ...]:
+    state = getattr(app, "state", None)
+    state_checks = getattr(state, "checks", ())
+    if isinstance(state_checks, (tuple, list)) and state_checks:
+        return sort_checks(tuple(state_checks))
+
+    definitions = tuple(getattr(app, "definitions", ()))
+    registered_results = getattr(app, "registered_results", {})
+    fallback_checks = []
+    for definition in definitions:
+        current = registered_results.get(definition.identifier, {}) if isinstance(registered_results, dict) else {}
+        fallback_checks.append(
+            CheckRuntime(
+                identifier=str(getattr(definition, "identifier", "")),
+                name=str(current.get("name") or getattr(definition, "name", getattr(definition, "identifier", "CHECK"))),
+                status=current.get("status"),
+            )
+        )
+    return sort_checks(tuple(fallback_checks))
+
+
+def _build_eink_probe_summary_frame(app, now_s: float = 0.0):
+    state = getattr(app, "state", None)
+    row_width = max(1, int(getattr(state, "row_width", 16)))
+    display = getattr(app, "display", None)
+    row_height = max(8, int(getattr(display, "font_height", 8)))
+    rows = []
+    failure_spans = []
+
+    for row_index, check in enumerate(_summary_checks(app)):
+        name_text = str(getattr(check, "name", "CHECK"))
+        status_text = _eink_status_text(getattr(check, "status", None))
+        name_width = max(1, row_width - len(status_text) - 1)
+        rows.append(f"{_fit_row(name_text[:name_width], name_width)} {status_text}")
+        if status_text == "FAIL":
+            failure_spans.append(
+                TextSpan(
+                    row_index=row_index,
+                    start_column=max(0, row_width - len(status_text)),
+                    end_column=row_width,
+                )
+            )
+
+    if not rows:
+        rows = [_fit_row("NO CHECKS", row_width)]
+
+    content_height_px = len(rows) * row_height
+    display_height_px = int(getattr(display, "height", content_height_px))
+    reserved_bottom_px = _summary_bottom_indicator_px(app)
+    content_area_height_px = max(0, display_height_px - reserved_bottom_px)
+    display_liveness = getattr(app, "display_liveness", {})
+    bottom_heartbeat = display_liveness.get("bottom_heartbeat", {}) if isinstance(display_liveness, dict) else {}
+    return Frame(
+        rows=tuple(rows),
+        shift_offset=(0, max(0, (content_area_height_px - content_height_px) // 2)),
+        failure_spans=tuple(failure_spans),
+        bottom_pixels=_summary_bottom_pixels(app, now_s),
+        bottom_pixel_width_px=int(bottom_heartbeat.get("pixel_width_px", 1)) if isinstance(bottom_heartbeat, dict) else 1,
+        bottom_pixel_height_px=int(bottom_heartbeat.get("pixel_height_px", 1)) if isinstance(bottom_heartbeat, dict) else 1,
+        bottom_pixel_gap_px=int(bottom_heartbeat.get("gap_px", 0)) if isinstance(bottom_heartbeat, dict) else 0,
+    )
+
+
+def _run_eink_probe_summary(app, now_s, watchdog=None):
+    _feed_watchdog(watchdog)
+    if hasattr(app, "run_all_checks"):
+        app.run_all_checks(now_s)
+    elif all(hasattr(app, attribute) for attribute in ("definitions", "_run_check")):
+        for definition in getattr(app, "definitions", ()):  # pragma: no branch - tiny device summary loop
+            _feed_watchdog(watchdog)
+            app._run_check(definition, now_s, manual=True)
+    _feed_watchdog(watchdog)
+    frame = _build_eink_probe_summary_frame(app, now_s=now_s)
+    getattr(app, "display", HeadlessDisplay()).draw_frame(frame)
+    _feed_watchdog(watchdog)
+
+
+def _tick_eink_summary_state(app, now_s, watchdog=None):
+    _feed_watchdog(watchdog)
+    step = getattr(app, "step", None)
+    if callable(step):
+        step(now_s, button_events=(), render=False, max_due_checks=1)
+        _feed_watchdog(watchdog)
+        return
+
+    for method_name, args in (
+        ("_drain_probe_traces", ()),
+        ("_drain_completed_checks", ()),
+        ("_maybe_reconnect_network", (now_s,)),
+        ("_run_due_checks", (now_s,)),
+        ("_drain_probe_traces", ()),
+        ("_drain_completed_checks", ()),
+        ("_drain_probe_traces", ()),
+        ("_apply_page_rotation", (now_s,)),
+        ("_apply_shift", (now_s,)),
+    ):
+        method = getattr(app, method_name, None)
+        if callable(method):
+            method(*args)
+            _feed_watchdog(watchdog)
+
+
+def _eink_summary_signature(frame) -> tuple[tuple[str, ...], tuple[TextSpan, ...], tuple[int, int]]:
+    if frame is None:
+        return ((), (), (0, 0))
+    shift_offset = getattr(frame, "shift_offset", (0, 0))
+    return (
+        tuple(getattr(frame, "rows", ())),
+        tuple(getattr(frame, "failure_spans", ())),
+        (int(shift_offset[0]), int(shift_offset[1])),
+    )
+
+
+def _eink_refresh_policy(app) -> dict[str, int]:
+    raw = getattr(app, "display_refresh", {})
+    if not isinstance(raw, dict):
+        raw = {}
+    return {
+        "min_interval_s": max(0, int(raw.get("min_interval_s", 0) or 0)),
+        "probe_cycles_per_refresh": max(1, int(raw.get("probe_cycles_per_refresh", 1) or 1)),
+    }
+
+
+def _eink_completed_probe_cycles(app) -> int:
+    completed_probe_cycles = getattr(app, "completed_probe_cycles", None)
+    if callable(completed_probe_cycles):
+        return max(0, int(completed_probe_cycles()))
+    return 0
+
+
+def _eink_state_refresh_ready(app, now_s: float) -> bool:
+    cycle_started = getattr(app, "pending_status_cycle_started", None)
+    if cycle_started is not None:
+        policy = _eink_refresh_policy(app)
+        completed_cycles = _eink_completed_probe_cycles(app)
+        if completed_cycles < int(cycle_started) + policy["probe_cycles_per_refresh"]:
+            return False
+        min_interval_s = float(policy["min_interval_s"])
+    else:
+        min_interval_s = 0.0
+    last_render_at_s = getattr(app, "last_render_at_s", None)
+    if last_render_at_s is None:
+        return True
+    return now_s >= float(last_render_at_s) + min_interval_s
+
+
+def _render_eink_summary_frame(app, now_s: float, reason: str) -> str:
+    if getattr(app, "display_retry_at_s", None) is not None and now_s < float(getattr(app, "display_retry_at_s")):
+        return "retry"
+
+    frame = _build_eink_probe_summary_frame(app, now_s=now_s)
+    previous_frame = getattr(app, "last_rendered_frame", None)
+    if reason == "state":
+        if _eink_summary_signature(frame) == _eink_summary_signature(previous_frame):
+            log_propagation = getattr(app, "_log_display_propagation", None)
+            if callable(log_propagation):
+                log_propagation(now_s, reason)
+            return "none"
+    elif frame == previous_frame:
+        return "none"
+
+    try:
+        getattr(app, "display", HeadlessDisplay()).draw_frame(frame)
+    except Exception as error:
+        record_failure = getattr(app, "_record_display_failure", None)
+        if callable(record_failure):
+            record_failure(error, now_s)
+        return "error"
+
+    reset_failure_state = getattr(app, "_reset_display_failure_state", None)
+    if callable(reset_failure_state):
+        reset_failure_state()
+    app.last_rendered_frame = frame
+    app.last_render_at_s = now_s
+    app.last_render_reason = reason
+    log_liveness = getattr(app, "_log_liveness_state", None)
+    if callable(log_liveness):
+        log_liveness(frame)
+    log_propagation = getattr(app, "_log_display_propagation", None)
+    if callable(log_propagation):
+        log_propagation(now_s, reason)
+    return reason
+
+
+def _run_eink_refresh_loop(app, now_s, poll_interval_ms=20, now_provider=None, sleep_ms=None, watchdog=None):
+    now_provider = _steady_now_s if now_provider is None else now_provider
+    sleep_ms = _sleep_ms if sleep_ms is None else sleep_ms
+    refresh_interval_s = max(1, int(getattr(app, "page_interval_s", 180) or 180))
+    current_now_s = float(now_s)
+    next_periodic_refresh_s = current_now_s
+    while True:
+        _tick_eink_summary_state(app, current_now_s, watchdog=watchdog)
+        render_reason = None
+        if getattr(app, "last_rendered_frame", None) is None:
+            render_reason = "startup"
+        elif getattr(app, "pending_status_updates", {}):
+            if _eink_state_refresh_ready(app, current_now_s):
+                render_reason = "state"
+        elif current_now_s >= next_periodic_refresh_s:
+            render_reason = "periodic"
+        if render_reason is not None:
+            result = _render_eink_summary_frame(app, current_now_s, reason=render_reason)
+            if result != "retry":
+                next_periodic_refresh_s = current_now_s + refresh_interval_s
+        _feed_watchdog(watchdog)
+        sleep_ms(poll_interval_ms)
+        current_now_s = float(now_provider())
+
+
+def _render_eink_safe_hold_screen(app, now_s=None):
+    del now_s
+    state = getattr(app, "state", None)
+    row_width = max(1, int(getattr(state, "row_width", 16)))
+    rows = (
+        _fit_row("VIVIPI EPAPER", row_width),
+        _fit_row("SAFE HOLD MODE", row_width),
+        _fit_row("STATIC SCREEN", row_width),
+    )
+    getattr(app, "display", HeadlessDisplay()).draw_frame(Frame(rows=rows))
+
+
 def run_forever(config_path="config.json", poll_interval_ms=20):
     app = build_runtime_app_from_path(config_path)
     watchdog = getattr(app, "runtime_watchdog", None)
+    display_family = str(getattr(app, "display_family", "")).strip().lower()
     steady_now_provider = getattr(app, "_probe_now_s", _steady_now_s)
+    if display_family == "eink":
+        _run_startup_network(app, _now_s())
+        startup_now_s = _wait_for_boot_logo(app, now_provider=steady_now_provider, sleep_ms=_sleep_ms, watchdog=watchdog)
+        _serial_log("BOOT", "startup summary", now_s=f"{startup_now_s:.3f}")
+        _run_eink_refresh_loop(
+            app,
+            startup_now_s,
+            poll_interval_ms=poll_interval_ms,
+            now_provider=steady_now_provider,
+            sleep_ms=_sleep_ms,
+            watchdog=watchdog,
+        )
+        return
     _maybe_run_button_self_test_from_app(app, steady_now_provider, _sleep_ms, watchdog=watchdog)
     _run_startup_network(app, _now_s())
     startup_now_s = _wait_for_boot_logo(app, now_provider=steady_now_provider, sleep_ms=_sleep_ms, watchdog=watchdog)
