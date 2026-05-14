@@ -10,6 +10,8 @@ See your device health at a glance.
 
 ViviPi, pronounced "VEE-vee-pie", is a compact health display for Raspberry Pi Pico modules. It runs checks directly from the Pico, can include additional check results from a remote service, and presents the combined status in a fixed-width UI that is easy to read at a glance.
 
+The project was specifically set up to perform health check monitoring against a Commodore 64 Ultimate or Ultimate 64, but it can also be used to monitor other devices.
+
 <p align="center">
   <img src="./docs/img/vivipi_tested_picos.jpg" alt="Two ViviPi test devices side by side: a Pico OLED 1.3 on the left and a Pico ePaper 2.13-B V4 on the right." width="720">
 </p>
