@@ -9,6 +9,7 @@ __pycache__/
 *.pyc
 artifacts/
 config/build-deploy.local.yaml
+config/build-deploy.multi.local.yaml
 coverage.xml
 dist/
 htmlcov/
