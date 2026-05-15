@@ -1,10 +1,6 @@
 # C64U / U64 CLI tools
 
-Use these host-side commands when you want to answer one of three questions:
-
-- Is the box healthy right now?
-- Can I run a longer ViviPi-style soak and keep artifacts?
-- Can I drive one host directly and choose exactly how aggressive the run is?
+Use these host-side commands when you want to perform dedicated smoke, soak or stress tests. 
 
 ## Start here
 
