@@ -277,11 +277,11 @@ For the product contract and requirement coverage, see [docs/spec.md](docs/spec.
 
 ## C64U / U64 CLI tools
 
-This repo contains various CLI tools that are useful for performing smoke tests, soak tests, and stress tests against thew entire network listener surface of the Commodore 64 Ultimate or Ultimate 64 set of devices.
+This repo contains various CLI tools that are useful for performing smoke, soak, and stress tests against the entire network listener surface of the Commodore 64 Ultimate, Ultimate 64 and Ultimate 64 II.
 
-They have been succesfully used to identify, isolate and then fix various issues with the Ultimate 64 firmware. Finally, they were instrumental in proving that the ultimate fix survived multi hour soak tests.
+They have been succesfully used to identify, isolate and then fix various network listener issues with the Ultimate 64 firmware. They were also instrumental in proving that the fixes worked by surviving multi-hour soak tests against the Ultimate 64.
 
-Examples of merged Ultimate 64 firmwarew pull requests:
+Examples of merged Ultimate 64 firmware pull request which leveraged these CLI tools:
 
 - https://github.com/GideonZ/1541ultimate/pull/691
 - https://github.com/GideonZ/1541ultimate/pull/682
