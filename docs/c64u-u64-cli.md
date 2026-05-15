@@ -123,7 +123,7 @@ If you set `--probes` without `--stream`, the profile-default stream checks are 
 
 ## Full help: `u64_connection_test.py`
 
-This is the widest direct control surface on this page. The full current `--help` output is included here so you can scan every option without leaving the document.
+The full current `--help` output is included here for reference.
 
 ```text
 usage: u64_connection_test.py [-h] [-H HOST] [-d DELAY_MS] [-n LOG_EVERY] [-u FTP_USER] [-P FTP_PASS]
