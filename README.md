@@ -13,10 +13,10 @@ ViviPi, pronounced "VEE-vee-pie", is a compact health display for Raspberry Pi P
 The project was specifically set up to perform health check monitoring against a Commodore 64 Ultimate or Ultimate 64, but it can also be used to monitor other devices.
 
 <p align="center">
-  <img src="./docs/img/vivipi_tested_picos.jpg" alt="Two ViviPi test devices side by side: a Pico OLED 1.3 on the left and a Pico ePaper 2.13-B V4 on the right." width="720">
+  <img src="./docs/img/vivipi_tested_picos_ok.jpg" alt="Two ViviPi test devices side by side with all checks healthy: a Pico OLED 1.3 on the left and a Pico ePaper 2.13-B V4 on the right." width="720">
 </p>
 
-Shown above are the two Pico 2W builds tested on real hardware: `waveshare-pico-oled-1.3` and `waveshare-pico-epaper-2.13-b-v4`.
+Shown above are the two Pico 2W builds tested on real hardware in their all-clear state: `waveshare-pico-oled-1.3` and `waveshare-pico-epaper-2.13-b-v4`.
 
 ## Features
 
@@ -125,7 +125,36 @@ This repository currently has real hardware coverage for:
 
 Testing was performed against an Ultimate 64 Elite I, a Commodore 64 Ultimate Founders Edition, and a Pixel 4 connected over ADB to a Kubuntu 24.04 machine running a custom service probe.
 
+<table>
+  <tr>
+    <td align="center">
+      <img src="./docs/img/vivipi_tested_pico_oled_fail.jpg" alt="Close-up of the Waveshare Pico OLED 1.3 showing the Pixel 4-backed service failure on the monochrome display." width="360">
+      <br>
+      <em>Tested OLED build: Waveshare Pico OLED 1.3</em>
+    </td>
+    <td align="center">
+      <img src="./docs/img/vivipi_tested_pico_epaper_fail.jpg" alt="Close-up of the Waveshare Pico ePaper 2.13-B V4 showing the Pixel 4-backed service failure in red." width="360">
+      <br>
+      <em>Tested e-paper build: Waveshare Pico ePaper 2.13-B V4</em>
+    </td>
+  </tr>
+</table>
+
 Other display configurations are currently untested in this project. For the full display matrix, photos, pin mapping, and display-control details, see [docs/reference.md](docs/reference.md).
+
+## Hardware details
+
+To recreate the two-device setup shown in this README, order these parts:
+
+Prices below were checked in May 2026.
+
+| Qty | Part | Recommended source (US) | Current US price | Recommended source (UK) | Current UK price |
+| --- | --- | --- | --- | --- | --- |
+| 2 | Raspberry Pi Pico 2 W | Waveshare direct | `$7.99` each | ThePiHut or Pimoroni | `£6.60` each |
+| 1 | Waveshare Pico-OLED-1.3 | Waveshare direct | `$8.99` | ThePiHut or Pimoroni | about `£10` |
+| 1 | Waveshare Pico-ePaper-2.13-B V4 | Waveshare direct | `$13.99` | ThePiHut or Pimoroni | about `£15` |
+
+You do not need the Pixel 4 or Comodore 64 Ultimate hardware to use ViviPi in general. They are only needed if you want to reproduce the exact setup of this project's real-hardware validation.
 
 ## System architecture
 
@@ -180,21 +209,27 @@ The overview is ViviPi's default screen. On the standard 16x8 layout, it shows o
 This is different from the detail view. Each check has exactly one detail page. That page shows the check name and `STATUS`, then includes `LAT`, `AGE`, and one line of details text when those values are available. Detail pages are interactive, not automatic: they are only reachable on hardware that has buttons wired for navigation.
 
 <p align="center">
-  <img src="./docs/img/vivipi_tested_pico_oled.jpg" alt="Close-up of the tested monochrome Waveshare Pico OLED 1.3 running ViviPi." width="520">
+  <img src="./docs/img/vivipi_tested_picos_fail.jpg" alt="Two ViviPi test devices showing a service failure after the Pixel 4 became unreachable." width="720">
   <br>
-  <em>Tested monochrome OLED build: Waveshare Pico OLED 1.3</em>
+  <em>Overview state when the Pixel 4-backed service check becomes unreachable</em>
 </p>
 
 On the tested monochrome OLED build, `Key 1` / button `b` toggles between the overview and the detail page for the currently selected check. `Key 0` / button `a` advances through the checks; in detail mode, that means stepping from one probe's detail page to the next. Displays without buttons still show the overview pages, but they cannot open probe-specific detail pages interactively.
 
 The deployed OLED runtime keeps the overview acting like a clean status board rather than a menu with a persistent cursor. The buttons therefore matter mainly for entering detail mode and moving between probe details, not for turning the overview into a visibly highlighted selector.
 
+<p align="center">
+  <img src="./docs/img/vivipi_tested_pico_oled_detail.jpg" alt="Close-up of the Waveshare Pico OLED 1.3 detail page for the REST-backed service probe." width="720">
+  <br>
+  <em>OLED detail page for the REST probe, including latency, age, and probe detail text</em>
+</p>
+
 Status emphasis depends on the hardware:
 
 * On monochrome OLED displays, failed status text is shown in reverse video.
 * On black, white, and red e-paper displays, failed status text is shown in red.
 
-A thin bottom heartbeat indicator advances when a probe completes. Visible movement means the runtime is alive and the probe cycle is still progressing.
+On the default OLED overview, ViviPi also shows a single bottom-edge progress pixel. It advances one step left-to-right each time a probe completes, then wraps back to the left after the final slot. Its purpose is to prove that the runtime is still alive and cycling through probes even when the visible check rows have not changed. The tested e-paper profile leaves that pixel disabled because e-paper refreshes are intentionally slower and coalesced, so a constantly moving liveness cue is a better fit for OLED than for e-paper.
 
 ### Probe reference
 
