@@ -274,3 +274,23 @@ Use [docs/reference.md](docs/reference.md) for:
 * testing, release, and repository layout notes
 
 For the product contract and requirement coverage, see [docs/spec.md](docs/spec.md) and [docs/spec-traceability.md](docs/spec-traceability.md).
+
+## C64U / U64 CLI tools
+
+This repo contains various CLI tools that are useful for performing smoke tests, soak tests, and stress tests against thew entire network listener surface of the Commodore 64 Ultimate or Ultimate 64 set of devices.
+
+They have been succesfully used to identify, isolate and then fix various issues with the Ultimate 64 firmware. Finally, they were instrumental in proving that the ultimate fix survived multi hour soak tests.
+
+Examples of merged Ultimate 64 firmwarew pull requests:
+
+- https://github.com/GideonZ/1541ultimate/pull/691
+- https://github.com/GideonZ/1541ultimate/pull/682
+- https://github.com/GideonZ/1541ultimate/pull/679
+
+For real-device checks outside the Pico UI, start with:
+
+- `./scripts/c64_health_check` for one concise pass across both configured targets
+- `./scripts/vivipulse_stress_test.sh` for an artifacted soak run
+- `./scripts/u64_connection_test.py --profile soak|stress -H u64|c64u` for direct protocol exercise
+
+See [docs/c64u-u64-cli.md](docs/c64u-u64-cli.md) for when to use each tool, example commands, and the key defaults.
