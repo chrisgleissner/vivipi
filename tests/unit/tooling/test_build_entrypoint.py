@@ -69,6 +69,7 @@ def test_help_lists_top_level_commands_without_subitem_indentation(tmp_path: Pat
     assert "\n  deploy           Build the firmware bundle and copy it to the configured Pico target(s) via mpremote\n" in completed.stdout
     assert "\n  release-assets   Build the versioned GitHub release artifacts\n" in completed.stdout
     assert "\n  --device-port PATH         Optional serial or USB path for single-device mpremote deploy; defaults to auto\n" in completed.stdout
+    assert "this is the default for fleet-capable commands" in completed.stdout
 
 
 def test_multi_device_deploy_rejects_device_port_in_build_wrapper(tmp_path: Path):

@@ -198,6 +198,22 @@ def load_selected_build_deploy_settings(
     return {DEFAULT_SINGLE_DEVICE_ID: selected}
 
 
+def _default_all_devices_for_multi_config(
+    path: str | Path,
+    *,
+    env: dict[str, str] | None,
+    device_id: str | None,
+    all_devices: bool,
+) -> bool:
+    if all_devices or device_id is not None:
+        return all_devices
+    try:
+        raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+        return is_multi_device_settings(raw)
+    except FileNotFoundError:
+        return False
+
+
 def _normalize_service_settings(settings: dict[str, object]):
     service = settings.get("service")
     if not isinstance(service, dict):
@@ -746,6 +762,8 @@ def stage_release_assets(
     version_resolver=None,
     build_time_resolver=None,
     run_command=subprocess.run,
+    device_id: str | None = None,
+    all_devices: bool = False,
 ) -> dict[str, Path]:
     repository_root = Path(__file__).resolve().parents[3]
     _clear_generated_release_assets(output_dir)
@@ -753,23 +771,37 @@ def stage_release_assets(
     wheel_path = _resolve_release_wheel(dist_dir)
     repository_version = _resolve_release_version(repository_root, version_resolver=version_resolver)
     version = _select_release_version(repository_version, _release_version_from_wheel(wheel_path))
+    effective_all_devices = _default_all_devices_for_multi_config(
+        config_path,
+        env=env,
+        device_id=device_id,
+        all_devices=all_devices,
+    )
 
-    firmware_bundle = build_firmware_bundle(
+    firmware_outputs = build_firmware_bundles(
         config_path,
         output_dir,
         env=env,
         version_resolver=lambda: version,
         build_time_resolver=build_time_resolver,
+        device_id=device_id,
+        all_devices=effective_all_devices,
     )
     service_bundle = build_service_bundle(output_dir, dist_dir, version)
     source_zip, source_tar = build_source_archives(output_dir, version, run_command=run_command)
+    firmware_bundles = {
+        current_device_id: output["bundle"]
+        for current_device_id, output in firmware_outputs.items()
+    }
 
-    return {
-        "firmware_bundle": firmware_bundle,
+    outputs: dict[str, Path] = {
         "service_bundle": service_bundle,
         "source_zip": source_zip,
         "source_tar": source_tar,
     }
+    if len(firmware_bundles) == 1:
+        outputs["firmware_bundle"] = next(iter(firmware_bundles.values()))
+    return outputs
 
 
 def _resolve_checks_path(config_path: Path, settings: dict[str, object]) -> Path:
@@ -912,11 +944,17 @@ def build_firmware_bundles(
     release_dir.mkdir(parents=True, exist_ok=True)
 
     source_config_path = Path(config_path).resolve()
-    selected_settings = load_selected_build_deploy_settings(
+    effective_all_devices = _default_all_devices_for_multi_config(
         source_config_path,
         env=env,
         device_id=device_id,
         all_devices=all_devices,
+    )
+    selected_settings = load_selected_build_deploy_settings(
+        source_config_path,
+        env=env,
+        device_id=device_id,
+        all_devices=effective_all_devices,
     )
     version = _resolve_release_version(repository_root, version_resolver=version_resolver)
 
@@ -930,6 +968,11 @@ def build_firmware_bundles(
     multiple_devices = len(selected_settings) > 1 or is_multi_device_settings(_load_raw_build_deploy_settings(source_config_path, env=env))
     outputs: dict[str, dict[str, Path]] = {}
     manifest_entries: dict[str, dict[str, object]] = {}
+
+    if multiple_devices:
+        device_artifacts_root = release_dir / DEVICE_ARTIFACTS_DIRNAME
+        if device_artifacts_root.exists():
+            shutil.rmtree(device_artifacts_root)
 
     for current_device_id, settings in selected_settings.items():
         device_output_dir = _device_artifact_root(release_dir, current_device_id) if multiple_devices else release_dir
@@ -1004,8 +1047,11 @@ def _selector_from_settings(settings: dict[str, object]) -> dict[str, str]:
     device = settings.get("device")
     if isinstance(device, dict):
         port = device.get("micropython_port")
-        if isinstance(port, str) and port.strip() and port.strip() != DEFAULT_DEPLOY_PORT:
-            return {"port": port.strip()}
+        if isinstance(port, str) and port.strip():
+            normalized_port = port.strip()
+            if normalized_port == DEFAULT_DEPLOY_PORT:
+                return {"port": "/dev/tty*"}
+            return {"port": normalized_port}
 
     raise ValueError("device inventory requires a selector or explicit device.micropython_port")
 
@@ -1020,11 +1066,17 @@ def resolve_configured_device_inventory(
     port_candidates: list[str] | None = None,
     bootsel_candidates: list[str] | None = None,
 ) -> dict[str, DeviceInventoryState]:
-    selected_settings = load_selected_build_deploy_settings(
+    effective_all_devices = _default_all_devices_for_multi_config(
         config_path,
         env=env,
         device_id=device_id,
         all_devices=all_devices,
+    )
+    selected_settings = load_selected_build_deploy_settings(
+        config_path,
+        env=env,
+        device_id=device_id,
+        all_devices=effective_all_devices,
     )
     resolved_serial_candidates = _list_serial_by_id_candidates() if serial_candidates is None else serial_candidates
     resolved_port_candidates = _list_port_candidates() if port_candidates is None else port_candidates
@@ -1199,17 +1251,23 @@ def deploy_firmware_targets(
 ) -> dict[str, dict[str, object]]:
     effective_run_command = _default_run_command if run_command is None else run_command
     source_config_path = Path(config_path).resolve()
-    selected_settings = load_selected_build_deploy_settings(
+    effective_all_devices = _default_all_devices_for_multi_config(
         source_config_path,
         env=env,
         device_id=device_id,
         all_devices=all_devices,
     )
+    selected_settings = load_selected_build_deploy_settings(
+        source_config_path,
+        env=env,
+        device_id=device_id,
+        all_devices=effective_all_devices,
+    )
     inventory = resolve_configured_device_inventory(
         source_config_path,
         env=env,
         device_id=device_id,
-        all_devices=all_devices,
+        all_devices=effective_all_devices,
         serial_candidates=serial_candidates,
         port_candidates=port_candidates,
         bootsel_candidates=bootsel_candidates,
@@ -1219,7 +1277,7 @@ def deploy_firmware_targets(
         output_dir,
         env=env,
         device_id=device_id,
-        all_devices=all_devices,
+        all_devices=effective_all_devices,
     )
 
     results: dict[str, dict[str, object]] = {}
@@ -1279,17 +1337,23 @@ def provision_firmware_targets(
 ) -> dict[str, dict[str, object]]:
     effective_run_command = _default_run_command if run_command is None else run_command
     source_config_path = Path(config_path).resolve()
-    selected_settings = load_selected_build_deploy_settings(
+    effective_all_devices = _default_all_devices_for_multi_config(
         source_config_path,
         env=env,
         device_id=device_id,
         all_devices=all_devices,
     )
+    selected_settings = load_selected_build_deploy_settings(
+        source_config_path,
+        env=env,
+        device_id=device_id,
+        all_devices=effective_all_devices,
+    )
     inventory = resolve_configured_device_inventory(
         source_config_path,
         env=env,
         device_id=device_id,
-        all_devices=all_devices,
+        all_devices=effective_all_devices,
         serial_candidates=serial_candidates,
         port_candidates=port_candidates,
         bootsel_candidates=bootsel_candidates,
@@ -1352,6 +1416,69 @@ def write_selected_runtime_config(
         version=settings.get("project", {}).get("version", "") if isinstance(settings.get("project"), dict) else "",
         build_time=settings.get("project", {}).get("build_time", "") if isinstance(settings.get("project"), dict) else "",
     )
+
+
+def write_selected_runtime_configs(
+    config_path: str | Path,
+    output_path: str | Path,
+    *,
+    env: dict[str, str] | None = None,
+    device_id: str | None = None,
+    all_devices: bool = False,
+) -> dict[str, Path]:
+    source_config_path = Path(config_path).resolve()
+    effective_all_devices = _default_all_devices_for_multi_config(
+        source_config_path,
+        env=env,
+        device_id=device_id,
+        all_devices=all_devices,
+    )
+    selected_settings = load_selected_build_deploy_settings(
+        source_config_path,
+        env=env,
+        device_id=device_id,
+        all_devices=effective_all_devices,
+    )
+    requested_output = Path(output_path)
+    if len(selected_settings) == 1:
+        current_device_id, settings = next(iter(selected_settings.items()))
+        return {
+            current_device_id: write_runtime_config_from_settings(
+                source_config_path,
+                settings,
+                requested_output,
+                env=env,
+                version=settings.get("project", {}).get("version", "") if isinstance(settings.get("project"), dict) else "",
+                build_time=settings.get("project", {}).get("build_time", "") if isinstance(settings.get("project"), dict) else "",
+            )
+        }
+
+    if requested_output.suffix and requested_output.is_file():
+        requested_output.unlink()
+
+    output_root = requested_output.parent / DEVICE_ARTIFACTS_DIRNAME if requested_output.suffix else requested_output / DEVICE_ARTIFACTS_DIRNAME
+    outputs: dict[str, Path] = {}
+    manifest_entries: dict[str, dict[str, object]] = {}
+    for current_device_id, settings in selected_settings.items():
+        destination = output_root / current_device_id / "config.json"
+        outputs[current_device_id] = write_runtime_config_from_settings(
+            source_config_path,
+            settings,
+            destination,
+            env=env,
+            version=settings.get("project", {}).get("version", "") if isinstance(settings.get("project"), dict) else "",
+            build_time=settings.get("project", {}).get("build_time", "") if isinstance(settings.get("project"), dict) else "",
+        )
+        manifest_entries[current_device_id] = {
+            "device_id": current_device_id,
+            "display_type": settings.get("device", {}).get("display", {}).get("type"),
+            "checks_config": settings.get("checks_config"),
+            "selectors": settings.get("selector", {}),
+            "runtime_config": str(outputs[current_device_id]),
+        }
+
+    _write_multi_device_manifest(output_root.parent, manifest_entries)
+    return outputs
 
 
 def list_devices(
@@ -1455,6 +1582,7 @@ def main(argv: list[str] | None = None) -> int:
     render_parser.add_argument("--config", required=True)
     render_parser.add_argument("--output", required=True)
     render_parser.add_argument("--device")
+    render_parser.add_argument("--all-devices", action="store_true")
     render_parser.add_argument(
         "--prefer-local-config",
         action="store_true",
@@ -1486,6 +1614,8 @@ def main(argv: list[str] | None = None) -> int:
     release_parser.add_argument("--config", required=True)
     release_parser.add_argument("--output-dir", required=True)
     release_parser.add_argument("--dist-dir", required=True)
+    release_parser.add_argument("--device")
+    release_parser.add_argument("--all-devices", action="store_true")
     release_parser.add_argument(
         "--prefer-local-config",
         action="store_true",
@@ -1520,8 +1650,21 @@ def main(argv: list[str] | None = None) -> int:
     if hasattr(args, "config"):
         args.config = str(resolve_config_path(args.config, prefer_local_config=args.prefer_local_config))
     if args.command == "render-config":
-        if getattr(args, "device", None):
+        if getattr(args, "device", None) and not getattr(args, "all_devices", False):
             write_selected_runtime_config(args.config, args.output, device_id=args.device)
+            return 0
+        if getattr(args, "all_devices", False) or _default_all_devices_for_multi_config(
+            args.config,
+            env=None,
+            device_id=getattr(args, "device", None),
+            all_devices=getattr(args, "all_devices", False),
+        ):
+            write_selected_runtime_configs(
+                args.config,
+                args.output,
+                device_id=getattr(args, "device", None),
+                all_devices=getattr(args, "all_devices", False),
+            )
             return 0
         write_runtime_config(args.config, args.output)
         return 0
@@ -1529,7 +1672,12 @@ def main(argv: list[str] | None = None) -> int:
         list_devices(args.config, device_id=getattr(args, "device", None), all_devices=args.all_devices)
         return 0
     if args.command == "build-firmware":
-        if args.all_devices or getattr(args, "device", None):
+        if args.all_devices or getattr(args, "device", None) or _default_all_devices_for_multi_config(
+            args.config,
+            env=None,
+            device_id=getattr(args, "device", None),
+            all_devices=args.all_devices,
+        ):
             build_firmware_bundles(
                 args.config,
                 args.output_dir,
@@ -1540,7 +1688,13 @@ def main(argv: list[str] | None = None) -> int:
         build_firmware_bundle(args.config, args.output_dir)
         return 0
     if args.command == "stage-release-assets":
-        stage_release_assets(args.config, args.output_dir, args.dist_dir)
+        stage_release_assets(
+            args.config,
+            args.output_dir,
+            args.dist_dir,
+            device_id=getattr(args, "device", None),
+            all_devices=getattr(args, "all_devices", False),
+        )
         return 0
     if args.command == "provision-firmware":
         return _report_operation_results(
@@ -1552,9 +1706,15 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
     if args.command == "deploy-firmware":
-        if args.port and (args.all_devices or getattr(args, "device", None)):
+        deploy_all_devices = _default_all_devices_for_multi_config(
+            args.config,
+            env=None,
+            device_id=getattr(args, "device", None),
+            all_devices=args.all_devices,
+        )
+        if args.port and (args.all_devices or getattr(args, "device", None) or deploy_all_devices):
             raise ValueError("--port is only supported for single-device deploy-firmware")
-        if args.all_devices or getattr(args, "device", None):
+        if args.all_devices or getattr(args, "device", None) or deploy_all_devices:
             return _report_operation_results(
                 deploy_firmware_targets(
                     args.config,

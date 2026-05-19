@@ -99,10 +99,10 @@ All other display configurations listed here are currently untested on physical 
 1. Create `config/build-deploy.local.yaml` from `config/build-deploy.local.example.yaml` or export the `VIVIPI_WIFI_*` environment variables.
 2. Run `./build build-firmware`.
 3. In Thonny, connect to `MicroPython (Raspberry Pi Pico)`.
-4. Open `artifacts/release/vivipi-device-fs/` as the local source tree and upload its contents to the device root.
+4. Open `artifacts/release/vivipi-device-fs/` for single-device configs, or `artifacts/release/devices/<device-id>/vivipi-device-fs/` for multi-device configs, as the local source tree and upload its contents to the device root.
 5. Re-run `./build build-firmware` whenever config or source changes, then re-upload the updated files.
 
-The generated `artifacts/release/vivipi-device-fs/` directory is the exact device filesystem layout expected by the Pico.
+The generated `vivipi-device-fs/` directory is the exact device filesystem layout expected by each Pico.
 
 ### VS Code
 
@@ -111,10 +111,10 @@ The official Raspberry Pi Pico extension handles Pico toolchain setup, and its M
 1. Open the repository as a single-folder workspace.
 2. Install the recommended extensions when prompted.
 3. Create `config/build-deploy.local.yaml` from `config/build-deploy.local.example.yaml` for local Wi-Fi and optional service settings.
-4. Run the `ViviPi: Build Firmware Bundle` task to regenerate `artifacts/release/vivipi-device-fs/`.
-5. Run the `ViviPi: Deploy To First Connected Pico` task to build and upload to the first connected Pico.
+4. Run the `ViviPi: Build Firmware Bundle` task to regenerate the device filesystem tree or per-device trees.
+5. Run the `ViviPi: Deploy To First Connected Pico` task for single-device configs, or use `./build deploy` for a multi-device local config.
 
-If you have more than one board attached, use `./build deploy --device-port <port>` from the integrated terminal.
+If you have more than one configured board attached, `./build deploy` targets all configured devices by stable selector. Use `./build deploy --device <id>` to target one board.
 
 ## Install paths
 
@@ -172,10 +172,12 @@ Each GitHub release publishes a small, versioned set of assets. Download the fil
 | `./build test` | Run pytest |
 | `./build coverage` | Run pytest with branch coverage output |
 | `./build ci` | Run the full local CI workflow |
+| `./build list-devices` | Show each configured device selector and whether it is serial-ready, in BOOTSEL, missing, or ambiguous |
 | `./build render-config` | Render `artifacts/device/config.json` from the build config |
 | `./build build-firmware` | Build the firmware bundle into `artifacts/release` |
+| `./build provision` | Provision configured BOOTSEL devices with the configured base UF2 |
 | `./build release-assets` | Build the versioned GitHub release assets |
-| `./build deploy` | Build the firmware bundle and copy it to the first connected Pico via `mpremote` |
+| `./build deploy` | Build the firmware bundle and copy it to the configured Pico target or targets via `mpremote` |
 | `./build service --host 0.0.0.0 --port 8080` | Run the default ADB-backed Vivi Service |
 | `scripts/vivipulse --mode local` | Run one local pass of all configured health checks |
 | `scripts/vivipulse --mode plan` | Resolve the host-side probe plan without sending traffic |
@@ -205,8 +207,8 @@ Generated artifacts are written under `artifacts/`.
 
 | Output | Produced by | Purpose |
 | --- | --- | --- |
-| `artifacts/device/config.json` | `./build render-config` | Rendered runtime config |
-| `artifacts/release/vivipi-device-fs/` | `./build build-firmware` | Unpacked device filesystem tree |
+| `artifacts/device/config.json` or `artifacts/device/devices/<device-id>/config.json` | `./build render-config` | Rendered runtime config |
+| `artifacts/release/vivipi-device-fs/` or `artifacts/release/devices/<device-id>/vivipi-device-fs/` | `./build build-firmware` | Unpacked device filesystem tree |
 | `artifacts/release/vivipi-device-filesystem-<version>.zip` | `./build build-firmware` and `./build release-assets` | Deployable device bundle |
 | `artifacts/release/pico2w-micropython-<version>.txt` | `./build build-firmware` and `./build release-assets` | Pinned MicroPython download reference |
 | `artifacts/release/vivipi-service-bundle-<version>.zip` | `./build release-assets` | Service starter bundle |
@@ -394,7 +396,7 @@ If `VIVIPI_SERVICE_BASE_URL` is omitted, build-time filtering drops `SERVICE` ch
 | --- | --- | --- | --- |
 | `project.name` | string | `vivipi` | Project name stored in the rendered runtime config |
 | `device.board` | string | `pico2w` | Board identifier used for packaging and install metadata |
-| `device.micropython_port` | `auto` or path-like string | `auto` | Default device selector for `./build deploy`; `auto` picks the first connected Pico |
+| `device.micropython_port` | `auto` or path-like string | `auto` | Legacy single-device selector for `./build deploy`; multi-device configs should use `devices.<id>.selector` |
 | `device.micropython.version` | string | `1.25.0` | Pinned MicroPython version reference |
 | `device.micropython.download_page` | absolute URL | Pico 2W download page | Included in the install manifest |
 | `device.buttons.a` | GPIO pin name | `GP15` | Left button pin |
@@ -415,8 +417,14 @@ If `VIVIPI_SERVICE_BASE_URL` is omitted, build-time filtering drops `SERVICE` ch
 | `service.base_url` | absolute `http` or `https` URL | omitted | Required only when using `SERVICE` checks |
 | `service.default_prefix` | string | `adb` | Default prefix for service-discovered checks |
 | `checks_config` | relative path | `checks.yaml` | Path to the checks definition file |
+| `devices.<id>.selector.serial_by_id` | path or glob | none | Stable serial selector for one named Pico |
+| `devices.<id>.selector.bootsel_disk` | path or glob | none | Optional BOOTSEL disk selector for provisioning a named Pico |
+| `devices.<id>.bootstrap.uf2_path` | path | none | Local base MicroPython UF2 used by `./build provision` |
+| `devices.<id>.bootstrap.uf2_url` | URL | none | Downloadable base MicroPython UF2 used by `./build provision` |
 
 Visible rows and columns are derived automatically from the selected display geometry and the resolved font size. When configured checks exceed the visible rows, the overview cycles across pages using `device.display.page_interval`.
+
+When `devices` is present, the top-level settings become shared defaults for every named device. Each `devices.<id>` entry can override nested settings such as `device.display.type`, `checks_config`, or provisioning metadata. Fleet-capable commands default to all configured devices, while `--device <id>` limits the operation to one board.
 
 `device.display.page_interval` defaults by display family:
 
