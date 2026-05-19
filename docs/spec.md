@@ -499,6 +499,7 @@ Rendering must be:
 - stable
 - visually static while probes are healthy
 - On e-paper displays, checks MUST continue to run on their configured schedules even when unchanged screens use a slower periodic refresh cadence.
+- On e-paper displays, pending or unknown checks MUST use the normal unknown status marker instead of being collapsed into failures.
 - On e-paper displays, visible summary changes MUST be allowed to coalesce until a configured number of full probe cycles has completed and any configured minimum refresh interval has elapsed.
 - On e-paper displays, once the configured probe-cycle and minimum-interval gates are satisfied, the next refresh MUST render the latest visible summary state instead of waiting for the periodic refresh interval.
 - Bottom-row heartbeat MAY move a 1 to 3 pixel cluster along the unused bottom scanline without altering layout or text.
