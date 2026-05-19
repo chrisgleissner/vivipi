@@ -52,8 +52,7 @@ Edit `config/build-deploy.local.yaml` and set:
 * `wifi.ssid`
 * `wifi.password`
 * `service.base_url`, only if you want `SERVICE` checks
-
-`./build render-config`, `./build build-firmware`, and `./build deploy` automatically use `config/build-deploy.local.yaml` when it exists.
+* one `devices.<id>.selector.serial_by_id` for each supported attached Pico
 
 You can also provide the same values through environment variables:
 
@@ -78,6 +77,14 @@ To ignore the local override, pass the checked-in config directly:
 ```
 
 If a local target changes IP address, update `wifi.host_aliases` in `config/build-deploy.local.yaml`. The checked-in `config/checks.local.yaml` targets use those aliases.
+
+#### Multi-Device Config
+
+You can specify multiple devices if you want to build and deploy to multiple Picos at once.
+
+Each entry under `devices` inherits the shared defaults and overrides only the board-specific selector, display type, and optional provisioning metadata. 
+
+With a multi-device local config, all `build` commands target all configured devices by default where possible; pass `--device <id>` to target one board.
 
 ### 2. Run the default local workflow
 
@@ -112,7 +119,7 @@ scripts/vivipulse --mode local
 ./build deploy
 ```
 
-`./build deploy` uses `mpremote connect auto` to copy the prepared filesystem to the first connected Pico. Use `--device-port` to target a specific board.
+With a single-device config, `./build deploy` uses `mpremote connect auto` unless `--device-port` is provided. With a multi-device config, it deploys to every configured attached Pico by stable selector; use `--device <id>` to deploy to one configured board.
 
 This command does not flash a MicroPython UF2 onto a blank board. The board must already have a suitable MicroPython firmware installed.
 

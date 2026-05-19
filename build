@@ -79,9 +79,9 @@ Options:
   -o, --output-dir PATH      Release output directory
   --runtime-config PATH      Runtime config JSON output path
   --device-port PATH         Optional serial or USB path for single-device mpremote deploy; defaults to auto
-  --device ID               Select one named device from a multi-device config
-  --all-devices             Select all named devices from a multi-device config
-  --provision-missing       Provision BOOTSEL devices before deploy when bootstrap metadata is present
+  --device ID                Select one named device from a multi-device config
+  --all-devices              Select all named devices from a multi-device config; this is the default for fleet-capable commands
+  --provision-missing        Provision BOOTSEL devices before deploy when bootstrap metadata is present
   --host HOST                Host for the Vivi Service
   --port PORT                Port for the Vivi Service
   --python PATH              Python executable to use when not in venv
@@ -232,6 +232,9 @@ render_runtime_config() {
     if [[ -n "$DEVICE_ID" ]]; then
         args+=(--device "$DEVICE_ID")
     fi
+    if [[ "$ALL_DEVICES" -eq 1 ]]; then
+        args+=(--all-devices)
+    fi
     if should_prefer_local_config; then
         args+=(--prefer-local-config)
     fi
@@ -251,7 +254,17 @@ stage_release_assets() {
     ensure_dependencies
     require_runtime_env
     with_wifi_env
-    run_python_module vivipi.tooling.build_deploy stage-release-assets --config "$CONFIG_PATH" --output-dir "$OUTPUT_DIR" --dist-dir "$DIST_DIR"
+    local args=(vivipi.tooling.build_deploy stage-release-assets --config "$CONFIG_PATH" --output-dir "$OUTPUT_DIR" --dist-dir "$DIST_DIR")
+    if [[ -n "$DEVICE_ID" ]]; then
+        args+=(--device "$DEVICE_ID")
+    fi
+    if [[ "$ALL_DEVICES" -eq 1 ]]; then
+        args+=(--all-devices)
+    fi
+    if should_prefer_local_config; then
+        args+=(--prefer-local-config)
+    fi
+    run_python_module "${args[@]}"
 }
 
 deploy_bundle() {

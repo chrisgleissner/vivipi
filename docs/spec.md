@@ -625,7 +625,22 @@ The build time is recorded at firmware build time in UTC.
 
 ---
 
-## 21. Forbidden
+## 21. Build & Device Administration
+
+The root `./build` tool MUST provide a single operational entrypoint for local development, validation, packaging, device administration, and deployment.
+
+- A local build config MAY define a `devices` mapping of named Pico targets
+- Top-level config values MUST act as shared defaults for every named device
+- Each named device MUST use explicit stable selectors instead of `auto`
+- Fleet-capable commands MUST be able to operate on all configured devices with one command
+- Device-specific commands MAY accept `--device <id>` to target one board
+- Rendered multi-device artifacts MUST keep each device's runtime config and firmware staging tree isolated by device identity
+
+[VIVIPI-BUILD-001]
+
+---
+
+## 22. Forbidden
 
 - Animations
 - Blinking
@@ -639,7 +654,7 @@ The build time is recorded at firmware build time in UTC.
 
 ---
 
-## 22. Observability & REPL
+## 23. Observability & REPL
 
 Runtime observability MUST provide structured, bounded, machine-parseable logs.
 
@@ -692,7 +707,7 @@ Runtime instrumentation MUST retain enough information to reproduce failures det
 
 ---
 
-## 23. Fail-Safe Operation
+## 24. Fail-Safe Operation
 
 Boot and rendering failures MUST degrade safely instead of aborting the runtime.
 
