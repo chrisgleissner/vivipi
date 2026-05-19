@@ -951,9 +951,16 @@ def hold_safe_display(poll_interval_ms=20, sleep_ms=_sleep_ms, watchdog=None, it
         iteration += 1
 
 
-def _eink_status_text(value) -> str:
+def _eink_status_text(value, visible_degraded: bool = True) -> str:
     candidate = getattr(value, "value", value)
-    return "OK" if str(candidate).strip().upper() == "OK" else "FAIL"
+    normalized = str(candidate).strip().upper()
+    if normalized == "OK":
+        return "OK"
+    if normalized == "FAIL":
+        return "FAIL"
+    if normalized == "DEG":
+        return "DEG" if visible_degraded else "FAIL"
+    return "?"
 
 
 def _fold_text(value: object) -> str:
@@ -1015,7 +1022,10 @@ def _build_eink_probe_summary_frame(app, now_s: float = 0.0):
 
     for row_index, check in enumerate(_summary_checks(app)):
         name_text = str(getattr(check, "name", "CHECK"))
-        status_text = _eink_status_text(getattr(check, "status", None))
+        status_text = _eink_status_text(
+            getattr(check, "status", None),
+            visible_degraded=bool(getattr(app, "visible_degraded", True)),
+        )
         name_width = max(1, row_width - len(status_text) - 1)
         rows.append(f"{_fit_row(name_text[:name_width], name_width)} {status_text}")
         if status_text == "FAIL":

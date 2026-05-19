@@ -1245,6 +1245,48 @@ def test_build_eink_probe_summary_frame_formats_ok_and_fail_rows():
     assert frame.bottom_pixel_height_px == 2
 
 
+def test_build_eink_probe_summary_frame_keeps_unknown_rows_non_failed():
+    display = SimpleNamespace(height=32, font_height=16)
+    app = SimpleNamespace(
+        state=SimpleNamespace(
+            row_width=16,
+            checks=(
+                CheckRuntime(identifier="router", name="Router", status=Status.UNKNOWN),
+                CheckRuntime(identifier="nas", name="NAS", status=Status.DEG),
+            ),
+        ),
+        display=display,
+        visible_degraded=True,
+        display_liveness={"bottom_heartbeat": {"enabled": False}},
+    )
+
+    frame = firmware_runtime._build_eink_probe_summary_frame(app, now_s=18.5)
+
+    assert frame.rows == (
+        "NAS          DEG",
+        "Router         ?",
+    )
+    assert frame.failure_spans == ()
+
+
+def test_build_eink_probe_summary_frame_can_hide_degraded_as_fail():
+    display = SimpleNamespace(height=16, font_height=16)
+    app = SimpleNamespace(
+        state=SimpleNamespace(
+            row_width=16,
+            checks=(CheckRuntime(identifier="nas", name="NAS", status=Status.DEG),),
+        ),
+        display=display,
+        visible_degraded=False,
+        display_liveness={"bottom_heartbeat": {"enabled": False}},
+    )
+
+    frame = firmware_runtime._build_eink_probe_summary_frame(app, now_s=18.5)
+
+    assert frame.rows == ("NAS         FAIL",)
+    assert frame.failure_spans == (TextSpan(row_index=0, start_column=12, end_column=16),)
+
+
 def test_build_runtime_app_skips_boot_logo_for_eink(monkeypatch):
     display = SimpleNamespace(show_boot_logo=lambda version: None, _watchdog_feed=None, font_width=16, font_height=16)
     called = {"boot_logo": 0}
