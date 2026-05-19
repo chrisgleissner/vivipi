@@ -1576,6 +1576,33 @@ def test_build_deploy_main_dispatches_render_config_for_named_device(monkeypatch
     }
 
 
+def test_build_deploy_main_dispatches_render_config_for_all_devices(monkeypatch, tmp_path: Path):
+    output_path = tmp_path / "config.json"
+    called = {}
+
+    def fake_write_selected_runtime_configs(config_path, destination_path, *, device_id=None, all_devices=False, env=None):
+        called["config"] = config_path
+        called["output"] = destination_path
+        called["device_id"] = device_id
+        called["all_devices"] = all_devices
+        called["env"] = env
+
+    monkeypatch.setattr(build_deploy, "write_selected_runtime_configs", fake_write_selected_runtime_configs)
+
+    exit_code = build_deploy.main(
+        ["render-config", "--config", "config.yaml", "--output", str(output_path), "--all-devices"]
+    )
+
+    assert exit_code == 0
+    assert called == {
+        "config": "config.yaml",
+        "output": str(output_path),
+        "device_id": None,
+        "all_devices": True,
+        "env": None,
+    }
+
+
 def test_write_selected_runtime_config_uses_named_device_settings(monkeypatch, tmp_path: Path):
     config_path = tmp_path / "build-deploy.yaml"
     output_path = tmp_path / "config.json"
@@ -1625,6 +1652,8 @@ def test_write_selected_runtime_config_uses_named_device_settings(monkeypatch, t
 
 def test_write_selected_runtime_configs_renders_all_configured_devices(tmp_path: Path):
     config_path = write_multi_device_fixture_files(tmp_path)
+    stale_single_output = tmp_path / "config.json"
+    stale_single_output.write_text("stale", encoding="utf-8")
 
     outputs = write_selected_runtime_configs(
         config_path,
@@ -1644,6 +1673,54 @@ def test_write_selected_runtime_configs_renders_all_configured_devices(tmp_path:
     assert epaper_config["project"]["device_id"] == "epaper"
     assert manifest["devices"]["oled"]["runtime_config"] == str(outputs["oled"])
     assert manifest["devices"]["epaper"]["runtime_config"] == str(outputs["epaper"])
+    assert not stale_single_output.exists()
+
+
+def test_write_selected_runtime_configs_uses_single_output_for_one_selected_device(monkeypatch, tmp_path: Path):
+    config_path = tmp_path / "build-deploy.yaml"
+    output_path = tmp_path / "selected.json"
+    written = {}
+
+    monkeypatch.setattr(
+        build_deploy,
+        "load_selected_build_deploy_settings",
+        lambda *args, **kwargs: {
+            "default": {
+                "project": {"version": "0.2.1", "build_time": "2026-05-14T22:00:00Z"},
+                "selector": {"port": "/dev/ttyACM0"},
+            }
+        },
+    )
+    monkeypatch.setattr(
+        build_deploy,
+        "write_runtime_config_from_settings",
+        lambda source_config_path, settings, destination_path, *, env=None, version="", build_time="": written.update(
+            {
+                "config": source_config_path,
+                "settings": settings,
+                "output": destination_path,
+                "env": env,
+                "version": version,
+                "build_time": build_time,
+            }
+        )
+        or Path(destination_path),
+    )
+
+    outputs = write_selected_runtime_configs(config_path, output_path, device_id="default")
+
+    assert outputs == {"default": output_path}
+    assert written == {
+        "config": config_path.resolve(),
+        "settings": {
+            "project": {"version": "0.2.1", "build_time": "2026-05-14T22:00:00Z"},
+            "selector": {"port": "/dev/ttyACM0"},
+        },
+        "output": output_path,
+        "env": None,
+        "version": "0.2.1",
+        "build_time": "2026-05-14T22:00:00Z",
+    }
 
 
 def test_build_deploy_main_dispatches_build_firmware(monkeypatch, tmp_path: Path):
@@ -1660,6 +1737,38 @@ def test_build_deploy_main_dispatches_build_firmware(monkeypatch, tmp_path: Path
 
     assert exit_code == 0
     assert called == {"config": "config.yaml", "output_dir": "release-dir"}
+
+
+def test_default_all_devices_for_multi_config_handles_explicit_selection_and_missing_file(tmp_path: Path):
+    missing_config = tmp_path / "missing.yaml"
+
+    assert (
+        build_deploy._default_all_devices_for_multi_config(
+            missing_config,
+            env=FIXTURE_ENV,
+            device_id=None,
+            all_devices=False,
+        )
+        is False
+    )
+    assert (
+        build_deploy._default_all_devices_for_multi_config(
+            missing_config,
+            env=FIXTURE_ENV,
+            device_id=None,
+            all_devices=True,
+        )
+        is True
+    )
+    assert (
+        build_deploy._default_all_devices_for_multi_config(
+            missing_config,
+            env=FIXTURE_ENV,
+            device_id="oled",
+            all_devices=False,
+        )
+        is False
+    )
 
 
 def test_build_deploy_main_dispatches_multi_device_build_firmware(monkeypatch):
@@ -1817,6 +1926,9 @@ def test_selector_from_settings_falls_back_to_device_port_and_supports_single_de
     assert build_deploy._selector_from_settings({"device": {"micropython_port": "/dev/ttyACM1"}}) == {"port": "/dev/ttyACM1"}
     assert build_deploy._selector_from_settings({"device": {"micropython_port": "auto"}}) == {"port": "/dev/tty*"}
 
+    with pytest.raises(ValueError, match="device inventory"):
+        build_deploy._selector_from_settings({"device": {"micropython_port": "   "}})
+
 
 def test_device_candidate_helpers_cover_missing_and_present_paths(monkeypatch, tmp_path: Path):
     present = {"serial": False, "disk": False}
@@ -1874,6 +1986,14 @@ def test_resolve_bootstrap_uf2_path_supports_local_path_and_download(tmp_path: P
         tmp_path / "device",
     )
     assert resolved_local == local_uf2
+    assert (
+        build_deploy._resolve_bootstrap_uf2_path(
+            tmp_path / "config.yaml",
+            {"bootstrap": {"uf2_path": str(local_uf2)}},
+            tmp_path / "device",
+        )
+        == local_uf2
+    )
 
     downloaded = {}
 
