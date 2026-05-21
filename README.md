@@ -268,6 +268,8 @@ For the full pin map, button behavior, and screen flow, see [docs/reference.md](
 
 ## More detail
 
+Read the [DeepWiki](https://deepwiki.com/chrisgleissner/vivipi) site for this repo for an architectural and design overview.
+
 Use [docs/reference.md](docs/reference.md) for:
 
 * editor workflows for Thonny and VS Code
