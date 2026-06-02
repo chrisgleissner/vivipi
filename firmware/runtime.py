@@ -1075,7 +1075,7 @@ def _tick_eink_summary_state(app, now_s, watchdog=None):
     _feed_watchdog(watchdog)
     step = getattr(app, "step", None)
     if callable(step):
-        step(now_s, button_events=(), render=False, max_due_checks=1)
+        step(now_s, button_events=(), render=False, max_due_checks=None)
         _feed_watchdog(watchdog)
         return
 
