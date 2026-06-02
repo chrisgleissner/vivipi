@@ -1539,7 +1539,7 @@ def test_run_eink_refresh_loop_respects_minimum_refresh_interval_for_state_chang
     assert sleep_calls == [200, 200]
 
 
-def test_tick_eink_summary_state_limits_runtime_step_to_one_due_check():
+def test_tick_eink_summary_state_runs_runtime_step_without_due_check_cap():
     calls = []
 
     class FakeApp:
@@ -1548,7 +1548,7 @@ def test_tick_eink_summary_state_limits_runtime_step_to_one_due_check():
 
     firmware_runtime._tick_eink_summary_state(FakeApp(), 18.5)
 
-    assert calls == [(18.5, (), False, 1)]
+    assert calls == [(18.5, (), False, None)]
 
 
 def test_run_forever_routes_eink_to_summary_refresh_loop(monkeypatch):
