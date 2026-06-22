@@ -3089,13 +3089,63 @@ def test_portable_ftp_runner_reports_greeting_failures(monkeypatch):
     assert greeting_failure.details == "expected FTP 220, got 421 Down"
 
 
-def test_portable_ftp_runner_reports_login_failures(monkeypatch):
+def test_portable_ftp_runner_treats_login_refusal_as_reachable(monkeypatch):
+    # A 530 after the 220 greeting proves the FTP server is up but declined our
+    # credentials. A reachability smoke test reports OK, not FAIL.
     control_socket = FakeSocket(
         [
             b"220 Ready\r\n",
             b"331 Password required\r\n",
             b"530 Not logged in\r\n",
-            b"221 Goodbye\r\n",
+        ]
+    )
+    monkeypatch.setattr(
+        "vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: control_socket
+    )
+
+    result = portable_ftp_runner(
+        "ftp://nas.example.local",
+        10,
+        username="admin",
+        password="secret",
+        trace=lambda event, **fields: None,
+    )
+
+    assert result.ok is True
+    assert result.details == "530 Not logged in"
+    assert control_socket.sent == [
+        b"USER admin\r\n",
+        b"PASS secret\r\n",
+    ]
+    assert control_socket.closed is True
+
+
+def test_portable_ftp_runner_treats_anonymous_refusal_without_password_as_reachable(monkeypatch):
+    # Some servers reject the USER directly with 530 before asking for a password.
+    control_socket = FakeSocket(
+        [
+            b"220 C64 Ultimate FTP: Hello\r\n",
+            b"530 Access denied\r\n",
+        ]
+    )
+    monkeypatch.setattr(
+        "vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: control_socket
+    )
+
+    result = portable_ftp_runner("ftp://c64u", 10, trace=lambda event, **fields: None)
+
+    assert result.ok is True
+    assert result.details == "530 Access denied"
+    assert control_socket.sent == [b"USER anonymous\r\n"]
+
+
+def test_portable_ftp_runner_still_fails_on_non_auth_login_error(monkeypatch):
+    # A 5xx that is not a credential refusal (e.g. 503 bad command sequence) is a
+    # genuine probe failure, not an "unauthorized" reachable result.
+    control_socket = FakeSocket(
+        [
+            b"220 Ready\r\n",
+            b"503 Bad sequence of commands\r\n",
         ]
     )
     monkeypatch.setattr(
@@ -3111,12 +3161,52 @@ def test_portable_ftp_runner_reports_login_failures(monkeypatch):
     )
 
     assert result.ok is False
-    assert result.details == "expected FTP 230, got 530 Not logged in"
-    assert control_socket.sent == [
-        b"USER admin\r\n",
-        b"PASS secret\r\n",
-    ]
-    assert control_socket.closed is True
+    assert result.details == "expected FTP 230, got 503 Bad sequence of commands"
+
+
+def test_portable_ftp_runner_ftplib_path_treats_login_refusal_as_reachable(monkeypatch):
+    # The CPython ftplib path (trace=None, not MicroPython) surfaces a login
+    # refusal as ftplib.error_perm; it must be treated as reachable, like the
+    # socket path on the Pico.
+    import ftplib
+
+    class FakeFTP:
+        def connect(self, host, port, timeout=None):
+            return "220 C64 Ultimate FTP: Hello"
+
+        def login(self, user, passwd):
+            raise ftplib.error_perm("530 Not logged in.")
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(ftplib, "FTP", FakeFTP)
+
+    result = portable_ftp_runner("ftp://c64u", 10, username="admin", password="secret")
+
+    assert result.ok is True
+    assert result.details == "530 Not logged in."
+
+
+def test_portable_ftp_runner_ftplib_path_still_raises_non_auth_perm_error(monkeypatch):
+    import ftplib
+
+    class FakeFTP:
+        def connect(self, host, port, timeout=None):
+            return "220 Ready"
+
+        def login(self, user, passwd):
+            raise ftplib.error_perm("500 Syntax error")
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(ftplib, "FTP", FakeFTP)
+
+    result = portable_ftp_runner("ftp://nas.example.local", 10, username="admin", password="secret")
+
+    assert result.ok is False
+    assert "500 Syntax error" in result.details
 
 
 def test_portable_ftp_runner_reports_socket_errors(monkeypatch):

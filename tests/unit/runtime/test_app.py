@@ -1108,6 +1108,74 @@ def test_runtime_app_background_worker_queue_controls_and_reset_paths(monkeypatc
     assert app.active_workers == set()
 
 
+def test_runtime_app_background_worker_fault_does_not_strand_checks(monkeypatch):
+    # Regression: a single fault while processing a check must not kill the worker
+    # in a way that permanently strands queued checks in inflight_check_ids. On the
+    # RP2 port a crashed worker thread leaves the second core unusable, so the
+    # scheduler could never recover and most checks stopped probing for days.
+    definitions = tuple(make_definition(name) for name in ("router", "nas", "phone"))
+
+    runs = {definition.identifier: 0 for definition in definitions}
+    fault = {"fired": False}
+
+    def executor(check_definition, now_s):
+        runs[check_definition.identifier] += 1
+        return CheckExecutionResult(
+            source_identifier=check_definition.identifier,
+            observations=(
+                CheckObservation(
+                    identifier=check_definition.identifier,
+                    name=check_definition.name,
+                    status=Status.OK,
+                    details="reachable",
+                    observed_at_s=now_s,
+                ),
+            ),
+        )
+
+    clock = {"t": 0.0}
+    app = RuntimeApp(
+        definitions=definitions,
+        executor=executor,
+        display=FakeDisplay(),
+        page_interval_s=0,
+        probe_time_provider=lambda: clock["t"],
+    )
+    app.background_workers_enabled = True
+    app.background_lock = runtime_app_module._allocate_lock()
+
+    # The fault escapes _execute_check_once (e.g. a transient MemoryError in the
+    # worker loop itself, not inside the probe runner), which is what kills a
+    # worker thread and used to wedge the scheduler permanently.
+    original_execute = app._execute_check_once
+
+    def faulting_execute(definition, now_s, manual=False):
+        if definition.identifier == "nas" and not fault["fired"]:
+            fault["fired"] = True
+            raise MemoryError("simulated transient worker fault")
+        return original_execute(definition, now_s, manual=manual)
+
+    app._execute_check_once = faulting_execute
+
+    # No background thread can ever start (mimics a wedged second core), so every
+    # check is drained through the synchronous fallback path.
+    monkeypatch.setattr(runtime_app_module, "_start_background_thread", lambda target, args: False)
+
+    for tick in range(4):
+        clock["t"] = float(tick) * 100.0
+        app._run_due_checks(clock["t"])
+
+    # The fault was raised once but did not strand anything: every check keeps
+    # running and nothing is left registered or inflight.
+    assert fault["fired"] is True
+    assert app.inflight_check_ids == set()
+    assert app.active_workers == set()
+    assert app.pending_checks_by_worker == {}
+    assert all(count >= 1 for count in runs.values())
+    # The check that faulted recovers and runs again on later ticks.
+    assert runs["nas"] >= 2
+
+
 def test_runtime_app_serializes_different_hosts_by_default():
     first = CheckDefinition(identifier="router", name="Router", check_type=CheckType.PING, target="router.local")
     second = CheckDefinition(identifier="phone", name="Phone", check_type=CheckType.PING, target="phone.local")

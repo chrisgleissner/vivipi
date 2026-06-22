@@ -78,8 +78,19 @@ def _execution_error(
     )
 
 
+# 401 Unauthorized / 403 Forbidden still prove the HTTP service is alive and
+# answering — the firmware returns them when the API password is required or
+# rejected (e.g. the C64 Ultimate's "Forbidden." on /v1/version). A reachability
+# smoke test treats that as OK, not FAIL: the endpoint responded.
+_HTTP_REACHABLE_AUTH_STATUS_CODES = frozenset({401, 403})
+
+
 def _status_for_http(status_code: int | None) -> Status:
-    if status_code is not None and 200 <= status_code < 400:
+    if status_code is None:
+        return Status.FAIL
+    if 200 <= status_code < 400:
+        return Status.OK
+    if status_code in _HTTP_REACHABLE_AUTH_STATUS_CODES:
         return Status.OK
     return Status.FAIL
 

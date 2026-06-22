@@ -1235,35 +1235,98 @@ class RuntimeApp:
         self._render_probe_progress(completed.completed_at_s)
         return result
 
-    def _background_worker(self, worker_key: str):
-        while True:
-            lock_acquired = _lock_context(self.background_lock)
-            try:
-                queue = self.pending_checks_by_worker.get(worker_key)
-                if not queue:
-                    self.pending_checks_by_worker.pop(worker_key, None)
-                    self.active_workers.discard(worker_key)
-                    return
-                pending = queue.pop(0)
-                if not queue:
-                    self.pending_checks_by_worker.pop(worker_key, None)
-            finally:
-                if lock_acquired:
-                    self.background_lock.release()
-
+    def _process_pending_check(self, pending: PendingCheckRun):
+        # Run a single queued check and ALWAYS release its inflight slot, even if
+        # execution raises. Leaking an inflight id permanently strands the check:
+        # _queue_check skips anything already inflight, so it is never re-scheduled.
+        try:
             completed = self._execute_check_once(
                 pending.definition,
                 pending.requested_at_s,
                 manual=pending.manual,
             )
-
+        except Exception as error:
+            completed = CompletedCheckRun(
+                definition=pending.definition,
+                started_at_s=pending.requested_at_s,
+                completed_at_s=pending.requested_at_s,
+                duration_ms=0.0,
+                manual=pending.manual,
+                error=error,
+            )
+        finally:
             lock_acquired = _lock_context(self.background_lock)
             try:
-                self.completed_checks.append(completed)
                 self.inflight_check_ids.discard(pending.definition.identifier)
             finally:
                 if lock_acquired:
                     self.background_lock.release()
+
+        lock_acquired = _lock_context(self.background_lock)
+        try:
+            self.completed_checks.append(completed)
+        finally:
+            if lock_acquired:
+                self.background_lock.release()
+
+    def _abandon_worker(self, worker_key: str):
+        # Called when a worker thread is exiting unexpectedly. Deregister it and
+        # release any still-queued checks so they can be rescheduled. On the RP2
+        # port a crashed thread leaves the second core unusable, so if we do not
+        # clear active_workers here no replacement worker can ever start and every
+        # queued check stays stranded in inflight_check_ids forever.
+        lock_acquired = _lock_context(self.background_lock)
+        try:
+            self.active_workers.discard(worker_key)
+            stranded = self.pending_checks_by_worker.pop(worker_key, [])
+            for pending in stranded:
+                self.inflight_check_ids.discard(pending.definition.identifier)
+        finally:
+            if lock_acquired:
+                self.background_lock.release()
+
+    def _next_pending_check(self, worker_key: str) -> PendingCheckRun | None:
+        lock_acquired = _lock_context(self.background_lock)
+        try:
+            queue = self.pending_checks_by_worker.get(worker_key)
+            if not queue:
+                self.pending_checks_by_worker.pop(worker_key, None)
+                self.active_workers.discard(worker_key)
+                return None
+            pending = queue.pop(0)
+            if not queue:
+                self.pending_checks_by_worker.pop(worker_key, None)
+            return pending
+        finally:
+            if lock_acquired:
+                self.background_lock.release()
+
+    def _background_worker(self, worker_key: str):
+        while True:
+            try:
+                pending = self._next_pending_check(worker_key)
+                if pending is None:
+                    return
+                self._process_pending_check(pending)
+            except Exception:
+                # A worker thread must never die silently while leaving itself
+                # registered: that wedges the whole scheduler. Deregister and bail
+                # so the next _queue_check can recover (restart a worker or drain
+                # synchronously).
+                self._abandon_worker(worker_key)
+                return
+
+    def _drain_worker_synchronously(self, worker_key: str):
+        # Fallback used when a background worker thread cannot be started (e.g. the
+        # RP2 second core is busy or wedged). Drain the whole pending queue inline
+        # rather than only the triggering check, so queued checks are never orphaned,
+        # then apply the results immediately (there is no worker to defer them to).
+        while True:
+            pending = self._next_pending_check(worker_key)
+            if pending is None:
+                break
+            self._process_pending_check(pending)
+        self._drain_completed_checks()
 
     def _queue_check(self, definition: CheckDefinition, now_s: float, manual: bool = False):
         self.logger.debug(
@@ -1298,18 +1361,7 @@ class RuntimeApp:
                 self.background_lock.release()
 
         if start_worker and not _start_background_thread(self._background_worker, (worker_key,)):
-            lock_acquired = _lock_context(self.background_lock)
-            try:
-                self.active_workers.discard(worker_key)
-                self.inflight_check_ids.discard(definition.identifier)
-                queue = self.pending_checks_by_worker.get(worker_key, [])
-                self.pending_checks_by_worker[worker_key] = [item for item in queue if item.definition.identifier != definition.identifier]
-                if not self.pending_checks_by_worker.get(worker_key):
-                    self.pending_checks_by_worker.pop(worker_key, None)
-            finally:
-                if lock_acquired:
-                    self.background_lock.release()
-            self._run_check(definition, now_s, manual=manual)
+            self._drain_worker_synchronously(worker_key)
 
     def _drain_completed_checks(self):
         for completed in self._pop_completed_checks():

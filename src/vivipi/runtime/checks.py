@@ -1374,6 +1374,26 @@ def _recv_until_closed(
     return b"".join(chunks)
 
 
+def _ftp_login_refused(code: int) -> bool:
+    # 530 "Not logged in", 532 "Need account", and 332 "Need account for login"
+    # mean the FTP server is reachable but declined our credentials. For a
+    # reachability smoke test that is success, not failure: the service answered.
+    # Protocol/transport errors (421 service unavailable, 5xx syntax errors) are
+    # NOT login refusals and still fail.
+    return code in (332, 530, 532)
+
+
+def _ftp_error_is_login_refused(error: Exception) -> bool:
+    text = str(error).strip()
+    return text[:3].isdigit() and _ftp_login_refused(int(text[:3]))
+
+
+def _ftp_unauthorized_detail(response: str) -> str:
+    lines = (response or "").strip().splitlines()
+    first_line = lines[0].strip() if lines else ""
+    return bound_text(first_line, 40) if first_line else "unauthorized"
+
+
 def portable_ftp_runner(
     target: str,
     timeout_s: int,
@@ -1395,7 +1415,16 @@ def portable_ftp_runner(
                 greeting = ftp.connect(host, port, timeout=timeout_s)
                 if not greeting.startswith("220"):
                     raise RuntimeError(f"expected FTP 220, got {greeting}")
-                login = ftp.login(username or "anonymous", password or "")
+                try:
+                    login = ftp.login(username or "anonymous", password or "")
+                except ftplib.error_perm as error:
+                    if _ftp_error_is_login_refused(error):
+                        return PingProbeResult(
+                            ok=True,
+                            latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
+                            details=_ftp_unauthorized_detail(str(error)),
+                        )
+                    raise
                 if not login.startswith("230"):
                     raise RuntimeError(f"expected FTP 230, got {login}")
                 working_directory = ftp.pwd()
@@ -1479,6 +1508,15 @@ def portable_ftp_runner(
                 budget=budget,
             )
         if code != 230:
+            if _ftp_login_refused(code):
+                # 220 greeting succeeded, so the server is reachable; it simply
+                # declined our credentials. Report OK for the reachability probe
+                # instead of failing. The finally block closes the socket.
+                return PingProbeResult(
+                    ok=True,
+                    latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
+                    details=_ftp_unauthorized_detail(response),
+                )
             raise RuntimeError(f"expected FTP 230, got {response}")
 
         pwd_operation = _ftp_operation_descriptor("PWD")
