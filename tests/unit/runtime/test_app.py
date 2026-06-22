@@ -1108,6 +1108,145 @@ def test_runtime_app_background_worker_queue_controls_and_reset_paths(monkeypatc
     assert app.active_workers == set()
 
 
+def test_runtime_app_background_worker_fault_does_not_strand_checks(monkeypatch):
+    # Regression: a single fault while processing a check must not kill the worker
+    # in a way that permanently strands queued checks in inflight_check_ids. On the
+    # RP2 port a crashed worker thread leaves the second core unusable, so the
+    # scheduler could never recover and most checks stopped probing for days.
+    definitions = tuple(make_definition(name) for name in ("router", "nas", "phone"))
+
+    runs = {definition.identifier: 0 for definition in definitions}
+    fault = {"fired": False}
+
+    def executor(check_definition, now_s):
+        runs[check_definition.identifier] += 1
+        return CheckExecutionResult(
+            source_identifier=check_definition.identifier,
+            observations=(
+                CheckObservation(
+                    identifier=check_definition.identifier,
+                    name=check_definition.name,
+                    status=Status.OK,
+                    details="reachable",
+                    observed_at_s=now_s,
+                ),
+            ),
+        )
+
+    clock = {"t": 0.0}
+    app = RuntimeApp(
+        definitions=definitions,
+        executor=executor,
+        display=FakeDisplay(),
+        page_interval_s=0,
+        probe_time_provider=lambda: clock["t"],
+    )
+    app.background_workers_enabled = True
+    app.background_lock = runtime_app_module._allocate_lock()
+
+    # The fault escapes _execute_check_once (e.g. a transient MemoryError in the
+    # worker loop itself, not inside the probe runner), which is what kills a
+    # worker thread and used to wedge the scheduler permanently.
+    original_execute = app._execute_check_once
+
+    def faulting_execute(definition, now_s, manual=False):
+        if definition.identifier == "nas" and not fault["fired"]:
+            fault["fired"] = True
+            raise MemoryError("simulated transient worker fault")
+        return original_execute(definition, now_s, manual=manual)
+
+    app._execute_check_once = faulting_execute
+
+    # No background thread can ever start (mimics a wedged second core), so every
+    # check is drained through the synchronous fallback path.
+    monkeypatch.setattr(runtime_app_module, "_start_background_thread", lambda target, args: False)
+
+    for tick in range(4):
+        clock["t"] = float(tick) * 100.0
+        app._run_due_checks(clock["t"])
+
+    # The fault was raised once but did not strand anything: every check keeps
+    # running and nothing is left registered or inflight.
+    assert fault["fired"] is True
+    assert app.inflight_check_ids == set()
+    assert app.active_workers == set()
+    assert app.pending_checks_by_worker == {}
+    assert all(count >= 1 for count in runs.values())
+    # The check that faulted recovers and runs again on later ticks.
+    assert runs["nas"] >= 2
+
+
+def test_runtime_app_background_worker_deregisters_and_releases_on_loop_fault(monkeypatch):
+    # If the worker LOOP itself faults (e.g. a transient MemoryError outside the
+    # probe runner, in _next_pending_check or the lock handling), the thread must
+    # deregister itself and release every queued check so the scheduler can
+    # recover — not die while still registered and leave checks stranded inflight
+    # forever. This exercises _background_worker's except path and _abandon_worker,
+    # with and without an allocatable lock (the RP2 port may have neither).
+    def faulting_next(_worker_key):
+        raise MemoryError("simulated worker loop fault")
+
+    for allocate_lock in (runtime_app_module._allocate_lock, lambda: None):
+        definition = make_definition("router")
+        other = make_definition("nas")
+        app = RuntimeApp(
+            definitions=(definition, other),
+            executor=lambda check_definition, now_s: None,
+            display=FakeDisplay(),
+            page_interval_s=0,
+        )
+        app.background_workers_enabled = True
+        app.background_lock = allocate_lock()
+
+        worker_key = app._worker_key(definition)
+        app.pending_checks_by_worker[worker_key] = [
+            runtime_app_module.PendingCheckRun(definition=definition, requested_at_s=1.0),
+            runtime_app_module.PendingCheckRun(definition=other, requested_at_s=1.0),
+        ]
+        app.active_workers.add(worker_key)
+        app.inflight_check_ids.update({definition.identifier, other.identifier})
+
+        monkeypatch.setattr(app, "_next_pending_check", faulting_next)
+
+        # The worker swallows the fault rather than letting the thread die unhandled.
+        app._background_worker(worker_key)
+
+        assert worker_key not in app.active_workers
+        assert app.pending_checks_by_worker == {}
+        assert app.inflight_check_ids == set()
+
+
+def test_runtime_app_process_pending_check_without_a_lock(monkeypatch):
+    # On a port where no lock can be allocated, _lock_context returns False. The
+    # check must still run and release its inflight slot without trying to release
+    # a lock it never acquired.
+    definition = make_definition("router")
+    app = RuntimeApp(
+        definitions=(definition,),
+        executor=lambda check_definition, now_s: None,
+        display=FakeDisplay(),
+        page_interval_s=0,
+    )
+    app.background_workers_enabled = True
+    app.background_lock = None
+    app.inflight_check_ids.add(definition.identifier)
+
+    completed = runtime_app_module.CompletedCheckRun(
+        definition=definition,
+        started_at_s=1.0,
+        completed_at_s=2.0,
+        duration_ms=1.0,
+    )
+    monkeypatch.setattr(app, "_execute_check_once", lambda d, now_s, manual=False: completed)
+
+    app._process_pending_check(
+        runtime_app_module.PendingCheckRun(definition=definition, requested_at_s=1.0)
+    )
+
+    assert app.completed_checks == [completed]
+    assert definition.identifier not in app.inflight_check_ids
+
+
 def test_runtime_app_serializes_different_hosts_by_default():
     first = CheckDefinition(identifier="router", name="Router", check_type=CheckType.PING, target="router.local")
     second = CheckDefinition(identifier="phone", name="Phone", check_type=CheckType.PING, target="phone.local")

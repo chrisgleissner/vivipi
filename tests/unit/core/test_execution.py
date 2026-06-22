@@ -61,6 +61,36 @@ def test_execute_check_maps_http_status_codes_to_observations():
     assert result.probe_latency_ms == 45.0
 
 
+def test_execute_check_treats_http_authorization_failures_as_reachable():
+    # 401/403 still prove the HTTP service answered, so the REST reachability
+    # probe reports OK while surfacing the status in the detail.
+    definition = make_definition("c64u-rest", CheckType.HTTP)
+
+    for status_code in (401, 403):
+        result = execute_check(
+            definition,
+            observed_at_s=10.0,
+            ping_runner=None,
+            http_runner=lambda method, target, timeout_s, _status=status_code: HttpResponseResult(
+                status_code=_status,
+                latency_ms=12.0,
+                details=f"HTTP {_status}",
+            ),
+        )
+
+        assert result.observations[0].status == Status.OK
+        assert result.observations[0].details == f"HTTP {status_code}"
+
+
+def test_status_for_http_distinguishes_auth_failures_from_other_errors():
+    assert execution_module._status_for_http(200) == Status.OK
+    assert execution_module._status_for_http(401) == Status.OK
+    assert execution_module._status_for_http(403) == Status.OK
+    assert execution_module._status_for_http(404) == Status.FAIL
+    assert execution_module._status_for_http(500) == Status.FAIL
+    assert execution_module._status_for_http(None) == Status.FAIL
+
+
 def test_probe_helpers_normalize_enum_like_status_and_ignore_non_mapping_metadata():
     enum_like_status = SimpleNamespace(value="DEG")
     result = SimpleNamespace(ok=False, status=enum_like_status, metadata="not-a-dict")
