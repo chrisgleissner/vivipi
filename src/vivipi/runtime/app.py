@@ -1308,11 +1308,22 @@ class RuntimeApp:
                 if pending is None:
                     return
                 self._process_pending_check(pending)
-            except Exception:
+            except Exception as error:
                 # A worker thread must never die silently while leaving itself
-                # registered: that wedges the whole scheduler. Deregister and bail
-                # so the next _queue_check can recover (restart a worker or drain
-                # synchronously).
+                # registered: that wedges the whole scheduler. Record the fault
+                # first (so wedges originating outside the probe runner — lock
+                # errors, queue corruption — are diagnosable), then deregister and
+                # bail so the next _queue_check can recover (restart a worker or
+                # drain synchronously).
+                self.logger.emit(
+                    LogLevel.WARN,
+                    "WORKER",
+                    "fault",
+                    (
+                        log_field("worker", worker_key),
+                        log_field("error", bound_text(f"{type(error).__name__}: {error}", 80)),
+                    ),
+                )
                 self._abandon_worker(worker_key)
                 return
 

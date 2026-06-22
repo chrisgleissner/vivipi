@@ -3188,7 +3188,9 @@ def test_portable_ftp_runner_ftplib_path_treats_login_refusal_as_reachable(monke
     assert result.details == "530 Not logged in."
 
 
-def test_portable_ftp_runner_ftplib_path_still_raises_non_auth_perm_error(monkeypatch):
+def test_portable_ftp_runner_ftplib_path_still_fails_on_non_auth_perm_error(monkeypatch):
+    # A non-credential 5xx (e.g. 500 syntax error) is re-raised and surfaces as a
+    # failed PingProbeResult, not an "unauthorized but reachable" success.
     import ftplib
 
     class FakeFTP:
@@ -3207,6 +3209,17 @@ def test_portable_ftp_runner_ftplib_path_still_raises_non_auth_perm_error(monkey
 
     assert result.ok is False
     assert "500 Syntax error" in result.details
+
+
+def test_ftp_error_is_login_refused_extracts_reply_code_robustly():
+    # The FTP reply code may not be the literal prefix if a wrapper reformats the
+    # message; the classifier scans for it rather than assuming position 0.
+    classify = runtime_checks._ftp_error_is_login_refused
+    assert classify(Exception("530 Not logged in.")) is True
+    assert classify(Exception("332 Need account")) is True
+    assert classify(Exception("Error: 530 Not logged in")) is True
+    assert classify(Exception("500 Syntax error")) is False
+    assert classify(Exception("connection reset")) is False
 
 
 def test_portable_ftp_runner_reports_socket_errors(monkeypatch):

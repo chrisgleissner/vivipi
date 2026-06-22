@@ -29,6 +29,7 @@ from vivipi.core.models import CheckDefinition, CheckType, Status
 
 PING_LATENCY_PATTERN = re.compile(r"time[=<]([0-9.]+)")
 FTP_PASV_PATTERN = re.compile(r"\((\d+),(\d+),(\d+),(\d+),(\d+),(\d+)\)")
+FTP_REPLY_CODE_PATTERN = re.compile(r"\d{3}")
 IDENT_REQUIRED_FIELDS = ("product", "firmware_version", "hostname", "your_string")
 ICMP_ECHO_REPLY_TYPE = 0
 ICMP_ECHO_REQUEST_TYPE = 8
@@ -1384,8 +1385,13 @@ def _ftp_login_refused(code: int) -> bool:
 
 
 def _ftp_error_is_login_refused(error: Exception) -> bool:
-    text = str(error).strip()
-    return text[:3].isdigit() and _ftp_login_refused(int(text[:3]))
+    # ftplib raises error_perm with the raw reply line, which normally starts with
+    # the 3-digit FTP code (e.g. "530 Not logged in."). Scan for that code rather
+    # than assuming it is the literal prefix, so a wrapped or reformatted message
+    # ("Error: 530 ...") is still classified instead of falling through to a false
+    # FAIL for a service that is reachable but only refusing our credentials.
+    match = FTP_REPLY_CODE_PATTERN.search(str(error))
+    return match is not None and _ftp_login_refused(int(match.group()))
 
 
 def _ftp_unauthorized_detail(response: str) -> str:
