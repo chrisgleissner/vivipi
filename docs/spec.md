@@ -231,6 +231,26 @@ Checks are evaluated periodically.
 - Success requires a valid identify response, a readable debug register, and valid flash metadata
 - Failure = authentication failure, invalid response payload, connection failure, or timeout
 
+### Shared network credential
+
+When a check targets a password-protected 1541Ultimate listener, the configured
+`username` and `password` MUST flow through to every listener that the firmware
+gates on `CFG_NETWORK_PASSWORD`:
+
+- HTTP `X-Password` request header
+- Telnet `Password:` prompt reply
+- FTP `USER` / `PASS`
+- DMA TCP/64 `SOCKET_CMD_AUTHENTICATE` (`0xFF1F`) first frame
+
+The local configuration keeps the credential value out of source control. The
+YAML placeholders `${VIVIPI_NETWORK_USERNAME}` and `${VIVIPI_NETWORK_PASSWORD}`
+resolve through the highest-priority available source, in this order: shell
+exports, `.env.local`, `config/secrets.local`. Both `.env.local` and
+`config/secrets.local` are gitignored; the tracked
+`config/secrets.local.example` documents the expected shape.
+
+[VIVIPI-CHECK-AUTH-001]
+
 ### HTTP
 
 - HTTP request

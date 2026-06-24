@@ -22,6 +22,9 @@ CONFIG_PATH_EXPLICIT=0
 WIFI_SSID="${VIVIPI_WIFI_SSID:-}"
 WIFI_PASSWORD="${VIVIPI_WIFI_PASSWORD:-}"
 SERVICE_BASE_URL="${VIVIPI_SERVICE_BASE_URL:-}"
+NETWORK_USERNAME="${VIVIPI_NETWORK_USERNAME:-}"
+NETWORK_PASSWORD="${VIVIPI_NETWORK_PASSWORD:-}"
+SECRETS_LOADED=0
 
 has_local_editor_config() {
     if [[ "$CONFIG_PATH" == *.local.yaml ]]; then
@@ -54,9 +57,14 @@ Commands that render or package device config require:
     VIVIPI_WIFI_SSID and VIVIPI_WIFI_PASSWORD
 Optional for SERVICE checks:
     VIVIPI_SERVICE_BASE_URL
+Optional for password-protected C64U/U64 checks (HTTP X-Password, Telnet,
+FTP, and DMA TCP/64 SOCKET_CMD_AUTHENTICATE):
+    VIVIPI_NETWORK_USERNAME and VIVIPI_NETWORK_PASSWORD
 You can provide them as environment variables or with CLI flags.
 For local editor workflows, create config/build-deploy.local.yaml to avoid exporting
 credentials for ./build render-config, ./build build-firmware, and ./build deploy.
+Network credentials can also live in .env.local or config/secrets.local (both
+gitignored). See config/secrets.local.example.
 
 Commands:
   ci               Install dependencies, run Ruff, run pytest, and build firmware assets
@@ -90,6 +98,8 @@ Options:
   --wifi-ssid VALUE          Override VIVIPI_WIFI_SSID for this invocation
   --wifi-password VALUE      Override VIVIPI_WIFI_PASSWORD for this invocation
   --service-base-url VALUE   Override VIVIPI_SERVICE_BASE_URL for this invocation
+  --network-username VALUE   Override VIVIPI_NETWORK_USERNAME for this invocation
+  --network-password VALUE   Override VIVIPI_NETWORK_PASSWORD for this invocation
   -v, --verbose              Print commands before running them
   -h, --help                 Show this help text
 EOF
@@ -133,6 +143,7 @@ ensure_dependencies() {
 }
 
 with_wifi_env() {
+    load_local_secrets
     if [[ -n "$WIFI_SSID" ]]; then
         export VIVIPI_WIFI_SSID="$WIFI_SSID"
     fi
@@ -141,6 +152,62 @@ with_wifi_env() {
     fi
     if [[ -n "$SERVICE_BASE_URL" ]]; then
         export VIVIPI_SERVICE_BASE_URL="$SERVICE_BASE_URL"
+    fi
+    if [[ -n "$NETWORK_USERNAME" ]]; then
+        export VIVIPI_NETWORK_USERNAME="$NETWORK_USERNAME"
+    fi
+    if [[ -n "$NETWORK_PASSWORD" ]]; then
+        export VIVIPI_NETWORK_PASSWORD="$NETWORK_PASSWORD"
+    fi
+}
+
+# Load the locally resolved network credentials into the environment so that
+# placeholder resolution for ${VIVIPI_NETWORK_USERNAME} and
+# ${VIVIPI_NETWORK_PASSWORD} works without ever committing the actual values.
+# Resolution order (highest priority wins): shell exports > .env.local >
+# config/secrets.local. Idempotent so callers can invoke it freely.
+load_local_secrets() {
+    if [[ "$SECRETS_LOADED" -eq 1 ]]; then
+        return
+    fi
+    SECRETS_LOADED=1
+    local python_path
+    python_path="$(python_cmd || true)"
+    # ``python_cmd`` may return a bare command name (e.g. ``python3``) rather
+    # than an absolute path when ``--python`` is given a bare name. The ``-x``
+    # test checks the filesystem, not PATH, so resolve bare names first;
+    # otherwise secret loading silently short-circuits in environments that
+    # select the interpreter by name.
+    if [[ -n "$python_path" && ! -x "$python_path" ]]; then
+        python_path="$(command -v "$python_path" 2>/dev/null || true)"
+    fi
+    if [[ -z "$python_path" ]]; then
+        return
+    fi
+    local secrets_json
+    local repo_root_for_secrets="${VIVIPI_REPO_ROOT:-$ROOT_DIR}"
+    secrets_json="$(
+        PYTHONPATH="$ROOT_DIR/src${PYTHONPATH:+:$PYTHONPATH}" \
+        VIVIPI_REPO_ROOT="$repo_root_for_secrets" \
+        "$python_path" - "$repo_root_for_secrets" <<'PYEOF'
+import json
+import sys
+from pathlib import Path
+
+from vivipi.core.secrets import load_network_secrets
+
+root = Path(sys.argv[1]) if len(sys.argv) > 1 else None
+print(json.dumps(load_network_secrets(root)))
+PYEOF
+    )" || secrets_json=""
+    local resolved_username resolved_password
+    resolved_username="$(printf '%s' "$secrets_json" | "$python_path" -c "import json, sys; print(json.loads(sys.stdin.read() or '{}').get('VIVIPI_NETWORK_USERNAME', ''))" 2>/dev/null || true)"
+    resolved_password="$(printf '%s' "$secrets_json" | "$python_path" -c "import json, sys; print(json.loads(sys.stdin.read() or '{}').get('VIVIPI_NETWORK_PASSWORD', ''))" 2>/dev/null || true)"
+    if [[ -z "$NETWORK_USERNAME" && -n "$resolved_username" ]]; then
+        NETWORK_USERNAME="$resolved_username"
+    fi
+    if [[ -z "$NETWORK_PASSWORD" && -n "$resolved_password" ]]; then
+        NETWORK_PASSWORD="$resolved_password"
     fi
 }
 
@@ -377,6 +444,14 @@ parse_args() {
                 ;;
             --service-base-url)
                 SERVICE_BASE_URL="$2"
+                shift 2
+                ;;
+            --network-username)
+                NETWORK_USERNAME="$2"
+                shift 2
+                ;;
+            --network-password)
+                NETWORK_PASSWORD="$2"
                 shift 2
                 ;;
             -v|--verbose)

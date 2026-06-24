@@ -1,4 +1,5 @@
 ---
+name: pr-converge
 description: Converge a pull request to merge-ready state
 ---
 

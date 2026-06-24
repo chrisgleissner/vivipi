@@ -490,8 +490,34 @@ Please note that only two of these devices are tested; see [Hardware notes](#har
 | `timeout_s` | Yes | Per-check timeout in seconds |
 | `method` | HTTP only | Request method, for example `GET` |
 | `username` | Optional | Used by FTP and TELNET checks when needed |
-| `password` | Optional | Used by FTP and TELNET checks when needed |
+| `password` | Optional | Shared network password used by HTTP (X-Password), Telnet login, FTP PASS, and the DMA TCP/64 `SOCKET_CMD_AUTHENTICATE` command. Resolved from one of: shell exports, `.env.local`, or `config/secrets.local`. |
 | `prefix` | `service` only | Prefix applied to service-discovered checks |
+
+### Shared network password (one credential for every password-protected listener)
+
+Every password-protected network listener on a 1541Ultimate device checks the
+same `CFG_NETWORK_PASSWORD` on the firmware side:
+
+| Listener | Where the firmware checks it | Host-side equivalent |
+| --- | --- | --- |
+| HTTP `/v1/...` | `1541ultimate/software/api/route_machine.cc` | `X-Password` request header |
+| Telnet | `1541ultimate/software/network/socket_gui.cc` | Reply to the `Password:` prompt |
+| FTP | `1541ultimate/software/network/ftpd.cc` (`cmd_pass`) | `USER` / `PASS` |
+| DMA TCP/64 | `1541ultimate/software/network/socket_dma.cc` (`SOCKET_CMD_AUTHENTICATE`, 0xFF1F) | First frame after connect |
+
+Because all four listeners gate on a single password, host-side configuration
+also keeps one credential flowing through every check:
+
+1. `config/checks.local.yaml` references it through the generic placeholders
+   `${VIVIPI_NETWORK_USERNAME}` and `${VIVIPI_NETWORK_PASSWORD}`.
+2. `./build` and `scripts/c64_health_check` resolve those placeholders from
+   the highest-priority source available, in this order: shell exports >
+   `.env.local` (KEY=VALUE) > `config/secrets.local` (YAML mapping).
+3. Both `.env.local` and `config/secrets.local` are gitignored, so the
+   actual password is never committed. `config/secrets.local.example` and
+   `.env.local.example` show the expected shape.
+4. CLI overrides are also available: `./build --network-username ...` and
+   `./build --network-password ...`.
 
 ## Testing, releases, and architecture notes
 

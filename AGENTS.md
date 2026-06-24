@@ -30,6 +30,8 @@
 - `./build deploy` uses `mpremote connect auto` to copy the prepared device filesystem to the first connected Pico. It does not flash a UF2 image onto a blank board.
 - `./build build-firmware`, `./build render-config`, and `./build deploy` automatically prefer `config/build-deploy.local.yaml` when that file exists.
 - The tracked `config/build-deploy.local.yaml` is treated as the active real-device deploy profile on this machine. Keep startup-only overlays like button self-test disabled there unless the current task is explicitly about validating that startup mode.
+- Every password-protected network listener (HTTP `X-Password`, Telnet `Password:`, FTP `USER`/`PASS`, DMA TCP/64 `SOCKET_CMD_AUTHENTICATE`) shares a single `CFG_NETWORK_PASSWORD` on the firmware side. Host-side the credential flows through one placeholder: `${VIVIPI_NETWORK_USERNAME}` / `${VIVIPI_NETWORK_PASSWORD}`.
+- The credential value is never committed. `./build` and `scripts/c64_health_check` resolve those placeholders from the highest-priority source available: shell exports, `.env.local`, or `config/secrets.local` (all three documented, only the example files are tracked). CLI overrides (`--network-username`, `--network-password`) take precedence.
 
 ## Implementation boundaries
 
