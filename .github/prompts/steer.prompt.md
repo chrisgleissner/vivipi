@@ -1,3 +1,8 @@
+---
+name: steer
+description: Apply a small, well-defined steering change to the plan without disrupting current execution
+---
+
 ROLE
 
 You are an execution-focused engineering agent operating inside an active repository with an existing PLANS.md and WORKLOG.md.

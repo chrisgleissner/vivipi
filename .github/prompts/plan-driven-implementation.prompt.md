@@ -1,4 +1,5 @@
 ---
+name: plan-driven-implementation
 description: Plan-driven implementation with deterministic convergence and incremental plan extension
 ---
 
