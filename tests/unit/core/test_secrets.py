@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,7 @@ import pytest
 from vivipi.core.secrets import (
     NETWORK_PASSWORD_KEY,
     NETWORK_USERNAME_KEY,
+    _resolve_repository_root,
     extend_environment,
     load_network_secrets,
 )
@@ -129,3 +131,78 @@ def test_load_network_secrets_discovers_pyproject_at_explicit_root(tmp_path: Pat
     secrets = load_network_secrets(repository_root, env={})
 
     assert secrets == {NETWORK_PASSWORD_KEY: "repo_pwd"}
+
+
+def test_resolve_repository_root_falls_back_to_start_without_pyproject(tmp_path: Path):
+    # pytest's tmp_path has no pyproject.toml in its ancestors, so the walk
+    # exhausts and returns the start directory unchanged.
+    assert _resolve_repository_root(tmp_path).resolve() == tmp_path.resolve()
+
+
+def test_resolve_repository_root_walks_up_to_find_pyproject(tmp_path: Path):
+    nested = tmp_path / "a" / "b"
+    nested.mkdir(parents=True)
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='vivipi'\n", encoding="utf-8")
+
+    assert _resolve_repository_root(nested).resolve() == tmp_path.resolve()
+
+
+def test_load_network_secrets_uses_vivipi_repo_root_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _write_secrets_yaml(tmp_path, "VIVIPI_NETWORK_PASSWORD: override_pwd\n")
+    monkeypatch.setenv("VIVIPI_REPO_ROOT", str(tmp_path))
+
+    secrets = load_network_secrets(env={})
+
+    assert secrets == {NETWORK_PASSWORD_KEY: "override_pwd"}
+
+
+def test_load_network_secrets_resolves_root_from_cwd_when_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _write_secrets_yaml(tmp_path, "VIVIPI_NETWORK_PASSWORD: cwd_pwd\n")
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='vivipi'\n", encoding="utf-8")
+    monkeypatch.delenv("VIVIPI_REPO_ROOT", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    secrets = load_network_secrets(env={})
+
+    assert secrets == {NETWORK_PASSWORD_KEY: "cwd_pwd"}
+
+
+def test_load_dotenv_skips_lines_that_do_not_match_key_pattern(tmp_path: Path):
+    # Lowercase / numeric keys do not match the [A-Z][A-Z0-9_]* pattern and
+    # must be ignored rather than raising.
+    _write_env_local(
+        tmp_path,
+        "VIVIPI_NETWORK_USERNAME=ok\nlowercase_invalid=skip\n123=skip\n",
+    )
+
+    secrets = load_network_secrets(tmp_path, env={})
+
+    assert secrets == {NETWORK_USERNAME_KEY: "ok"}
+
+
+def test_load_yaml_secrets_skips_non_string_entries(tmp_path: Path):
+    # Non-string YAML values (e.g. integers) are not valid credential strings.
+    _write_secrets_yaml(
+        tmp_path,
+        "VIVIPI_NETWORK_USERNAME: str_user\nVIVIPI_NETWORK_PASSWORD: 12345\n",
+    )
+
+    secrets = load_network_secrets(tmp_path, env={})
+
+    assert secrets == {NETWORK_USERNAME_KEY: "str_user"}
+
+
+def test_load_yaml_secrets_returns_empty_when_yaml_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _write_secrets_yaml(tmp_path, "VIVIPI_NETWORK_PASSWORD: yaml_pwd\n")
+    # A None entry in sys.modules makes ``import yaml`` raise ImportError.
+    monkeypatch.setitem(sys.modules, "yaml", None)
+
+    secrets = load_network_secrets(tmp_path, env={})
+
+    assert secrets == {}
