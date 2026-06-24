@@ -173,7 +173,15 @@ load_local_secrets() {
     SECRETS_LOADED=1
     local python_path
     python_path="$(python_cmd || true)"
-    if [[ -z "$python_path" || ! -x "$python_path" ]]; then
+    # ``python_cmd`` may return a bare command name (e.g. ``python3``) rather
+    # than an absolute path when ``--python`` is given a bare name. The ``-x``
+    # test checks the filesystem, not PATH, so resolve bare names first;
+    # otherwise secret loading silently short-circuits in environments that
+    # select the interpreter by name.
+    if [[ -n "$python_path" && ! -x "$python_path" ]]; then
+        python_path="$(command -v "$python_path" 2>/dev/null || true)"
+    fi
+    if [[ -z "$python_path" ]]; then
         return
     fi
     local secrets_json
