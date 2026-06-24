@@ -14,6 +14,37 @@ fi
 
 export PYTHONPATH="$ROOT_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
 
+# Make ${VIVIPI_NETWORK_USERNAME}/${VIVIPI_NETWORK_PASSWORD} available without
+# requiring the caller to export them in every shell. Resolution order matches
+# vivipi.core.secrets.load_network_secrets: existing shell exports > .env.local
+# > config/secrets.local. This keeps one shared network password consistent for
+# HTTP, Telnet, FTP, and DMA probes (firmware-side they all gate on
+# CFG_NETWORK_PASSWORD on the 1541Ultimate).
+load_local_secrets() {
+    local combined
+    if ! combined="$("$PYTHON" -c '
+import json
+import sys
+sys.path.insert(0, "src")
+from vivipi.core.secrets import load_network_secrets
+sys.stderr.write("__SECRETS__" + json.dumps(load_network_secrets()) + "\n")
+' 2>&1)"; then
+        return
+    fi
+    local secrets_line="${combined##*__SECRETS__}"
+    local username password
+    username="$(printf '%s' "$secrets_line" | "$PYTHON" -c "import json, sys; d=json.loads(sys.stdin.read() or '{}'); print(d.get('VIVIPI_NETWORK_USERNAME', ''))" 2>/dev/null || true)"
+    password="$(printf '%s' "$secrets_line" | "$PYTHON" -c "import json, sys; d=json.loads(sys.stdin.read() or '{}'); print(d.get('VIVIPI_NETWORK_PASSWORD', ''))" 2>/dev/null || true)"
+    if [[ -z "${VIVIPI_NETWORK_USERNAME:-}" && -n "$username" ]]; then
+        export VIVIPI_NETWORK_USERNAME="$username"
+    fi
+    if [[ -z "${VIVIPI_NETWORK_PASSWORD:-}" && -n "$password" ]]; then
+        export VIVIPI_NETWORK_PASSWORD="$password"
+    fi
+}
+
+load_local_secrets
+
 status=0
 "$PYTHON" "$ROOT_DIR/scripts/u64_health_check.py" c64u "$@"
 rc=$?

@@ -10,11 +10,12 @@ __pycache__/
 artifacts/
 config/build-deploy.local.yaml
 config/build-deploy.multi.local.yaml
+config/secrets.local
+.env.local
 coverage.xml
 dist/
 htmlcov/
 pi
-config/build-deploy.local.example.yaml
 1541ultimate
 c64commander
 scripts/logs

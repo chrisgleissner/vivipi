@@ -1,5 +1,16 @@
 # Local targets should use host aliases from build-deploy.local.yaml so IP changes
 # only require a single config edit before ./build deploy.
+#
+# Network credentials (HTTP X-Password, Telnet, FTP, and the DMA TCP/64 raw socket
+# authenticate command) flow through ${VIVIPI_NETWORK_USERNAME} and
+# ${VIVIPI_NETWORK_PASSWORD}. The build script and c64_health_check auto-load
+# them from one of the following local-only secrets sources (none of which are
+# tracked):
+#   1. environment variables already exported in the shell
+#   2. .env.local in the repository root (KEY=VALUE lines)
+#   3. config/secrets.local (KEY: VALUE YAML mapping)
+# Run `cp config/secrets.local.example config/secrets.local` and fill in your
+# real password to enable checks against password-protected network listeners.
 checks:
   - name: C64U REST
     type: http
