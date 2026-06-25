@@ -16,6 +16,7 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
@@ -94,7 +95,11 @@ class SupportsClose(Protocol):
 
 
 def now_iso() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%S.", time.gmtime()) + f"{int(time.time() * 1000) % 1000:03d}Z"
+    # Read the wall clock once so the seconds and milliseconds fields cannot
+    # straddle a second boundary (two independent time calls could disagree by
+    # up to 1 s right at the rollover).
+    now = datetime.now(timezone.utc)
+    return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
 
 
 def firmware_source_info(checkout: Path | None = None) -> dict[str, Any]:
@@ -706,7 +711,11 @@ class BenchmarkError(Exception):
 
 
 def _rest_headers(ctx: BenchmarkContext) -> dict[str, str]:
-    headers = {"Connection": "close"}
+    # Match the HTTP Connection header to the selected mode so a keep-alive-capable
+    # firmware is actually exercised in persistent mode instead of being told to
+    # close after every response.
+    connection = "keep-alive" if ctx.http_connection == HTTP_CONN_PERSISTENT else "close"
+    headers = {"Connection": connection}
     if ctx.network_password:
         headers["X-Password"] = ctx.network_password
     return headers
@@ -1031,6 +1040,12 @@ def run_phase(
             }
         )
 
+    # --delay-ms (CLI) overrides the profile's inter_write_delay_ms; both pace the
+    # gap between individual logical writes, which is what "--delay-ms" documents
+    # and what the JSON inter_write_delay_ms field names. Duration/rate budgets are
+    # still enforced separately via deadline_perf.
+    per_write_delay_ms = ctx.delay_ms or profile.inter_write_delay_ms
+
     unit_index = 0
     measured_iter = 0
     try:
@@ -1044,9 +1059,9 @@ def run_phase(
                         ctx, executor, probe, round_index, phase_index, unit_index,
                         measured_iter, warmup=True, logical=logical, events=events,
                     )
+                    if per_write_delay_ms:
+                        ctx.sleep_fn(per_write_delay_ms / 1000.0)
                 unit_index += 1
-                if ctx.delay_ms:
-                    ctx.sleep_fn(ctx.delay_ms / 1000.0)
             # measured
             while True:
                 if deadline_perf is not None and ctx.perf_fn() >= deadline_perf:
@@ -1060,14 +1075,12 @@ def run_phase(
                         ctx, executor, probe, round_index, phase_index, unit_index,
                         measured_iter, warmup=False, logical=logical, events=events,
                     )
+                    if per_write_delay_ms:
+                        ctx.sleep_fn(per_write_delay_ms / 1000.0)
                 if deadline_perf is not None and ctx.perf_fn() >= deadline_perf:
                     break
                 measured_iter += 1
                 unit_index += 1
-                if profile.pacing == "unit" and profile.rate_hz and not ctx.delay_ms:
-                    pass  # pacing handled via measured duration budget only
-                if ctx.delay_ms:
-                    ctx.sleep_fn(ctx.delay_ms / 1000.0)
     finally:
         try:
             executor.close()
@@ -1249,6 +1262,14 @@ def run_benchmark(
     profile = ctx.traffic
     fw_source = firmware_source if firmware_source is not None else firmware_source_info()
     primary = schedule == SCHEDULE_SEQUENTIAL
+    if runners > 1:
+        # The value is accepted and recorded in the start event for provenance,
+        # but runner fan-out is not implemented yet. Warn loudly so a multi-runner
+        # invocation is never silently measured as a single runner.
+        ctx.diag(
+            f"warning: --runners {runners} requested but runner fan-out is not yet "
+            "implemented; measuring a single runner."
+        )
     ctx.emit(
         build_start_event(
             ctx=ctx,
@@ -1541,8 +1562,7 @@ def main(argv: list[str] | None = None) -> int:
         config = load_traffic_config(config_path)
         profile = config.select(args.traffic)
     except (OSError, ValueError, json.JSONDecodeError) as error:
-        parser.error(str(error))
-        return 2
+        parser.error(str(error))  # raises SystemExit(2); never returns
 
     def emit(event: dict[str, Any]) -> None:
         print(json.dumps(event), flush=True)

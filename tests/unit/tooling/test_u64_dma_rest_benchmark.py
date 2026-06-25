@@ -70,6 +70,7 @@ class FakeSocket:
         self.closed = False
         self._scripted = list(scripted_responses or [])
         self._recv_index = 0
+        self._recv_buffer = bytearray()
 
     def settimeout(self, timeout):
         self.settimeout_calls.append(timeout)
@@ -78,13 +79,20 @@ class FakeSocket:
         self.sent.extend(data)
 
     def recv(self, size):
-        if self._recv_index < len(self._scripted):
+        # Pull the next scripted chunk only when the buffer is drained, then hand
+        # back at most `size` bytes and keep the remainder for the next call so a
+        # chunk longer than `size` is never silently lost.
+        while not self._recv_buffer and self._recv_index < len(self._scripted):
             chunk = self._scripted[self._recv_index]
             self._recv_index += 1
             if isinstance(chunk, BaseException):
                 raise chunk
-            return chunk[:size]
-        return b""
+            self._recv_buffer.extend(chunk)
+        if not self._recv_buffer:
+            return b""
+        taken = bytes(self._recv_buffer[:size])
+        del self._recv_buffer[:size]
+        return taken
 
     def close(self):
         self.closed = True

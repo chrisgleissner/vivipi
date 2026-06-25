@@ -44,6 +44,7 @@
 
 ## Testing expectations
 
+- **Python version parity (check before declaring any task done):** `.github/workflows/ci.yml` is the source of truth for the supported interpreter matrix (currently `3.12` and `3.13`). Before considering a task complete, confirm the matrix has not changed, ensure each listed interpreter is installed locally, and run the suite on every one of them — not just the local default. A green run on a single version is not sufficient; behavior can diverge across releases (e.g. `argparse` help formatting changed in 3.13). Reproduce per CI version with `./build ci --venv .venv-<version>` (or `pytest` inside a matching venv). When CI bumps or adds a Python version, install it locally and re-run before merging.
 - Every requirement ID from `docs/spec.md` must remain mapped in `docs/spec-traceability.md`.
 - Branch coverage must stay at or above `96%`.
 - Prefer pure-function tests before hardware integration tests.
