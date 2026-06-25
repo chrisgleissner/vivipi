@@ -49,11 +49,8 @@ HTTP_DEFAULT_TIMEOUT_S = 8.0
 DEFAULT_HOST = os.getenv("HOST", "u64")
 DEFAULT_HTTP_PORT = int(os.getenv("HTTP_PORT", "80"))
 DEFAULT_DMA_PORT = int(os.getenv("DMA_PORT", "64"))
-NETWORK_PASSWORD = os.getenv("NETWORK_PASSWORD", "")
-FTP_PASS = os.getenv("FTP_PASS", "")
 DEFAULT_SEED = 1
 DEFAULT_LOG_EVERY = 1
-DEFAULT_DELAY_MS = 0
 DEFAULT_PROBES = ("rest", "dma")
 PROBE_CHOICES = ("rest", "dma")
 SCHEDULE_SEQUENTIAL = "sequential"
@@ -697,7 +694,7 @@ class BenchmarkContext:
     seed: int
     rounds: int
     verbose: bool
-    delay_ms: int
+    delay_ms: int | None
     log_every: int
     http_timeout_s: float = HTTP_DEFAULT_TIMEOUT_S
     dma_timeout_s: float = DMA_DEFAULT_TIMEOUT_S
@@ -1050,9 +1047,10 @@ def run_phase(
 
     # --delay-ms (CLI) overrides the profile's inter_write_delay_ms; both pace the
     # gap between individual logical writes, which is what "--delay-ms" documents
-    # and what the JSON inter_write_delay_ms field names. Duration/rate budgets are
-    # still enforced separately via deadline_perf.
-    per_write_delay_ms = ctx.delay_ms or profile.inter_write_delay_ms
+    # and what the JSON inter_write_delay_ms field names. The flag defaults to None
+    # so an explicit "--delay-ms 0" disables the profile delay rather than being
+    # treated as "unset". Duration/rate budgets are still enforced via deadline_perf.
+    per_write_delay_ms = ctx.delay_ms if ctx.delay_ms is not None else profile.inter_write_delay_ms
 
     unit_index = 0
     measured_iter = 0
@@ -1483,7 +1481,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=epilog_text(),
     )
     parser.add_argument("-H", "--host", default=DEFAULT_HOST, help="Target host or IP")
-    parser.add_argument("-d", "--delay-ms", type=int, default=DEFAULT_DELAY_MS, help="Delay between writes in milliseconds")
+    parser.add_argument("-d", "--delay-ms", type=int, default=None, help="Delay between writes in milliseconds (overrides the profile's inter_write_delay_ms; pass 0 to disable it)")
     parser.add_argument("-n", "--log-every", type=int, default=DEFAULT_LOG_EVERY, help="Log every Nth request (JSONL always emits all requests)")
     parser.add_argument("-P", "--ftp-pass", default=None, help="Legacy alias for the shared device network password.")
     parser.add_argument("--network-password", default=None, help="Shared device network password used for REST X-Password and DMA 0xFF1F authentication.")
@@ -1515,13 +1513,20 @@ def build_parser() -> argparse.ArgumentParser:
 def _resolve_network_password(args: argparse.Namespace) -> str:
     # Precedence: explicit --network-password (including an empty string to clear
     # an env-derived secret) > explicit --ftp-pass alias > env NETWORK_PASSWORD >
-    # env FTP_PASS > "". argparse leaves un-passed flags as None, which lets us
-    # distinguish "not passed" from "passed as empty".
+    # env FTP_PASS > "". argparse leaves un-passed flags as None and os.getenv
+    # returns None for unset vars, so an "is not None" check applied uniformly
+    # distinguishes "not provided" from "provided as empty" at every layer.
     if args.network_password is not None:
         return args.network_password
     if args.ftp_pass is not None:
         return args.ftp_pass
-    return NETWORK_PASSWORD or FTP_PASS
+    env_network_password = os.getenv("NETWORK_PASSWORD")
+    if env_network_password is not None:
+        return env_network_password
+    env_ftp_pass = os.getenv("FTP_PASS")
+    if env_ftp_pass is not None:
+        return env_ftp_pass
+    return ""
 
 
 def _resolve_traffic_config_path(args: argparse.Namespace) -> Path:

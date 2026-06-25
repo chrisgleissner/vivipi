@@ -123,7 +123,7 @@ def test_parser_defaults():
     assert args.dma_connection == module.DMA_CONN_PERSISTENT
     assert args.http_connection == module.HTTP_CONN_CLOSE
     assert args.warmup_iterations == 0
-    assert args.delay_ms == 0
+    assert args.delay_ms is None
     assert args.log_every == 1
 
 
@@ -649,6 +649,28 @@ def test_explicit_empty_network_password_clears_secret_without_ftp_fallback():
     assert ctx.network_password == ""
 
 
+def test_empty_network_password_env_clears_secret_without_ftp_env_fallback(monkeypatch):
+    module = load_module()
+    profile = _load_default_profile(module)
+    # An explicitly empty NETWORK_PASSWORD env must win over FTP_PASS env, not be
+    # treated as "unset" by a falsy-or fallback.
+    monkeypatch.setenv("NETWORK_PASSWORD", "")
+    monkeypatch.setenv("FTP_PASS", "legacy")
+    args = module.build_parser().parse_args([])
+    ctx = module.build_context(args, profile, emit=lambda e: None)
+    assert ctx.network_password == ""
+
+
+def test_network_password_falls_back_to_ftp_pass_env_when_unset(monkeypatch):
+    module = load_module()
+    profile = _load_default_profile(module)
+    monkeypatch.delenv("NETWORK_PASSWORD", raising=False)
+    monkeypatch.setenv("FTP_PASS", "legacy")
+    args = module.build_parser().parse_args([])
+    ctx = module.build_context(args, profile, emit=lambda e: None)
+    assert ctx.network_password == "legacy"
+
+
 # --------------------------------------------------------------------------- #
 # 18-23. DMA framing and auth
 # --------------------------------------------------------------------------- #
@@ -915,6 +937,59 @@ def test_address_range_validation_rejects_writes_past_ffff():
     )
     with pytest.raises(ValueError, match="write range exceeds"):
         module.validate_rest_payload(logical, b"\x00" * 10, method="post")
+
+
+def _profile_with_inter_write_delay(module, tmp_path, delay_ms):
+    cfg = {
+        "version": 1,
+        "default": "x",
+        "traffic": [
+            {
+                "name": "x",
+                "unit": "iteration",
+                "iterations": 2,
+                "pacing": "none",
+                "payload_pattern": "zero",
+                "seed": 1,
+                "inter_write_delay_ms": delay_ms,
+                "writes": [
+                    {"label": "w", "space": "c64", "address": "0400", "bytes": 4, "write_kind": "dmawrite"},
+                ],
+            }
+        ],
+    }
+    path = tmp_path / "delay.json"
+    path.write_text(json.dumps(cfg))
+    return module.load_traffic_config(path).select("x")
+
+
+def _run_rest_phase_sleeps(module, profile, delay_args):
+    """Run a REST phase against a fake connection and return the recorded sleeps."""
+    args = module.build_parser().parse_args(["-H", "u64", *delay_args])
+    ctx = module.build_context(args, profile, emit=lambda e: None)
+    ctx.http_connection_factory = lambda *a, **kw: FakeHttpConnection("u64", 80, 8.0)
+    sleeps = []
+    ctx.sleep_fn = sleeps.append
+    module.run_phase(
+        ctx=ctx, probe="rest", round_index=0, phase_index=0,
+        start_perf=0.0, deadline_perf=None, max_units=2, warmup_units=0,
+        firmware_source={},
+    )
+    return sleeps
+
+
+def test_profile_inter_write_delay_applied_when_delay_ms_not_passed(tmp_path):
+    module = load_module()
+    profile = _profile_with_inter_write_delay(module, tmp_path, 10)
+    sleeps = _run_rest_phase_sleeps(module, profile, [])
+    assert sleeps and all(s == pytest.approx(0.01) for s in sleeps)
+
+
+def test_explicit_zero_delay_ms_disables_profile_inter_write_delay(tmp_path):
+    module = load_module()
+    profile = _profile_with_inter_write_delay(module, tmp_path, 10)
+    # Explicit --delay-ms 0 must override the profile's 10 ms inter-write delay.
+    assert _run_rest_phase_sleeps(module, profile, ["--delay-ms", "0"]) == []
 
 
 def _load_single_write_profile(module, tmp_path, write):
