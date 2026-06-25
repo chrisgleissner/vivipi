@@ -1,6 +1,6 @@
 # ViviPi
 
-See your device health at a glance.
+**See your device health at a glance.**
 
 [![Build](https://github.com/chrisgleissner/vivipi/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/chrisgleissner/vivipi/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/chrisgleissner/vivipi/graph/badge.svg)](https://codecov.io/gh/chrisgleissner/vivipi)
@@ -8,7 +8,9 @@ See your device health at a glance.
 [![Hardware](https://img.shields.io/badge/hardware-Raspberry%20Pi%20Pico-blue)](https://github.com/chrisgleissner/vivipi/releases)
 [![Runtime](https://img.shields.io/badge/runtime-MicroPython%20%7C%20Python-blue)](https://github.com/chrisgleissner/vivipi)
 
-ViviPi, pronounced "VEE-vee-pie", is a compact health display for Raspberry Pi Pico modules. It runs checks directly from the Pico, can include additional check results from a remote service, and presents the combined status in a fixed-width UI that is easy to read at a glance.
+ViviPi, pronounced "VEE-vee-pie", is a **compact health display** for Raspberry Pi Pico modules. The name is built on the Latin root viv- from vivere, "to live".
+
+It runs checks directly from the Pico, can include additional check results from a remote service, and presents the combined status in a fixed-width UI that is easy to read at a glance.
 
 The project was specifically set up to perform health check monitoring against a Commodore 64 Ultimate or Ultimate 64, but it can also be used to monitor other devices.
 
@@ -16,7 +18,7 @@ The project was specifically set up to perform health check monitoring against a
   <img src="./docs/img/vivipi_tested_picos_ok.jpg" alt="Two ViviPi test devices side by side with all checks healthy: a Pico OLED 1.3 on the left and a Pico ePaper 2.13-B V4 on the right." width="720">
 </p>
 
-Shown above are the two Pico 2W builds tested on real hardware in their all-clear state: `waveshare-pico-oled-1.3` and `waveshare-pico-epaper-2.13-b-v4`.
+Shown above are the two Pico 2W builds tested on real hardware: `waveshare-pico-oled-1.3` and `waveshare-pico-epaper-2.13-b-v4`.
 
 ## Features
 
