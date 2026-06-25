@@ -950,3 +950,137 @@ Done only when:
 - The shared model carries confirmed and tentative state for the mutated HTTP/FTP resources.
 - Probe semantics remain `smoke`, `read`, `readwrite`, and `incomplete`.
 - Validation evidence shows zero unexpected FAIL results for the targeted probe set.
+
+## U64 DMA vs REST Memory-Write Benchmark Plan
+
+Authoritative execution plan for a generic, deterministic host-side benchmark comparing Ultimate-family memory-write transports (REST `/v1/machine:writemem` vs U64 TCP/64 socket-DMA). This is a workload generator, not a soak/stress/availability tool.
+
+Status: IN-PROGRESS
+
+### 1. Problem statement
+
+ViviPi needs a reusable benchmark that emits a deterministic ordered stream of target address + byte-count write requests against an Ultimate-family target and reports latency, throughput, payload-rate, call-shape, and transport-overhead for REST versus socket-DMA under phase-fair conditions. The tool must be generic: workload shape lives in JSON traffic profiles; the only place `c64cast` may appear is as a named JSON traffic profile.
+
+### 2. Repository facts (current code)
+
+- `scripts/u64_connection_test.py` is the soak/stress/availability direct-protocol exerciser; it must NOT be extended with this benchmark as a profile.
+- `scripts/u64_raw64.py` already encodes the TCP/64 frame envelope (`command_frame` = `<uint16-le cmd><uint16-le len><payload>`), `recv_exact`, `SOCKET_CMD_AUTHENTICATE = 0xFF1F`, `SOCKET_CMD_DEBUG_REG = 0xFF76`, `SOCKET_CMD_IDENTIFY = 0xFF0E`, 1s DMA timeout, and authenticate-then-command gating. The benchmark reuses the framing shape but not the soak/availability semantic model.
+- `scripts/u64_http.py` already encodes REST `X-Password` header injection and `Connection: close`; `memory_write_verify` shows the existing REST PUT writemem shape `/v1/machine:writemem?address=..&data=HEX`.
+- `scripts/u64_connection_runtime.py::RuntimeSettings` is a frozen host/password/port dataclass reused for password plumbing parity.
+- Tests load scripts via `tests/unit/tooling/_script_loader.py::load_script_module` and drive them with fake HTTP connections and fake sockets (see `tests/unit/tooling/test_u64_connection_protocols.py`). The new benchmark follows this pattern.
+- `pyproject.toml`: `target-version = "py312"`, `line-length = 100`, pytest `--cov=src/vivipi --cov-fail-under=96`. The benchmark lives in `scripts/` (outside the coverage gate), so it must pass `ruff` + `pytest` but does not affect the `src/vivipi` coverage threshold.
+
+### 3. Firmware source facts (`/home/chris/dev/c64/1541ultimate`)
+
+Inspected checkout: commit `7304ce877a62912ca04049ece9d49827e3f3920a` ("Reverted last commit since only relevant for debugging..."), 2026-06-06. Checkout is **dirty** (31 modified files); the protocol-relevant source cited below was read directly and matches the task's source-confirmed facts, but the dirty tree is recorded for transparency.
+
+Socket-DMA command handling — `software/network/socket_dma.cc`:
+- Command constants: `SOCKET_CMD_DMAWRITE = 0xFF06` (L32), `SOCKET_CMD_REUWRITE = 0xFF07` (L33), `SOCKET_CMD_IDENTIFY = 0xFF0E` (L40), `SOCKET_CMD_AUTHENTICATE = 0xFF1F` (L42), `SOCKET_CMD_DEBUG_REG = 0xFF76` (L56, U64-only). `SOCKET_BUFFER_SIZE = 200000` in `software/network/socket_dma.h:15`.
+- Accepted-socket timeouts: 1s send + 1s receive (L60-67).
+- Auth gate: any non-`AUTHENTICATE` command before successful auth disconnects the socket (L99-101).
+- `AUTHENTICATE`: empty password ⇒ pre-authenticated; else match length+bytes ⇒ `buf[0]=1`; failure ⇒ `buf[0]=0` + 1000ms throttle; always `writeSocket(buf,1)` (L103-115).
+- `IDENTIFY`: returns `<title_length><title>` (L116-120).
+- `DMAWRITE`: `offs = LE(buf[0],buf[1])`; `SubsysCommand(C64_DMA_RAW_WRITE, offs, buf+2, len-2)`; **no response** (L133-137).
+- `REUWRITE`: `offs32 = LE24(buf[0..2])`; byte loop into `REU_MEMORY_BASE + ((offs32+i-3)&0xffffff)`; **no response** (L157-161).
+- `DEBUG_REG`: returns current `U64_DEBUG_REGISTER` byte; writes `buf[0]` only if `len>0` (zero-length ⇒ read-only barrier) (L287-294).
+- Frame read: recv 2-byte LE cmd, recv 2-byte LE len; 24-bit len extension only for `MOUNT_IMG/RUN_IMG/RUN_CRT`; payload read; `len32` capped to `SOCKET_BUFFER_SIZE` (L454-485, cap L477-479). Therefore single-frame `DMAWRITE` raw data ≤ `65533` (`65535-2`), `REUWRITE` ≤ `65532` (`65535-3`).
+
+REST write routes — `software/api/route_machine.cc`:
+- `PUT /v1/machine:writemem`: requires `address`+`data`; `datalen = strlen(data)>>1`; rejects `>128`, `<1`, and `address+datalen>65536`; parses hex into a 128-byte buffer; `C64_DMA_RAW_WRITE` (L71-124).
+- `POST /v1/machine:writemem`: requires `address`; body via `attachment_writer`; loads up to 65536 bytes; rejects `address+datalen>65536`; `C64_DMA_RAW_WRITE` (L126-163).
+
+REST authentication — `software/api/routes.h` L304-313 (`X-Password` vs `CFG_NETWORK_PASSWORD`, mismatch/missing ⇒ `-1`) and `software/api/routes.cc` L76-80 (`-1` ⇒ `HTTP_FORBIDDEN` "Forbidden."). `c64_subsys.cc` convergence: `C64_DMA_RAW_WRITE` dispatch L461-463 → `dma_load_raw_buffer` L578-602 (stop-if-running, `memcpy` to `C64_MEMORY_BASE+offset`, resume, synchronous).
+
+### 4. Protocol assumptions
+
+- `verified-from-source`: DMA command codes, frame envelope, 1s server timeouts, auth gate/auth response bytes, DMAWRITE/REUWRITE/DEBUG_REG/IDENTIFY behavior, single-frame payload ceilings, REST PUT/POST limits and `$FFFF` rejection, REST `X-Password` 403 behavior, all converge on `C64_DMA_RAW_WRITE`.
+- `verified-from-existing-vivipi-code`: TCP/64 frame shape, `recv_exact`, `DEBUG_REG`/`IDENTIFY`/`AUTHENTICATE` framing, REST `X-Password` + `Connection: close` plumbing (mirror `u64_raw64.py`, `u64_http.py`).
+- `requires-hardware-confirmation`: (a) whether a zero-length `DEBUG_REG` reliably serializes after a `DMAWRITE` on the live U64 (treated as a same-socket barrier per source, not a write ACK); (b) actual REST/DMA wall-clock latency distributions; (c) whether `identify` is a usable fallback barrier on this firmware build; (d) REST POST `attachment_writer` exact `Content-Type`/multipart tolerance on this build (we send `application/octet-stream` raw body; to be confirmed live).
+- `requires-upstream-source-confirmation`: none outstanding beyond the hardware items above; all benchmark-affecting protocol semantics are source-confirmed.
+
+### 5. Phase plan
+
+- Phase A — Config + model: create `config/u64_dma_rest_benchmark_traffic.json` (`c64cast`, `single-write`); implement JSON loader + schema/range/duplicate validation; implement unit-write expansion (repeat, bank_cycle, dirty full/one-span/slabs/skip-repeated, split reject/chunk).
+- Phase B — Determinism: deterministic payload generation keyed on traffic name + unit index + space + address + byte count + dirty offset + emitted write index + seed + pattern (never label); stable `logical_write_id`.
+- Phase C — Protocol: REST PUT/POST/auto framing with 128-byte + `$FFFF` guards; DMA `0xFF06`/`0xFF07` framing with single-frame ceilings; `0xFF1F` auth; default barrier = zero-length `0xFF76`, identify fallback, send-only warning.
+- Phase D — Runner + JSONL: phase-fair sequential (REST then DMA) default + concurrent exploratory; warmup separation; start/request/warning/summary events; `request_bytes` accounting; percentiles.
+- Phase E — CLI: argparse `RawDescriptionHelpFormatter`, generic flags aligned with `u64_connection_test.py`, `main(argv)->int`, JSONL-only stdout, stderr diagnostics, executable bit.
+- Phase F — Tests: 31 required hardware-free scenarios using fake HTTP/socket + abstracted time.
+- Phase G — Docs + validation: update `docs/c64u-u64-cli.md`; `./build lint` + `./build test`; real-device 60s `-H u64` run; `artifacts/u64_dma_rest_benchmark/u64-c64cast-comparison.md`.
+
+### 6. Acceptance criteria checklist
+
+- [x] `scripts/u64_dma_rest_benchmark.py` exists, executable, has `--help`.
+- [x] `config/u64_dma_rest_benchmark_traffic.json` has `c64cast` + `single-write`.
+- [x] Generic CLI flags aligned with `u64_connection_test.py`; no c64cast workload-shape flags.
+- [x] Default invocation selects JSON traffic `c64cast`.
+- [x] REST POST/PUT/auto; DMA `0xFF06`/`0xFF07`/`0xFF1F`; default DMA barrier timing.
+- [x] Stdout JSONL-only; every request event has `request_bytes`; summary compares REST vs DMA.
+- [x] Docs updated; unit tests cover parser/help, loader, framing, output, limits, auth, stats.
+- [x] `./build lint` + `./build test` pass.
+- [x] Real-device ≥60s `-H u64` run, both phases, barrier DMA, valid JSONL, zero errors, `ok:true`.
+- [x] `artifacts/u64_dma_rest_benchmark/u64-c64cast-comparison.md` present.
+
+### 7. Decision log
+
+- D1 REST latency includes per-request connect cost in `close` mode (REST's architectural reality); DMA latency excludes connect/auth and is measured write-frame-send→barrier-response per the task's explicit instruction. `http_connection`/`dma_connection` are logged in the start event so the comparison context is explicit.
+- D2 Default DMA barrier is zero-length `SOCKET_CMD_DEBUG_REG = 0xFF76` (returns 1 byte, no state change), described as a same-socket serialization point, not a `DMAWRITE` ACK (source sends none).
+- D3 `request_bytes` = raw C64/REU payload bytes only; envelope/address/offset/HTTP/barrier bytes excluded (may become overhead fields later).
+- D4 `space` (c64/reu) determines DMA command (`0xFF06`/`0xFF07`); `write_kind` is validated against space and is otherwise an annotation. REU writes are skipped in the REST phase (REST cannot represent REU), logged as skip events.
+- D5 `--rest-method auto` ⇒ PUT for ≤128 bytes, POST otherwise; `put` rejects >128; `post` rejects `address+len>65536`. **Resolved HTTP verbs are uppercased** — the 1541Ultimate HTTP server returns 404 for lowercase verbs (verified live: `curl -X put …` → 404).
+- D6 Oversize single-frame writes are rejected by the loader by default; explicit JSON `split` (`chunk`) may divide them; never silently truncate.
+- D7 Concurrent schedule is supported but marked non-primary in start/summary (changes offered load); sequential REST-then-DMA is the primary comparison.
+- D7a `--duration-s` in `sequential` schedule applies **per phase** (each protocol gets the full budget for fair side-by-side comparison). Concurrent schedule shares a single overall deadline.
+- D8 No silent memory restoration; no read benchmark; reads only as optional barrier.
+- D9 Default JSON traffic uses only safe RAM regions (screen $0400, color $D800, bitmap $2000) and never touches VIC/CIA/REC/vectors. `single-write` profile was moved from `$C000` (BASIC ROM, destabilizing the live C64 via stop/resume) to `$0400` screen RAM at 64 bytes.
+- D10 DMA socket sets `TCP_NODELAY = 1` (c64cast does the same; without it, barrier-mode latency is dominated by ~40 ms Nagle coalescing on the small `0xFF76` barrier frame).
+- D11 `latency_ms` field is stored in **milliseconds** (`(perf_fn() - t0) * 1000.0`); earlier broken pass stored raw seconds. Fix lives in `RestExecutor.execute` and `DmaExecutor.execute`. `elapsed_ms` (per-event phase-window offset) was already in ms.
+- D12 Added `c64cast-with-audio` JSON traffic profile with one 1024 B audio write to `$4000` per video frame. Marked STATEFUL in metadata because it touches the audio ring without c64cast's NMI/audio firmware loaded. Default `c64cast` profile stays video-only to keep safe-RAM defaults.
+- D13 (revalidation) Added `c64cast-hires` profile modelling c64cast's **real default** display mode `hires_edges` (mono): bitmap `$2000` 8000 B + screen `$0400` 1000 B = 9000 B/frame, 2 writes, no color RAM (`c64cast config.py:633`, `modes.py:2097-2098`). The pre-existing `c64cast` profile is the heavier multicolor `mhires` variant, kept as a worst-case upper bound. Default `--traffic` stays `c64cast` for continuity; the authoritative report centres on `c64cast-hires`.
+- D14 (revalidation) `--dma-ack-mode barrier` (per-write device-confirmed) is NOT how c64cast uses DMA. Source review of `c64cast` (`socket_dma.py:214-249`, `backend.py:144 writes_are_acked=False`) shows the hot path is **fire-and-forget**. The benchmark reports three modes with explicit meaning: REST and DMA-barrier are device-confirmed (fair latency comparison); DMA send-only is c64cast's real fire-and-forget pattern and its **throughput** (TCP-backpressure-bounded over 60 s) is the faithful DMA capability, while its per-write latency is host-buffer time and is excluded from latency claims.
+- D15 (revalidation) Firmware facts that reframe REST cost (verified, not changed): the HTTP server has **no keep-alive** (`Connection: close` + socket teardown every request — `server.c:201-214`, `routes.h:101`), so REST `close` mode is the only mode the firmware allows and is not a worst-case artifact; REST **POST round-trips the body through a temp file on disk** (`route_machine.cc:126-163`, `attachment_writer.h`). REST PUT/POST and DMAWRITE still converge on the identical `C64_DMA_RAW_WRITE` memcpy, so the measured delta is the HTTP front door, not the device-side copy.
+- D16 (revalidation) Added hermetic end-to-end test `tests/unit/tooling/test_u64_dma_rest_benchmark_e2e.py` driving `main()` against in-process loopback mock U64 listeners (DMA TCP/64 + HTTP writemem) that decode frames exactly as the firmware does. It asserts exact counts/bytes/framing/payloads/method/X-Password, valid JSONL, `ok:true`, and millisecond latency units (mutation-tested against the seconds-bug). This closes the coverage hole that let the original 1000× latency-unit bug ship.
+
+### 8. Final status
+
+**Completed, then adversarially revalidated (2026-06-25T14:10:00Z).** The revalidation pass re-verified every protocol assumption against firmware/c64cast source, added the faithful `c64cast-hires` default-mode profile, added an end-to-end mock-listener test that closes the latency-unit coverage hole, re-ran the live `u64` benchmark, and produced the authoritative report `docs/research/c64cast/dma-vs-rest-writemem.md`. See `WORKLOG.md` (entries `2026-06-25T11:19:16Z`, `2026-06-25T12:14:10Z`, `2026-06-25T14:10:00Z`).
+
+Revalidated headline (fresh live `u64`, 60 s/phase, all `ok:true`, 0 errors):
+
+| Profile | Transport | RPS | KB/s | median ms | FPS |
+| --- | --- | --- | --- | --- | --- |
+| c64cast-hires (default mode, 9000 B) | REST POST close | 15.0 | 67.5 | 68.19 | 7.5 |
+| c64cast-hires | DMA + barrier (device-confirmed) | 72.2 | 325.1 | 16.92 | **36.1** |
+| c64cast-hires | DMA send-only (c64cast fire-and-forget) | 91.9 | 413.4 | n/a | **45.9** |
+| c64cast (mhires, 10000 B) | REST POST close | 15.7 | 52.2 | 58.26 | 5.2 |
+| c64cast | DMA + barrier | 87.0 | 289.9 | 6.24 | **29.0** |
+| c64cast | DMA send-only | 117.2 | 390.5 | n/a | **39.1** |
+
+DMA is 4.8×–7.5× faster than REST. Both reach the identical `C64_DMA_RAW_WRITE` memcpy; the gap is the HTTP front door (no keep-alive → TCP connect+teardown per write; POST temp-file disk round-trip). Removing DMA for REST-only would drop c64cast from ~36–46 FPS to ~7.5 FPS, below its 20–30 FPS target. Validation: `./build lint` clean, `./build test` `980 passed` / 98.03% coverage.
+
+#### Prior (first-pass) headline — retained for history
+
+Headline numbers from the real-device 60 s runs on `u64` (post unit-fix, with `TCP_NODELAY`):
+
+| Scenario | Transport | RPS | KB/s | median ms | p95 ms | p99 ms | FPS (payload) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| c64cast / barrier | REST POST close | 15.65 | 52.17 | 58.56 | 80.43 | 94.06 | 5.22 |
+| c64cast / barrier | DMA + barrier | 88.86 | 296.19 | 6.15 | 20.89 | 23.71 | **29.62** |
+| c64cast / send-only | REST POST close | 15.63 | 52.03 | 58.57 | 80.22 | 94.04 | 5.20 |
+| c64cast / send-only | DMA send-only | 117.04 | 390.09 | 4.14 | 23.59 | 27.39 | **39.01** |
+| c64cast+audio / barrier | REST POST close | 15.88 | 43.75 | 58.02 | 80.55 | 94.76 | 3.97 |
+| c64cast+audio / barrier | DMA + barrier | 96.63 | 266.27 | 5.95 | 21.13 | 24.95 | **24.15** |
+| c64cast+audio / send-only | REST POST close | 11.70 | 32.20 | 57.94 | 80.19 | 92.09 | 2.92 |
+| c64cast+audio / send-only | DMA send-only | 133.97 | 369.17 | 1.11 | 26.72 | 30.17 | **33.49** |
+
+- DMA is 5.7×-7.5× faster than REST in achieved throughput and 9.5× lower per-request
+  median latency for the c64cast workload, confirming the c64cast project's
+  design choice.
+- All four runs completed; the only `ok:false` was run 4 (c64cast+audio send-only)
+  with 2 transient REST timeouts (8 s HTTP timeout) on `$D800` and `$0400`.
+  DMA in that run was 8038/8038 successful.
+- Artefacts:
+  - JSONL: `artifacts/u64_dma_rest_benchmark/run[1-4]-*.jsonl`
+  - Research: `artifacts/u64_dma_rest_benchmark/RESEARCH.md`
+  - Comparison summary: `artifacts/u64_dma_rest_benchmark/u64-c64cast-comparison.md`
+- Lint and full test suite (`./build lint`, `./build test`) pass with 972 tests.

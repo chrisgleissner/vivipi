@@ -1,0 +1,154 @@
+{
+  "version": 1,
+  "default": "c64cast",
+  "traffic": [
+    {
+      "name": "c64cast",
+      "description": "c64cast MULTICOLOR-hires (mhires) single-buffer host-DMA video writes (screen+color+bitmap). NOTE: c64cast's real DEFAULT display mode is mono `hires_edges` (see the `c64cast-hires` profile); this mhires profile is the heavier 3-write multicolor variant kept as a worst-case upper bound.",
+      "unit": "frame",
+      "rate_hz": 20,
+      "iterations": 200,
+      "pacing": "unit",
+      "payload_pattern": "frame-counter",
+      "seed": 1,
+      "metadata": {
+        "display_mode": "mhires",
+        "buffering": "single-buffer",
+        "source": "c64cast",
+        "audio_includes": false,
+        "is_c64cast_default_mode": false,
+        "dirty_region_note": "Full-frame worst case. Real c64cast diffs each region (c64cast backend.py:476-553) and a steady frame usually uploads a fraction of these bytes.",
+        "note": "Video-only workload. Audio is a separate steady-state stream (see c64cast-with-audio)."
+      },
+      "writes": [
+        {
+          "label": "screen",
+          "space": "c64",
+          "address": "0400",
+          "bytes": 1000,
+          "write_kind": "dmawrite"
+        },
+        {
+          "label": "color",
+          "space": "c64",
+          "address": "D800",
+          "bytes": 1000,
+          "write_kind": "dmawrite"
+        },
+        {
+          "label": "bitmap",
+          "space": "c64",
+          "address": "2000",
+          "bytes": 8000,
+          "write_kind": "dmawrite"
+        }
+      ]
+    },
+    {
+      "name": "c64cast-with-audio",
+      "description": "c64cast mhires single-buffer video writes + 1 KB audio chunk to $4000 ring per frame. STATEFUL: writes $4000-$5FFF audio ring; do not run on a C64 you care about without the c64cast NMI/audio firmware loaded.",
+      "unit": "frame",
+      "rate_hz": 20,
+      "iterations": 200,
+      "pacing": "unit",
+      "payload_pattern": "frame-counter",
+      "seed": 1,
+      "metadata": {
+        "display_mode": "mhires",
+        "buffering": "single-buffer",
+        "source": "c64cast",
+        "audio_includes": true,
+        "note": "Adds one 1024-byte audio chunk per video frame. Real c64cast streams many small chunks; this is a per-frame aggregate representative."
+      },
+      "writes": [
+        {
+          "label": "screen",
+          "space": "c64",
+          "address": "0400",
+          "bytes": 1000,
+          "write_kind": "dmawrite"
+        },
+        {
+          "label": "color",
+          "space": "c64",
+          "address": "D800",
+          "bytes": 1000,
+          "write_kind": "dmawrite"
+        },
+        {
+          "label": "bitmap",
+          "space": "c64",
+          "address": "2000",
+          "bytes": 8000,
+          "write_kind": "dmawrite"
+        },
+        {
+          "label": "audio_ring",
+          "space": "c64",
+          "address": "4000",
+          "bytes": 1024,
+          "write_kind": "dmawrite"
+        }
+      ]
+    },
+    {
+      "name": "c64cast-hires",
+      "description": "c64cast REAL DEFAULT display mode: mono `hires_edges` single-buffer host-DMA video. Per frame: bitmap $2000 (8000 B) then screen $0400 (1000 B); NO color RAM write (mono hires has no per-cell color). Matches c64cast modes.py:2097-2098 write order. Full-frame worst case (dirty-region diffing usually sends less).",
+      "unit": "frame",
+      "rate_hz": 20,
+      "iterations": 200,
+      "pacing": "unit",
+      "payload_pattern": "frame-counter",
+      "seed": 1,
+      "metadata": {
+        "display_mode": "hires",
+        "buffering": "single-buffer",
+        "source": "c64cast",
+        "audio_includes": false,
+        "is_c64cast_default_mode": true,
+        "writes_per_frame": 2,
+        "bytes_per_frame": 9000,
+        "fps_target_note": "20 fps when digitized audio is streamed (the movie case); 30 NTSC / 25 PAL for video-only (c64cast config.py:2680-2702).",
+        "dirty_region_note": "Full-frame worst case. Real c64cast diffs each region (c64cast backend.py:476-553) and a steady frame usually uploads a fraction of these bytes.",
+        "reu_note": "On an REU-equipped U64 c64cast stages bitmap+screen via REUWRITE (0xFF07) + vblank flip instead of direct DMAWRITE; this profile models the direct host-DMA fallback path."
+      },
+      "writes": [
+        {
+          "label": "bitmap",
+          "space": "c64",
+          "address": "2000",
+          "bytes": 8000,
+          "write_kind": "dmawrite"
+        },
+        {
+          "label": "screen",
+          "space": "c64",
+          "address": "0400",
+          "bytes": 1000,
+          "write_kind": "dmawrite"
+        }
+      ]
+    },
+    {
+      "name": "single-write",
+      "description": "Protocol sanity profile: one small safe-RAM C64 write per unit",
+      "unit": "iteration",
+      "iterations": 100,
+      "pacing": "none",
+      "payload_pattern": "increment",
+      "seed": 1,
+      "metadata": {
+        "purpose": "protocol-sanity"
+      },
+      "writes": [
+        {
+          "label": "single",
+          "space": "c64",
+          "address": "0400",
+          "bytes": 64,
+          "write_kind": "dmawrite"
+        }
+      ]
+    }
+  ]
+}

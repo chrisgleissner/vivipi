@@ -115,11 +115,68 @@ Quick recipes:
 
 If you set `--probes` without `--stream`, the profile-default stream checks are disabled. Add `--stream` explicitly when you want stream verification.
 
+## Deterministic memory-write benchmark with `u64_dma_rest_benchmark.py`
+
+Use `./scripts/u64_dma_rest_benchmark.py` when you want to compare REST `/v1/machine:writemem` against U64 TCP/64 socket-DMA (`SOCKET_CMD_DMAWRITE = 0xFF06`, `SOCKET_CMD_REUWRITE = 0xFF07`) under phase-fair, deterministic, JSON-defined workload. This is **not** a soak/stress/availability tool — it is a workload generator that emits an ordered stream of `(address, byte_count)` writes per logical unit and reports latency, throughput, payload rate, and call-shape for each transport.
+
+| Aspect | `u64_connection_test.py` | `u64_dma_rest_benchmark.py` |
+| --- | --- | --- |
+| Purpose | Direct protocol exerciser, soak/stress | Deterministic memory-write benchmark |
+| Workload shape | Per-probe surface flags | JSON traffic profile (`--traffic`) |
+| Failure handling | Retry transient transport errors | Single-shot; failed requests are counted, not retried |
+| Output | Human-readable line per probe | JSONL on stdout only; diagnostics on stderr |
+| Default scheduling | Concurrent probe mix | Sequential REST then DMA (primary comparison) |
+
+Workload shape is fully defined by the selected JSON profile; the CLI has **no** c64cast-specific workload flags. Built-in profiles:
+
+- `c64cast-hires` — c64cast's **real default** display mode `hires_edges` (mono): bitmap `$2000` 8000 B then screen `$0400` 1000 B per frame (9000 B, 2 writes, no color RAM).
+- `c64cast` — heavier multicolor `mhires` variant: screen `$0400` 1000 B, color `$D800` 1000 B, bitmap `$2000` 8000 B per frame (10000 B, 3 writes).
+- `c64cast-with-audio` — `c64cast` plus one 1024 B audio-ring write to `$4000` per frame (STATEFUL; touches the audio ring).
+- `single-write` — one 64-byte write to screen RAM `$0400`, 100 iterations, no pacing (protocol sanity).
+
+For the full REST-vs-DMA analysis and decision (should the firmware drop DMA writes for REST-only?), see [`docs/research/c64cast/dma-vs-rest-writemem.md`](research/c64cast/dma-vs-rest-writemem.md).
+
+Default behavior:
+
+- traffic config: `config/u64_dma_rest_benchmark_traffic.json`
+- traffic name: `c64cast`
+- probes: `rest,dma`
+- schedule: `sequential`
+- runners: `1`
+- REST method: `auto` (PUT for ≤128 bytes, POST otherwise)
+- DMA timing: `barrier` (write-frame send → zero-length `SOCKET_CMD_DEBUG_REG = 0xFF76` response on the same socket)
+- HTTP connection: `close`
+- DMA connection: `persistent`
+
+Examples:
+
+```bash
+./scripts/u64_dma_rest_benchmark.py -H u64
+./scripts/u64_dma_rest_benchmark.py -H u64 --traffic c64cast --duration-s 60
+./scripts/u64_dma_rest_benchmark.py -H u64 --traffic-config config/u64_dma_rest_benchmark_traffic.json --traffic single-write
+./scripts/u64_dma_rest_benchmark.py -H u64 --probes rest --rest-method post
+./scripts/u64_dma_rest_benchmark.py -H u64 --probes rest --rest-method put --traffic single-write
+./scripts/u64_dma_rest_benchmark.py -H u64 --probes dma --dma-ack-mode barrier
+./scripts/u64_dma_rest_benchmark.py -H u64 --schedule sequential --runners 1 --duration-s 60
+```
+
+**Safety.** This tool writes C64 RAM, color RAM (`$D800`–`$DBE7`), and — depending on the JSON profile — I/O, VIC/CIA/REC registers, vectors, or REU space. Default profiles write only RAM/screen/color/bitmap regions and do **not** touch VIC/CIA/vectors/REC. The tool does **not** restore modified memory after the run. Reject writes past `$FFFF` and reject non-positive byte counts before any transport request is sent. Pick a target (`-H u64` or `-H c64u`) deliberately and stop the run with Ctrl-C if you need to abort mid-traffic.
+
+**JSONL output contract.** stdout contains JSONL only. Each request event includes `ts`, `event:"request"`, `phase_probe`, `logical_write_id`, `space`, `address`, `request_bytes`, `latency_ms`, `ok`, `warmup`, plus protocol-specific fields (`method`, `path`, `status` for REST; `command`, `ack_mode`, `barrier`, `dma_connection` for DMA). The `request_bytes` field is **raw C64/REU payload bytes only** — it excludes TCP/64 envelope bytes, DMA address prefix bytes, REU offset prefix bytes, HTTP headers, REST query-string hex expansion, JSONL serialization bytes, and barrier command bytes. A short example:
+
+```json
+{"event":"request","phase_probe":"rest","address":"0400","request_bytes":1000,"latency_ms":12.4,"ok":true}
+{"event":"request","phase_probe":"dma","command":"0xFF06","barrier":"debugreg","address":"0400","request_bytes":1000,"latency_ms":8.1,"ok":true}
+```
+
+A final summary event compares REST vs DMA with `requests`, `failed_requests`, `request_bytes`, `elapsed_s`, `requests_per_s`, `payload_bytes_per_s`, `min_ms`, `median_ms`, `p90_ms`, `p95_ms`, `p99_ms`, `max_ms`. DMA uses a same-socket command-serialization barrier (zero-length `SOCKET_CMD_DEBUG_REG`) by default; it is **not** a `DMAWRITE` write-ack (the firmware source sends no such response). Use `--dma-ack-mode send-only` only as an explicit opt-in (a JSON warning event is emitted) — it measures host/socket-buffer latency, not device-side completion.
+
 ## Which one should you use?
 
 - Use `c64_health_check` or `u64_health_check.py` when you want a fast answer.
 - Use `vivipulse` when you want ViviPi's shared config, scheduling rules, and artifacts.
 - Use `u64_connection_test.py` when you want the most direct control over one host.
+- Use `u64_dma_rest_benchmark.py` when you want a deterministic, JSON-defined comparison of REST vs DMA write transports.
 
 ## Full help: `u64_connection_test.py`
 
