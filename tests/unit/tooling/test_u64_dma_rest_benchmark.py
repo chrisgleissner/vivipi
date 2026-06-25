@@ -178,11 +178,15 @@ def test_parser_parses_all_generic_options():
 def test_help_contains_required_option_names():
     module = load_module()
     help_text = module.build_parser().format_help()
+    # Python 3.13 stopped repeating the metavar for each option string, so the
+    # options section renders "-H, --host HOST" instead of the pre-3.13
+    # "-H HOST, --host HOST". Assert on the long form plus metavar (stable
+    # across versions) and the short flags separately.
     for token in [
-        "-H HOST, --host HOST",
-        "-d DELAY_MS, --delay-ms DELAY_MS",
-        "-n LOG_EVERY, --log-every LOG_EVERY",
-        "-P FTP_PASS, --ftp-pass FTP_PASS",
+        "--host HOST",
+        "--delay-ms DELAY_MS",
+        "--log-every LOG_EVERY",
+        "--ftp-pass FTP_PASS",
         "--network-password",
         "--probes",
         "--schedule",
@@ -190,6 +194,8 @@ def test_help_contains_required_option_names():
         "--duration-s",
     ]:
         assert token in help_text, f"missing help text: {token}"
+    for short_flag in ["-H", "-d", "-n", "-P"]:
+        assert short_flag in help_text, f"missing short flag: {short_flag}"
 
 
 def test_help_examples_are_generic():
