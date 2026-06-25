@@ -40,6 +40,7 @@ REUWRITE_MAX_DATA = 65532  # 65535 - 3 offset bytes
 REST_PUT_MAX_BYTES = 128
 C64_ADDR_MAX = 0xFFFF
 C64_ADDR_SPACE_MAX = 0x10000
+REU_ADDR_SPACE_MAX = 0x1000000  # 24-bit REU offset space ($000000-$FFFFFF)
 
 DMA_DEFAULT_TIMEOUT_S = 2.0
 DMA_RECV_TIMEOUT_S = 1.0
@@ -319,8 +320,15 @@ def _validate_template_limits(template: WriteTemplate) -> None:
             f"writes[{template.index}] bytes={template.bytes_count} exceeds single-frame max {max_data}; "
             "add an explicit split policy"
         )
-    if template.space == SPACE_C64 and template.address + template.bytes_count > C64_ADDR_SPACE_MAX:
-        raise ValueError(f"writes[{template.index}] write range exceeds $FFFF")
+    addr_space_max = REU_ADDR_SPACE_MAX if template.space == SPACE_REU else C64_ADDR_SPACE_MAX
+    limit_label = "$FFFFFF" if template.space == SPACE_REU else "$FFFF"
+    # When bank_cycle is set those entries are the bases actually written each
+    # unit (the static address is unused); otherwise the static address applies.
+    # Every base spans up to bytes_count, so check each against the space limit.
+    base_addresses = template.bank_cycle or (template.address,)
+    for base in base_addresses:
+        if base + template.bytes_count > addr_space_max:
+            raise ValueError(f"writes[{template.index}] write range exceeds {limit_label} at ${base:X}")
 
 
 def parse_traffic_profile(raw: Any) -> TrafficProfile:
@@ -1477,8 +1485,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-H", "--host", default=DEFAULT_HOST, help="Target host or IP")
     parser.add_argument("-d", "--delay-ms", type=int, default=DEFAULT_DELAY_MS, help="Delay between writes in milliseconds")
     parser.add_argument("-n", "--log-every", type=int, default=DEFAULT_LOG_EVERY, help="Log every Nth request (JSONL always emits all requests)")
-    parser.add_argument("-P", "--ftp-pass", default=FTP_PASS, help="Legacy alias for the shared device network password.")
-    parser.add_argument("--network-password", default=NETWORK_PASSWORD, help="Shared device network password used for REST X-Password and DMA 0xFF1F authentication.")
+    parser.add_argument("-P", "--ftp-pass", default=None, help="Legacy alias for the shared device network password.")
+    parser.add_argument("--network-password", default=None, help="Shared device network password used for REST X-Password and DMA 0xFF1F authentication.")
     parser.add_argument("--http-port", type=int, default=DEFAULT_HTTP_PORT, help="REST HTTP port")
     parser.add_argument("--dma-port", type=int, default=DEFAULT_DMA_PORT, help="TCP/64 socket-DMA port")
     parser.add_argument("-v", "--verbose", action="store_true", help="Increase stderr diagnostics.")
@@ -1502,6 +1510,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rounds", type=parse_positive_int("--rounds"), default=1, help=argparse.SUPPRESS)
     parser.epilog = epilog_text() + "\n" + SAFETY_TEXT
     return parser
+
+
+def _resolve_network_password(args: argparse.Namespace) -> str:
+    # Precedence: explicit --network-password (including an empty string to clear
+    # an env-derived secret) > explicit --ftp-pass alias > env NETWORK_PASSWORD >
+    # env FTP_PASS > "". argparse leaves un-passed flags as None, which lets us
+    # distinguish "not passed" from "passed as empty".
+    if args.network_password is not None:
+        return args.network_password
+    if args.ftp_pass is not None:
+        return args.ftp_pass
+    return NETWORK_PASSWORD or FTP_PASS
 
 
 def _resolve_traffic_config_path(args: argparse.Namespace) -> Path:
@@ -1536,7 +1556,7 @@ def build_context(args: argparse.Namespace, profile: TrafficProfile, emit: Calla
         host=args.host,
         http_port=args.http_port,
         dma_port=args.dma_port,
-        network_password=args.network_password or args.ftp_pass,
+        network_password=_resolve_network_password(args),
         rest_method=args.rest_method,
         http_connection=args.http_connection,
         dma_ack_mode=args.dma_ack_mode,

@@ -631,6 +631,24 @@ def test_rest_executor_inherits_password_from_ftp_pass_alias():
     assert ctx.network_password == "legacy"
 
 
+def test_explicit_network_password_takes_precedence_over_ftp_pass_alias():
+    module = load_module()
+    profile = _load_default_profile(module)
+    args = module.build_parser().parse_args(["--network-password", "primary", "-P", "legacy"])
+    ctx = module.build_context(args, profile, emit=lambda e: None)
+    assert ctx.network_password == "primary"
+
+
+def test_explicit_empty_network_password_clears_secret_without_ftp_fallback():
+    module = load_module()
+    profile = _load_default_profile(module)
+    # An explicit empty --network-password must clear the credential rather than
+    # silently falling back to the legacy --ftp-pass alias.
+    args = module.build_parser().parse_args(["--network-password", "", "-P", "legacy"])
+    ctx = module.build_context(args, profile, emit=lambda e: None)
+    assert ctx.network_password == ""
+
+
 # --------------------------------------------------------------------------- #
 # 18-23. DMA framing and auth
 # --------------------------------------------------------------------------- #
@@ -897,6 +915,53 @@ def test_address_range_validation_rejects_writes_past_ffff():
     )
     with pytest.raises(ValueError, match="write range exceeds"):
         module.validate_rest_payload(logical, b"\x00" * 10, method="post")
+
+
+def _load_single_write_profile(module, tmp_path, write):
+    cfg = {
+        "version": 1,
+        "default": "x",
+        "traffic": [
+            {
+                "name": "x",
+                "unit": "iteration",
+                "iterations": 1,
+                "pacing": "none",
+                "payload_pattern": "zero",
+                "seed": 1,
+                "writes": [write],
+            }
+        ],
+    }
+    path = tmp_path / "t.json"
+    path.write_text(json.dumps(cfg))
+    return module.load_traffic_config(path).select("x")
+
+
+def test_loader_rejects_c64_bank_cycle_entry_past_ffff(tmp_path):
+    module = load_module()
+    # The static address fits, but a cycled bank base plus bytes_count overflows.
+    with pytest.raises(ValueError, match=r"write range exceeds \$FFFF"):
+        _load_single_write_profile(module, tmp_path, {
+            "label": "cycle",
+            "space": "c64",
+            "address": "0400",
+            "bytes": 64,
+            "write_kind": "dmawrite",
+            "bank_cycle": ["0400", "FFE0"],  # FFE0 + 64 = 0x10020 > 0xFFFF
+        })
+
+
+def test_loader_rejects_reu_write_past_ffffff(tmp_path):
+    module = load_module()
+    with pytest.raises(ValueError, match=r"write range exceeds \$FFFFFF"):
+        _load_single_write_profile(module, tmp_path, {
+            "label": "reu",
+            "space": "reu",
+            "address": "FFFFF0",  # FFFFF0 + 64 = 0x1000030 > 0xFFFFFF
+            "bytes": 64,
+            "write_kind": "reuwrite",
+        })
 
 
 # --------------------------------------------------------------------------- #
