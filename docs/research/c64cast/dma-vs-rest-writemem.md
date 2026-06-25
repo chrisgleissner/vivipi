@@ -4,26 +4,26 @@
 TCP/64 socket-DMA write path? This document benchmarks both transports on the c64cast video-streaming
 workload, against a live Ultimate 64, and grounds the result in the firmware source. See https://github.com/GideonZ/1541ultimate/issues/710 for more details.
 
-**Verdict:** on the current firmware, REST-only would drop c64cast from **~36–46 FPS to ~7.5 FPS** for its
+**Verdict:** on the current firmware, REST-only would drop c64cast from **~36–46 FPS to ~7.4 FPS** for its
 default display mode — well below its 20–30 FPS target. The gap is **not** the memory copy (REST and DMA
 reach the identical `C64_DMA_RAW_WRITE` routine); it is the HTTP front door. Removing socket-DMA would break
 c64cast video streaming **unless** the HTTP server first gains keep-alive and a non-disk write path (§5).
 
 ---
 
-## TL;DR — live `u64` (192.168.1.13), 60 s per phase, fresh runs
+## TL;DR — live `u64` (192.168.1.13), 60 s per phase, fresh runs (re-verified 2026-06-25)
 
 Default c64cast mode (`hires_edges`, mono, 2 writes/frame = bitmap `$2000` 8000 B + screen `$0400` 1000 B = **9000 B/frame**):
 
 | Transport (device-confirmed write) | req/s | payload | median/write | p99/write | **achievable FPS** |
 | --- | --- | --- | --- | --- | --- |
-| REST POST (close — the only mode the firmware allows) | 15.0 | 67 KB/s | 68.2 ms | 94.1 ms | **7.5** |
-| socket-DMA `0xFF06` + `0xFF76` barrier | 72.2 | 325 KB/s | 16.9 ms | 24.7 ms | **36.1** |
-| socket-DMA fire-and-forget (what c64cast actually does, throughput only) | 91.9 | 413 KB/s | n/a* | n/a* | **45.9** |
+| REST POST (close — the only mode the firmware allows) | 14.9 | 67 KB/s | 68.5 ms | 99.9 ms | **7.4** |
+| socket-DMA `0xFF06` + `0xFF76` barrier | 72.7 | 327 KB/s | 16.9 ms | 24.3 ms | **36.4** |
+| socket-DMA fire-and-forget (what c64cast actually does, throughput only) | 92.2 | 415 KB/s | n/a* | n/a* | **46.1** |
 
-DMA is **4.8×** faster than REST device-confirmed, **6.1×** faster fire-and-forget. The result reproduces on
-the heavier multicolor `mhires` mode (3 writes/frame, 10000 B): REST **5.2 FPS** vs DMA **29.0 / 39.1 FPS**
-(5.6× / 7.5×). c64cast targets 20 FPS with audio, 25–30 FPS video-only — **DMA clears it, REST does not.**
+DMA is **4.9×** faster than REST device-confirmed, **6.2×** faster fire-and-forget. The result reproduces on
+the heavier multicolor `mhires` mode (3 writes/frame, 10000 B): REST **5.1 FPS** vs DMA **29.2 / 38.9 FPS**
+(5.7× / 7.6×). c64cast targets 20 FPS with audio, 25–30 FPS video-only — **DMA clears it, REST does not.**
 
 \* fire-and-forget latency is host socket-buffer time, **not** device completion; only its sustained
 throughput is meaningful (see §2.1).
@@ -106,8 +106,9 @@ Honest caveats baked into the profiles' metadata:
 ./scripts/u64_dma_rest_benchmark.py -H u64 --traffic c64cast-hires --duration-s 60 --dma-ack-mode barrier
 # c64cast's real fire-and-forget DMA throughput
 ./scripts/u64_dma_rest_benchmark.py -H u64 --traffic c64cast-hires --duration-s 60 --probes dma --dma-ack-mode send-only
-# heavier multicolor variant
+# heavier multicolor variant (REST + DMA device-confirmed, then fire-and-forget)
 ./scripts/u64_dma_rest_benchmark.py -H u64 --traffic c64cast --duration-s 60 --dma-ack-mode barrier
+./scripts/u64_dma_rest_benchmark.py -H u64 --traffic c64cast --duration-s 60 --probes dma --dma-ack-mode send-only
 ```
 
 Artifacts: `artifacts/u64_dma_rest_benchmark/{hires,mhires}-{barrier,sendonly}.{jsonl,report.json}`. Every
@@ -119,12 +120,12 @@ run finished `ok:true` with **zero** failed requests and valid JSONL.
 
 | Profile (B/frame) | Transport | req/s | payload B/s | FPS = payload ÷ B/frame | × vs REST |
 | --- | --- | --- | --- | --- | --- |
-| hires (9000) | REST POST close | 15.0 | 67,498 | **7.5** | 1.0 |
-| hires (9000) | DMA barrier | 72.2 | 325,115 | **36.1** | 4.8× |
-| hires (9000) | DMA send-only | 91.9 | 413,420 | **45.9** | 6.1× |
-| mhires (10000) | REST POST close | 15.7 | 52,199 | **5.2** | 1.0 |
-| mhires (10000) | DMA barrier | 87.0 | 289,865 | **29.0** | 5.6× |
-| mhires (10000) | DMA send-only | 117.2 | 390,515 | **39.1** | 7.5× |
+| hires (9000) | REST POST close | 14.9 | 67,025 | **7.4** | 1.0 |
+| hires (9000) | DMA barrier | 72.7 | 327,162 | **36.4** | 4.9× |
+| hires (9000) | DMA send-only | 92.2 | 415,007 | **46.1** | 6.2× |
+| mhires (10000) | REST POST close | 15.5 | 51,440 | **5.1** | 1.0 |
+| mhires (10000) | DMA barrier | 87.5 | 291,797 | **29.2** | 5.7× |
+| mhires (10000) | DMA send-only | 116.7 | 388,923 | **38.9** | 7.6× |
 
 REST is **connection-bound at ~15 writes/s regardless of payload size or profile** — the tell that the
 bottleneck is per-request HTTP setup, not the memory copy.
@@ -133,9 +134,9 @@ bottleneck is per-request HTTP setup, not the memory copy.
 
 | Write | Bytes | DMA median | REST median | REST − DMA (HTTP front-door tax) |
 | --- | --- | --- | --- | --- |
-| screen `$0400` | 1000 | 5.5 ms | 54.8 ms | **~49 ms** |
-| color `$D800` | 1000 | 5.6 ms | 55.1 ms | **~50 ms** |
-| bitmap `$2000` | 8000 | 19.0 ms | 73.5 ms | **~55 ms** |
+| screen `$0400` | 1000 | 5.6 ms | 56.0 ms | **~50 ms** |
+| color `$D800` | 1000 | 5.5 ms | 55.6 ms | **~50 ms** |
+| bitmap `$2000` | 8000 | 19.4 ms | 74.4 ms | **~55 ms** |
 
 The shared device-side cost shows up cleanly: a 1 KB write is ~5.5 ms (stop/resume + small memcpy), an 8 KB
 write is ~19 ms (same stop/resume + a larger FPGA-shadow memcpy). **REST adds a roughly flat ~50 ms per
@@ -204,4 +205,7 @@ around it* favors the persistent, parse-free DMA socket.
   listeners that decode every frame the way the firmware does, asserting request counts, payload bytes,
   addresses, methods, and that latency is reported in milliseconds (a mutation test confirms it catches the
   seconds-bug). Numbers here were independently reproduced across two profiles and match prior `mhires`
-  measurements.
+  measurements. They were **re-verified on 2026-06-25** (branch `feat/dma-rest-write-mem-benchmark`,
+  PR #32, four fresh 60 s phases) after a round of review-driven tool fixes; those fixes do not touch this
+  measurement path (REST runs in `close` mode, both profiles carry `inter_write_delay_ms = 0`, and the
+  device has no network password), so the re-run reproduced every figure within ~1–2 %.
