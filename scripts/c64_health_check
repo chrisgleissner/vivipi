@@ -6,6 +6,14 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 VENV_DIR="${VENV_DIR:-$ROOT_DIR/.venv}"
 
+# Pin the repository root for downstream secret/config resolution so the
+# probes work regardless of the caller's working directory. Without this,
+# vivipi.core.secrets.load_network_secrets falls back to a CWD-based walk for
+# pyproject.toml and silently fails to find .env.local / config/secrets.local
+# when the wrapper is invoked from outside the repo, which leaves the DMA
+# (and FTP/Telnet) probes unauthenticated.
+export VIVIPI_REPO_ROOT="$ROOT_DIR"
+
 if [[ -x "$VENV_DIR/bin/python" ]]; then
     PYTHON="$VENV_DIR/bin/python"
 else
