@@ -171,6 +171,19 @@ def test_http_incomplete_mode_reports_unexpected_failure(monkeypatch):
     assert outcome.result == "FAIL" and "boom" in outcome.detail
 
 
+def test_http_incomplete_mode_reports_refused_connect_as_failure(monkeypatch):
+    # A refused connect is not a mid-abort reset, so it is surfaced as FAIL - the
+    # signal we want when the listener has stopped accepting (the wedge this probe provokes).
+    runtime = load_runtime()
+    module = load_http()
+    calls = []
+    _patch_abort_socket(monkeypatch, module, _FakeAbortSocket(calls, connect_error=ConnectionRefusedError()))
+
+    outcome = module.run_probe(make_settings(runtime), runtime.ProbeCorrectness.INCOMPLETE)
+
+    assert outcome.result == "FAIL"
+
+
 def test_http_request_adds_x_password_when_configured(monkeypatch):
     runtime = load_runtime()
     module = load_http()

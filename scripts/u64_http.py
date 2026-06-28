@@ -363,8 +363,12 @@ def run_probe_incomplete(settings: RuntimeSettings) -> ProbeOutcome:
         return ProbeOutcome("OK", "incomplete sent=partial close=RST", elapsed_ms)
     except Exception as error:
         elapsed_ms = (time.perf_counter_ns() - started_at) / 1_000_000.0
-        # A refused/timed-out connect is itself a sign the listener is no longer
-        # accepting (the wedge we are provoking); treat it as an expected abort.
+        # A peer reset seen mid-abort (ECONNRESET / broken pipe) just means the
+        # server tore the connection down before our own close; from our side the
+        # abort still happened, so report OK. Anything else - notably a refused or
+        # timed-out connect() - means we could not open the connection at all;
+        # report FAIL, which is the signal we want (the listener has stopped
+        # accepting, i.e. the very wedge this probe provokes).
         if is_expected_incomplete_disconnect(error):
             return ProbeOutcome("OK", "incomplete expected_disconnect", elapsed_ms)
         return ProbeOutcome("FAIL", f"http incomplete failed: {error}", elapsed_ms)
