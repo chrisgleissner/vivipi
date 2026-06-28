@@ -126,7 +126,7 @@ def test_global_surface_and_mode_apply_with_fallbacks():
         "dma": module.ProbeCorrectness.COMPLETE,
         "telnet": module.ProbeCorrectness.INCOMPLETE,
         "ftp": module.ProbeCorrectness.INVALID,
-        "http": module.ProbeCorrectness.COMPLETE,
+        "http": module.ProbeCorrectness.INCOMPLETE,
         "modem": module.ProbeCorrectness.COMPLETE,
     }
 
