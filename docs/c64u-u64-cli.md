@@ -100,7 +100,7 @@ Useful flags:
 - **Probe set:** `--probes ping,ident,dma,telnet,ftp,http[,modem]`
 - **Concurrency:** `--schedule sequential|concurrent`, `--runners 4`
 - **Protocol depth:** `--surface smoke|read|readwrite`, `--http-surface read`, `--ftp-surface readwrite`
-- **Intentional degradation:** `--mode open|incomplete|invalid`, `--ftp-mode invalid`, `--telnet-mode incomplete`
+- **Intentional degradation:** `--mode open|incomplete|invalid`, `--ftp-mode invalid`, `--telnet-mode incomplete`, `--http-mode incomplete`
 - **Streams:** `--stream`, `--stream audio`, `--stream video`
 - **Auth and endpoints:** `-H u64`, `--network-password ...`, `--http-port ...`, `--ftp-port ...`, `--telnet-port ...`
 
@@ -111,7 +111,17 @@ Quick recipes:
 ./scripts/u64_connection_test.py --profile soak -H c64u --probes ping,ident,dma,telnet,ftp,http --stream audio
 ./scripts/u64_connection_test.py --profile soak -H u64 --surface read --http-surface readwrite
 ./scripts/u64_connection_test.py --schedule concurrent --runners 2 --ftp-mode invalid --telnet-mode incomplete -H u64
+# Force the HTTP listener's connection-error teardown path (client-slot exhaustion):
+# each http probe opens a connection, sends a partial request, then aborts with a TCP RST.
+./scripts/u64_connection_test.py --probes http --http-mode incomplete --schedule concurrent --runners 5 -H u64
+./scripts/u64_connection_test.py --profile stress --http-mode incomplete -H u64
 ```
+
+`--http-mode incomplete` makes the HTTP probe drive the server's `recv()<0` path
+(an established connection that resets mid-request) instead of issuing clean
+requests. A server that does not free the client slot on a read error will exhaust
+its connection table after a handful of aborts and stop accepting connections; a
+correct server reclaims the slot and stays responsive.
 
 If you set `--probes` without `--stream`, the profile-default stream checks are disabled. Add `--stream` explicitly when you want stream verification.
 

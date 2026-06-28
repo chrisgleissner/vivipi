@@ -87,7 +87,7 @@ PROBE_CORRECTNESS_CHOICES = {
     "dma": (ProbeCorrectness.COMPLETE,),
     "telnet": (ProbeCorrectness.COMPLETE, ProbeCorrectness.OPEN, ProbeCorrectness.INCOMPLETE),
     "ftp": (ProbeCorrectness.COMPLETE, ProbeCorrectness.OPEN, ProbeCorrectness.INCOMPLETE, ProbeCorrectness.INVALID),
-    "http": (ProbeCorrectness.COMPLETE,),
+    "http": (ProbeCorrectness.COMPLETE, ProbeCorrectness.INCOMPLETE),
     "modem": (ProbeCorrectness.COMPLETE,),
 }
 CORRECTNESS_DEGRADATION_HELP = (
