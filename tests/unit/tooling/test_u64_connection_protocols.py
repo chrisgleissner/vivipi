@@ -87,6 +87,103 @@ def test_http_normal_mode_requests_connection_close_and_reads_body(monkeypatch):
     assert calls[-1] == "close"
 
 
+class _FakeAbortSocket:
+    """Records the calls made by the incomplete (RST abort) HTTP probe."""
+
+    def __init__(self, calls, *, connect_error=None, sendall_error=None):
+        self.calls = calls
+        self._connect_error = connect_error
+        self._sendall_error = sendall_error
+
+    def settimeout(self, timeout):
+        self.calls.append(("settimeout", timeout))
+
+    def connect(self, address):
+        self.calls.append(("connect", address))
+        if self._connect_error is not None:
+            raise self._connect_error
+
+    def sendall(self, data):
+        self.calls.append(("sendall", data))
+        if self._sendall_error is not None:
+            raise self._sendall_error
+
+    def setsockopt(self, level, optname, value):
+        self.calls.append(("setsockopt", level, optname, value))
+
+    def close(self):
+        self.calls.append("close")
+
+
+def _patch_abort_socket(monkeypatch, module, fake):
+    monkeypatch.setattr(module.socket, "socket", lambda family, type: fake)
+
+
+def test_http_incomplete_mode_sends_partial_request_then_rst(monkeypatch):
+    runtime = load_runtime()
+    module = load_http()
+    calls = []
+    _patch_abort_socket(monkeypatch, module, _FakeAbortSocket(calls))
+
+    outcome = module.run_probe(make_settings(runtime), runtime.ProbeCorrectness.INCOMPLETE)
+
+    assert outcome.result == "OK"
+    assert "incomplete" in outcome.detail and "RST" in outcome.detail
+    sent = next(value for name, value in ((c[0], c[1]) for c in calls if c[0] == "sendall"))
+    assert b"GET /v1/version" in sent and not sent.endswith(b"\r\n\r\n")  # partial, never terminated
+    linger = next(c for c in calls if c[0] == "setsockopt")
+    assert linger[1] == module.socket.SOL_SOCKET and linger[2] == module.socket.SO_LINGER
+    assert calls[-1] == "close"  # the RST-emitting close always runs
+
+
+def test_http_incomplete_mode_tolerates_send_error(monkeypatch):
+    runtime = load_runtime()
+    module = load_http()
+    calls = []
+    _patch_abort_socket(monkeypatch, module, _FakeAbortSocket(calls, sendall_error=BrokenPipeError()))
+
+    outcome = module.run_probe(make_settings(runtime), runtime.ProbeCorrectness.INCOMPLETE)
+
+    assert outcome.result == "OK"  # a send failure mid-abort is still an abort
+    assert any(c[0] == "setsockopt" for c in calls) and calls[-1] == "close"
+
+
+def test_http_incomplete_mode_reports_expected_disconnect(monkeypatch):
+    runtime = load_runtime()
+    module = load_http()
+    calls = []
+    _patch_abort_socket(monkeypatch, module, _FakeAbortSocket(calls, connect_error=ConnectionResetError()))
+
+    outcome = module.run_probe(make_settings(runtime), runtime.ProbeCorrectness.INCOMPLETE)
+
+    assert outcome.result == "OK" and "expected_disconnect" in outcome.detail
+    assert calls[-1] == "close"
+
+
+def test_http_incomplete_mode_reports_unexpected_failure(monkeypatch):
+    runtime = load_runtime()
+    module = load_http()
+    calls = []
+    _patch_abort_socket(monkeypatch, module, _FakeAbortSocket(calls, connect_error=RuntimeError("boom")))
+
+    outcome = module.run_probe(make_settings(runtime), runtime.ProbeCorrectness.INCOMPLETE)
+
+    assert outcome.result == "FAIL" and "boom" in outcome.detail
+
+
+def test_http_incomplete_mode_reports_refused_connect_as_failure(monkeypatch):
+    # A refused connect is not a mid-abort reset, so it is surfaced as FAIL - the
+    # signal we want when the listener has stopped accepting (the wedge this probe provokes).
+    runtime = load_runtime()
+    module = load_http()
+    calls = []
+    _patch_abort_socket(monkeypatch, module, _FakeAbortSocket(calls, connect_error=ConnectionRefusedError()))
+
+    outcome = module.run_probe(make_settings(runtime), runtime.ProbeCorrectness.INCOMPLETE)
+
+    assert outcome.result == "FAIL"
+
+
 def test_http_request_adds_x_password_when_configured(monkeypatch):
     runtime = load_runtime()
     module = load_http()

@@ -3,16 +3,20 @@ from __future__ import annotations
 import http.client
 import json
 import re
+import socket
+import struct
 import time
 import urllib.parse
 from contextlib import nullcontext
 from typing import Any
 
 from u64_connection_runtime import (
+    ProbeCorrectness,
     ProbeExecutionContext,
     ProbeOutcome,
     ProbeSurface,
     RuntimeSettings,
+    is_expected_incomplete_disconnect,
     run_surface_operation,
     select_operation_index,
     surface_detail,
@@ -327,7 +331,59 @@ def surface_operations(
     return operations
 
 
+# A syntactically valid request *prefix* that is never terminated (no blank
+# line), so the server accepts the connection and starts reading, then observes
+# the abort on a subsequent read instead of a clean request.
+HTTP_INCOMPLETE_PARTIAL_REQUEST = b"GET /v1/version HTTP/1.1\r\nHost: u64\r\n"
+
+
+def run_probe_incomplete(settings: RuntimeSettings) -> ProbeOutcome:
+    """Hostile HTTP probe: open a connection, send a partial (never-terminated)
+    request, then abort with a TCP RST (SO_LINGER 0).
+
+    This drives the server's recv() on an already-accepted connection to return
+    an error (ECONNRESET, i.e. < 0) rather than a clean EOF, exercising its
+    read-error teardown path under connection churn. A correct server frees the
+    client slot on this path; one that does not will exhaust its connection
+    table after a handful of aborts and stop accepting new connections.
+    """
+    started_at = time.perf_counter_ns()
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.settimeout(3)
+        sock.connect((settings.host, settings.http_port))
+        try:
+            sock.sendall(HTTP_INCOMPLETE_PARTIAL_REQUEST)
+        except OSError:
+            pass  # peer may have already torn down; the abort below still applies
+        # SO_LINGER {on=1, linger=0}: close() emits a TCP RST instead of a FIN,
+        # so the peer's recv() returns an error rather than a clean EOF.
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        elapsed_ms = (time.perf_counter_ns() - started_at) / 1_000_000.0
+        return ProbeOutcome("OK", "incomplete sent=partial close=RST", elapsed_ms)
+    except Exception as error:
+        elapsed_ms = (time.perf_counter_ns() - started_at) / 1_000_000.0
+        # A peer reset seen mid-abort (ECONNRESET / broken pipe) just means the
+        # server tore the connection down before our own close; from our side the
+        # abort still happened, so report OK. Anything else - notably a refused or
+        # timed-out connect() - means we could not open the connection at all;
+        # report FAIL, which is the signal we want (the listener has stopped
+        # accepting, i.e. the very wedge this probe provokes).
+        if is_expected_incomplete_disconnect(error):
+            return ProbeOutcome("OK", "incomplete expected_disconnect", elapsed_ms)
+        return ProbeOutcome("FAIL", f"http incomplete failed: {error}", elapsed_ms)
+    finally:
+        try:
+            sock.close()  # with SO_LINGER {1,0} set above, this emits the RST
+        except OSError:
+            pass
+
+
 def run_probe(settings: RuntimeSettings, correctness, *, context: ProbeExecutionContext | None = None) -> ProbeOutcome:
+    if correctness == ProbeCorrectness.INCOMPLETE:
+        # Surface-independent: a partial-request + RST abort that churns the
+        # server's connection-error path regardless of read/readwrite surface.
+        return run_probe_incomplete(settings)
     if context is not None:
         operations = surface_operations(
             context.surface,
