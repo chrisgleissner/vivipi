@@ -196,23 +196,27 @@ def attack_r1(host: str, port: int) -> None:
     # Path 1: unknown query param on a valid endpoint.
     try:
         c = http.client.HTTPConnection(host, port, timeout=4)
-        c.request("GET", f"/v1/version?{long_name}=1", headers={"Connection": "close"})
-        r = c.getresponse()
-        r.read()
-        print(f"  GET long-query returned status={r.status}", flush=True)
-        c.close()
+        try:
+            c.request("GET", f"/v1/version?{long_name}=1", headers={"Connection": "close"})
+            r = c.getresponse()
+            r.read()
+            print(f"  GET long-query returned status={r.status}", flush=True)
+        finally:
+            c.close()
     except Exception as e:  # noqa: BLE001
         print(f"  GET long-query raised {type(e).__name__}:{e}", flush=True)
     # Path 2: POST /v1/configs with an oversized invalid category key.
     try:
         body = ('{"' + long_name + '":{}}').encode()
         c = http.client.HTTPConnection(host, port, timeout=4)
-        c.request("POST", "/v1/configs", body=body,
-                  headers={"Connection": "close", "Content-Type": "application/json"})
-        r = c.getresponse()
-        r.read()
-        print(f"  POST long-key returned status={r.status}", flush=True)
-        c.close()
+        try:
+            c.request("POST", "/v1/configs", body=body,
+                      headers={"Connection": "close", "Content-Type": "application/json"})
+            r = c.getresponse()
+            r.read()
+            print(f"  POST long-key returned status={r.status}", flush=True)
+        finally:
+            c.close()
     except Exception as e:  # noqa: BLE001
         print(f"  POST long-key raised {type(e).__name__}:{e}", flush=True)
 

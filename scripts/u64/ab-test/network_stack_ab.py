@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import http.client
 import json
+import math
 import os
 import socket
 import struct
@@ -96,7 +97,6 @@ class ProbeStat:
         if not self.latencies_ms:
             return 0.0
         s = sorted(self.latencies_ms)
-        import math
         rank = max(1, math.ceil(p / 100.0 * len(s)))
         return round(s[rank - 1], 1)
 
@@ -385,8 +385,11 @@ def main(argv: list[str]) -> int:
     md_path = out_dir / f"{args.label}.md"
 
     stop = threading.Event()
+    # Separate counters per flood-worker type so the summary never conflates them.
     churn_count = [0]
     h1_count = [0]
+    malformed_count = [0]
+    tcp_rst_count = [0]
     churn_lock = threading.Lock()
 
     def churn_worker():
@@ -435,7 +438,7 @@ def main(argv: list[str]) -> int:
             except OSError:
                 pass
             with churn_lock:
-                h1_count[0] += 1
+                tcp_rst_count[0] += 1
 
     def malformed_worker(wid):
         n = 0
@@ -452,7 +455,7 @@ def main(argv: list[str]) -> int:
                 pass
             n += 1
             with churn_lock:
-                h1_count[0] += 1
+                malformed_count[0] += 1
 
     stats: dict[str, ProbeStat] = {n: ProbeStat(n) for n in
                                    ("rest_version", "rest_info", "cfg_put_sid", "cfg_post_batch", "ftp", "telnet", "ident", "dma")}
@@ -529,6 +532,8 @@ def main(argv: list[str]) -> int:
     with churn_lock:
         total_churn = churn_count[0]
         total_h1 = h1_count[0]
+        total_malformed = malformed_count[0]
+        total_tcp_rst = tcp_rst_count[0]
 
     # final health suite (fresh)
     final = {}
@@ -556,6 +561,8 @@ def main(argv: list[str]) -> int:
         "meta": meta, "ended": ts(), "elapsed_s": round(time.time() - t0, 1),
         "total_churn_requests": total_churn,
         "total_h1_requests": total_h1,
+        "total_malformed_requests": total_malformed,
+        "total_tcp_rst_requests": total_tcp_rst,
         "time_to_first_rest_failure_s": first_rest_fail_t[0],
         "churn_to_first_rest_failure": first_rest_fail_churn[0],
         "verdict": verdict,
@@ -571,8 +578,10 @@ def main(argv: list[str]) -> int:
              f"- Host: `{args.host}`  ", f"- Firmware commit: `{args.fw_commit or 'n/a'}`  ",
              f"- httpd submodule: `{args.httpd_commit or 'n/a'}`  ",
              f"- Started: {started_wall}  Ended: {summary['ended']}  Elapsed: {summary['elapsed_s']}s  ",
-             f"- Churn workers: {args.churn_workers}  Total churn (partial+RST) requests: **{total_churn}**  ",
+             f"- Churn workers: {args.churn_workers}  Total connection-churn (partial+abort) requests: **{total_churn}**  ",
              f"- H1 workers (40-header floods): {args.h1_workers}  Total H1 requests: **{total_h1}**  ",
+             f"- Malformed workers: {args.malformed_workers}  Total malformed requests: **{total_malformed}**  ",
+             f"- TCP-churn ports: `{args.tcp_churn_ports or 'none'}`  Total TCP connect+RST requests: **{total_tcp_rst}**  ",
              f"- Time to first REST failure: **{first_rest_fail_t[0]}**s  Churn count at first failure: **{first_rest_fail_churn[0]}**  ",
              f"- **Verdict: {verdict}**", "",
              "## Per-probe results", "",
