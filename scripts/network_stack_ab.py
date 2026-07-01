@@ -27,6 +27,7 @@ import http.client
 import json
 import os
 import socket
+import struct
 import sys
 import threading
 import time
@@ -38,7 +39,14 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import u64_http  # noqa: E402
-from u64_connection_runtime import RuntimeSettings  # noqa: E402
+import u64_ident  # noqa: E402
+import u64_raw64  # noqa: E402
+from u64_connection_runtime import (  # noqa: E402
+    ProbeCorrectness,
+    ProbeExecutionContext,
+    ProbeSurface,
+    RuntimeSettings,
+)
 
 
 def ts() -> str:
@@ -261,6 +269,37 @@ def probe_telnet(settings: RuntimeSettings, timeout: float):
                 pass
 
 
+def _smoke_ctx(protocol: str):
+    return ProbeExecutionContext(protocol=protocol, runner_id=1, iteration=1,
+                                 surface=ProbeSurface.SMOKE, state=None)
+
+
+def probe_ident(settings: RuntimeSettings, timeout: float):
+    """UDP identify listener on port 64."""
+    t0 = time.perf_counter_ns()
+    try:
+        outcome = u64_ident.run_probe(settings, ProbeCorrectness.COMPLETE, context=_smoke_ctx("ident"))
+        el = (time.perf_counter_ns() - t0) / 1e6
+        ok = outcome.result == "OK"
+        return ok, el, ("" if ok else "protocol"), f"ident {outcome.detail[:60]}"
+    except Exception as e:  # noqa: BLE001
+        el = (time.perf_counter_ns() - t0) / 1e6
+        return False, el, classify_error(e), f"ident {type(e).__name__}:{e}"
+
+
+def probe_dma(settings: RuntimeSettings, timeout: float):
+    """DMA-capable TCP command listener on port 64."""
+    t0 = time.perf_counter_ns()
+    try:
+        outcome = u64_raw64.run_probe(settings, ProbeCorrectness.COMPLETE, context=_smoke_ctx("dma"))
+        el = (time.perf_counter_ns() - t0) / 1e6
+        ok = outcome.result == "OK"
+        return ok, el, ("" if ok else "protocol"), f"dma {outcome.detail[:60]}"
+    except Exception as e:  # noqa: BLE001
+        el = (time.perf_counter_ns() - t0) / 1e6
+        return False, el, classify_error(e), f"dma {type(e).__name__}:{e}"
+
+
 REST_PROBES = ("rest_version", "rest_info", "cfg_put_sid", "cfg_post_batch")
 
 
@@ -274,10 +313,18 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--duration-s", type=float, default=600.0)
     ap.add_argument("--churn-workers", type=int, default=4,
                     help="HTTP incomplete-abort (partial request + RST) churn threads; 0 disables")
+    ap.add_argument("--h1-workers", type=int, default=0,
+                    help="threads flooding oversized (40-header) requests to exercise the header-field bound; 0 disables")
+    ap.add_argument("--malformed-workers", type=int, default=0,
+                    help="threads flooding a rotating mix of malformed requests (many-header, negative Content-Length, truncated %% escape); 0 disables")
+    ap.add_argument("--tcp-churn-ports", default="",
+                    help="comma-separated ports to hammer with connect+RST churn (e.g. 21,23,64) so every TCP listener is stressed")
     ap.add_argument("--health-interval-s", type=float, default=1.0)
     ap.add_argument("--post-every", type=int, default=5,
                     help="run the POST /v1/configs batch probe every Nth health cycle")
     ap.add_argument("--probe-timeout-s", type=float, default=4.0)
+    ap.add_argument("--telnet-timeout-s", type=float, default=10.0,
+                    help="Telnet runs at the lowest task priority, so allow a realistic client wait under heavy flood")
     ap.add_argument("--out-dir", default="./out/netstack-ab")
     ap.add_argument("--label", required=True, help="e.g. baseline-e7a642a5 / patched-78069d3f")
     ap.add_argument("--fw-commit", default=os.getenv("FW_COMMIT", ""))
@@ -298,6 +345,7 @@ def main(argv: list[str]) -> int:
 
     stop = threading.Event()
     churn_count = [0]
+    h1_count = [0]
     churn_lock = threading.Lock()
 
     def churn_worker():
@@ -306,8 +354,67 @@ def main(argv: list[str]) -> int:
             with churn_lock:
                 churn_count[0] += 1
 
+    def h1_worker():
+        req = b"GET /v1/version HTTP/1.1\r\nHost: x\r\n" + b"".join(
+            b"X-H%d: v\r\n" % i for i in range(40)) + b"\r\n"
+        while not stop.is_set():
+            try:
+                s = socket.create_connection((settings.host, settings.http_port), timeout=4)
+                try:
+                    s.sendall(req)
+                    s.recv(64)
+                finally:
+                    s.close()
+            except OSError:
+                pass
+            with churn_lock:
+                h1_count[0] += 1
+
+    # Rotating malformed requests: 40-header overflow (H1), negative
+    # Content-Length (H7), truncated %-escape in the URL (H8).
+    _mal_variants = [
+        b"GET /v1/version HTTP/1.1\r\nHost: x\r\n" + b"".join(b"X-H%d: v\r\n" % i for i in range(40)) + b"\r\n",
+        b"POST /v1/configs HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: -1\r\n\r\n{}",
+        b"GET /v1/version?x=%\r\n\r\n",
+        b"GET /v1/configs/Audio%20Mixer/%A HTTP/1.1\r\nHost: x\r\n\r\n",
+    ]
+
+    def tcp_rst_churn(port):
+        # Connect and abort with a TCP RST (SO_LINGER 0) in a tight loop, to
+        # churn the FTP/Telnet/DMA listeners' accept + per-connection teardown.
+        while not stop.is_set():
+            try:
+                s = socket.create_connection((settings.host, port), timeout=3)
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                try:
+                    s.sendall(b"\r\n")
+                except OSError:
+                    pass
+                s.close()
+            except OSError:
+                pass
+            with churn_lock:
+                h1_count[0] += 1
+
+    def malformed_worker(wid):
+        n = 0
+        while not stop.is_set():
+            req = _mal_variants[(wid + n) % len(_mal_variants)]
+            try:
+                s = socket.create_connection((settings.host, settings.http_port), timeout=4)
+                try:
+                    s.sendall(req)
+                    s.recv(64)
+                finally:
+                    s.close()
+            except OSError:
+                pass
+            n += 1
+            with churn_lock:
+                h1_count[0] += 1
+
     stats: dict[str, ProbeStat] = {n: ProbeStat(n) for n in
-                                   ("rest_version", "rest_info", "cfg_put_sid", "cfg_post_batch", "ftp", "telnet")}
+                                   ("rest_version", "rest_info", "cfg_put_sid", "cfg_post_batch", "ftp", "telnet", "ident", "dma")}
     first_rest_fail_t = [None]
     first_rest_fail_churn = [None]
     started_wall = ts()
@@ -320,13 +427,20 @@ def main(argv: list[str]) -> int:
 
     meta = {"label": args.label, "host": args.host, "started": started_wall,
             "duration_s": args.duration_s, "churn_workers": args.churn_workers,
+            "h1_workers": args.h1_workers, "malformed_workers": args.malformed_workers,
+            "tcp_churn_ports": args.tcp_churn_ports,
             "health_interval_s": args.health_interval_s, "post_every": args.post_every,
-            "probe_timeout_s": args.probe_timeout_s, "fw_commit": args.fw_commit,
+            "probe_timeout_s": args.probe_timeout_s, "telnet_timeout_s": args.telnet_timeout_s,
+            "fw_commit": args.fw_commit,
             "httpd_commit": args.httpd_commit, "test_script": "network_stack_ab.py"}
     emit({"type": "meta", **meta})
     print(f'{ts()} START {json.dumps(meta)}', flush=True)
 
     workers = [threading.Thread(target=churn_worker, daemon=True) for _ in range(args.churn_workers)]
+    workers += [threading.Thread(target=h1_worker, daemon=True) for _ in range(args.h1_workers)]
+    workers += [threading.Thread(target=malformed_worker, args=(w,), daemon=True) for w in range(args.malformed_workers)]
+    churn_ports = [int(p) for p in args.tcp_churn_ports.split(",") if p.strip()]
+    workers += [threading.Thread(target=tcp_rst_churn, args=(p,), daemon=True) for p in churn_ports]
     for w in workers:
         w.start()
 
@@ -355,7 +469,9 @@ def main(argv: list[str]) -> int:
             if args.post_every > 0 and cycle % args.post_every == 0:
                 run_probe("cfg_post_batch", lambda: probe_cfg_post_batch(settings, put_targets[(cycle // 2) % 2], args.probe_timeout_s))
             run_probe("ftp", lambda: probe_ftp(settings, args.probe_timeout_s))
-            run_probe("telnet", lambda: probe_telnet(settings, args.probe_timeout_s))
+            run_probe("telnet", lambda: probe_telnet(settings, args.telnet_timeout_s))
+            run_probe("ident", lambda: probe_ident(settings, args.probe_timeout_s))
+            run_probe("dma", lambda: probe_dma(settings, args.probe_timeout_s))
 
             if cycle % 10 == 0:
                 with churn_lock:
@@ -371,6 +487,7 @@ def main(argv: list[str]) -> int:
     time.sleep(0.5)
     with churn_lock:
         total_churn = churn_count[0]
+        total_h1 = h1_count[0]
 
     # final health suite (fresh)
     final = {}
@@ -379,18 +496,25 @@ def main(argv: list[str]) -> int:
                      ("cfg_put_sid", lambda: probe_cfg_put_readback(settings, "0 dB", args.probe_timeout_s)),
                      ("cfg_post_batch", lambda: probe_cfg_post_batch(settings, "+1 dB", args.probe_timeout_s)),
                      ("ftp", lambda: probe_ftp(settings, args.probe_timeout_s)),
-                     ("telnet", lambda: probe_telnet(settings, args.probe_timeout_s))):
+                     ("telnet", lambda: probe_telnet(settings, args.telnet_timeout_s)),
+                     ("ident", lambda: probe_ident(settings, args.probe_timeout_s)),
+                     ("dma", lambda: probe_dma(settings, args.probe_timeout_s))):
         ok, lat, kind, detail = fn()
         final[name] = {"ok": ok, "latency_ms": round(lat, 1), "kind": kind, "detail": detail}
         emit({"type": "final_probe", "name": name, **final[name]})
 
     rest_final_ok = all(final[n]["ok"] for n in REST_PROBES)
-    verdict = "HEALTHY" if rest_final_ok and first_rest_fail_t[0] is None else (
+    all_final_ok = all(v["ok"] for v in final.values())
+    any_probe_failed = any(s.fail > 0 for s in stats.values())
+    # HEALTHY only when every listener probe passed for the whole run and the
+    # post-run health suite is fully green. WEDGED if REST is down at the end.
+    verdict = "HEALTHY" if (all_final_ok and not any_probe_failed) else (
         "WEDGED" if not rest_final_ok else "DEGRADED")
 
     summary = {
         "meta": meta, "ended": ts(), "elapsed_s": round(time.time() - t0, 1),
         "total_churn_requests": total_churn,
+        "total_h1_requests": total_h1,
         "time_to_first_rest_failure_s": first_rest_fail_t[0],
         "churn_to_first_rest_failure": first_rest_fail_churn[0],
         "verdict": verdict,
@@ -407,6 +531,7 @@ def main(argv: list[str]) -> int:
              f"- httpd submodule: `{args.httpd_commit or 'n/a'}`  ",
              f"- Started: {started_wall}  Ended: {summary['ended']}  Elapsed: {summary['elapsed_s']}s  ",
              f"- Churn workers: {args.churn_workers}  Total churn (partial+RST) requests: **{total_churn}**  ",
+             f"- H1 workers (40-header floods): {args.h1_workers}  Total H1 requests: **{total_h1}**  ",
              f"- Time to first REST failure: **{first_rest_fail_t[0]}**s  Churn count at first failure: **{first_rest_fail_churn[0]}**  ",
              f"- **Verdict: {verdict}**", "",
              "## Per-probe results", "",
