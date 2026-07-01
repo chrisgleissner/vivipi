@@ -35,8 +35,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-if str(SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPT_DIR))
+# The shared u64_* probe modules live one level up, in scripts/u64/.
+U64_DIR = SCRIPT_DIR.parent
+if str(U64_DIR) not in sys.path:
+    sys.path.insert(0, str(U64_DIR))
 
 import u64_http  # noqa: E402
 import u64_ident  # noqa: E402
@@ -302,39 +304,78 @@ def probe_dma(settings: RuntimeSettings, timeout: float):
 
 REST_PROBES = ("rest_version", "rest_info", "cfg_put_sid", "cfg_post_batch")
 
+HOST = os.getenv("HOST", "u64")
+HTTP_PORT = int(os.getenv("HTTP_PORT", "80"))
+FTP_PORT = int(os.getenv("FTP_PORT", "21"))
+TELNET_PORT = int(os.getenv("TELNET_PORT", "23"))
+NETWORK_PASSWORD = os.getenv("NETWORK_PASSWORD", "")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Network-stack stability A/B harness for the Ultimate 64. Drives an HTTP "
+            "hostile-input flood (connection churn plus malformed requests) while "
+            "health-probing every network listener (REST, FTP, Telnet, DMA/TCP-64, "
+            "identify/UDP-64) and mutating SID volume via PUT and POST /v1/configs "
+            "with read-back. Run once against baseline (unpatched) firmware and once "
+            "against patched firmware with identical flags, then compare the two "
+            "<label>.json summaries."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "examples:\n"
+            "  # baseline (unpatched firmware)\n"
+            "  network_stack_ab.py -H u64 --churn-workers 4 --duration-s 120 \\\n"
+            "      --probe-timeout-s 4 --out-dir out --label baseline\n"
+            "  # patched (10-minute all-listener soak)\n"
+            "  network_stack_ab.py -H u64 --churn-workers 2 --malformed-workers 2 \\\n"
+            "      --duration-s 600 --probe-timeout-s 8 --telnet-timeout-s 10 \\\n"
+            "      --out-dir out --label patched\n"
+        ),
+    )
+    parser.add_argument("-H", "--host", default=HOST, help="Target host or IP")
+    parser.add_argument("--http-port", type=int, default=HTTP_PORT, help="REST HTTP port")
+    parser.add_argument("--ftp-port", type=int, default=FTP_PORT, help="FTP control port")
+    parser.add_argument("--telnet-port", type=int, default=TELNET_PORT, help="Telnet port")
+    parser.add_argument("--network-password", default=NETWORK_PASSWORD,
+                        help="Shared device network password used for HTTP, Telnet, FTP, and DMA.")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Increase stderr diagnostics.")
+    parser.add_argument("--duration-s", type=float, default=600.0, help="Total soak duration in seconds.")
+    parser.add_argument("--churn-workers", type=int, default=4,
+                        help="HTTP incomplete-abort (partial request + RST) churn threads; 0 disables.")
+    parser.add_argument("--h1-workers", type=int, default=0,
+                        help="Threads flooding oversized (40-header) requests to exercise the header-field bound; 0 disables.")
+    parser.add_argument("--malformed-workers", type=int, default=0,
+                        help="Threads flooding a rotating mix of malformed requests (many-header, negative Content-Length, truncated %% escape); 0 disables.")
+    parser.add_argument("--tcp-churn-ports", default="",
+                        help="Comma-separated ports to hammer with connect+RST churn (e.g. 21,23,64) so every TCP listener is stressed.")
+    parser.add_argument("--health-interval-s", type=float, default=1.0,
+                        help="Seconds between all-listener health sweeps.")
+    parser.add_argument("--post-every", type=int, default=5,
+                        help="Run the POST /v1/configs batch probe every Nth health cycle.")
+    parser.add_argument("--probe-timeout-s", type=float, default=4.0,
+                        help="Per-probe availability timeout in seconds (REST/FTP/DMA/identify).")
+    parser.add_argument("--telnet-timeout-s", type=float, default=10.0,
+                        help="Telnet probe timeout in seconds; Telnet runs at the lowest task priority, so allow a realistic client wait under heavy flood.")
+    parser.add_argument("--out-dir", default="./out/netstack-ab",
+                        help="Output directory for the <label>.jsonl/.json/.md run artifacts.")
+    parser.add_argument("--label", required=True,
+                        help="Run label and output basename, e.g. baseline-e7a642a5 / patched-b3bc8a5.")
+    parser.add_argument("--fw-commit", default=os.getenv("FW_COMMIT", ""),
+                        help="Firmware commit label recorded in the run summary metadata.")
+    parser.add_argument("--httpd-commit", default=os.getenv("HTTPD_COMMIT", ""),
+                        help="MicroHttpServer submodule commit label recorded in the run summary metadata.")
+    return parser
+
 
 def main(argv: list[str]) -> int:
-    ap = argparse.ArgumentParser(description="U64 network-stack stability A/B harness")
-    ap.add_argument("-H", "--host", default=os.getenv("HOST", "u64"))
-    ap.add_argument("--http-port", type=int, default=int(os.getenv("HTTP_PORT", "80")))
-    ap.add_argument("--ftp-port", type=int, default=int(os.getenv("FTP_PORT", "21")))
-    ap.add_argument("--telnet-port", type=int, default=int(os.getenv("TELNET_PORT", "23")))
-    ap.add_argument("--network-password", default=os.getenv("NETWORK_PASSWORD", ""))
-    ap.add_argument("--duration-s", type=float, default=600.0)
-    ap.add_argument("--churn-workers", type=int, default=4,
-                    help="HTTP incomplete-abort (partial request + RST) churn threads; 0 disables")
-    ap.add_argument("--h1-workers", type=int, default=0,
-                    help="threads flooding oversized (40-header) requests to exercise the header-field bound; 0 disables")
-    ap.add_argument("--malformed-workers", type=int, default=0,
-                    help="threads flooding a rotating mix of malformed requests (many-header, negative Content-Length, truncated %% escape); 0 disables")
-    ap.add_argument("--tcp-churn-ports", default="",
-                    help="comma-separated ports to hammer with connect+RST churn (e.g. 21,23,64) so every TCP listener is stressed")
-    ap.add_argument("--health-interval-s", type=float, default=1.0)
-    ap.add_argument("--post-every", type=int, default=5,
-                    help="run the POST /v1/configs batch probe every Nth health cycle")
-    ap.add_argument("--probe-timeout-s", type=float, default=4.0)
-    ap.add_argument("--telnet-timeout-s", type=float, default=10.0,
-                    help="Telnet runs at the lowest task priority, so allow a realistic client wait under heavy flood")
-    ap.add_argument("--out-dir", default="./out/netstack-ab")
-    ap.add_argument("--label", required=True, help="e.g. baseline-e7a642a5 / patched-78069d3f")
-    ap.add_argument("--fw-commit", default=os.getenv("FW_COMMIT", ""))
-    ap.add_argument("--httpd-commit", default=os.getenv("HTTPD_COMMIT", ""))
-    args = ap.parse_args(argv)
+    args = build_parser().parse_args(argv)
 
     settings = RuntimeSettings(
         host=args.host, http_path="v1/version", http_port=args.http_port,
         telnet_port=args.telnet_port, ftp_port=args.ftp_port, ftp_user="anonymous",
-        ftp_pass=args.network_password, delay_ms=0, log_every=1, verbose=False,
+        ftp_pass=args.network_password, delay_ms=0, log_every=1, verbose=args.verbose,
         network_password=args.network_password, modem_port=3000)
 
     out_dir = Path(args.out_dir)

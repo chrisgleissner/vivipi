@@ -7,7 +7,7 @@ import uuid
 from pathlib import Path
 
 
-SCRIPT_ROOT = Path(__file__).resolve().parents[3] / "scripts"
+SCRIPT_ROOT = Path(__file__).resolve().parents[3] / "scripts" / "u64"
 
 if str(SCRIPT_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPT_ROOT))

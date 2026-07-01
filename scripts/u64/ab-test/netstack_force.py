@@ -18,9 +18,17 @@ from __future__ import annotations
 
 import argparse
 import http.client
+import os
 import socket
 import sys
 import time
+
+HOST = os.getenv("HOST", "u64")
+HTTP_PORT = int(os.getenv("HTTP_PORT", "80"))
+FTP_PORT = int(os.getenv("FTP_PORT", "21"))
+TELNET_PORT = int(os.getenv("TELNET_PORT", "23"))
+
+ATTACKS = ("h1", "h2", "h5", "h7", "n2", "r1", "r2")
 
 
 def health(host: str, port: int, timeout: float = 4.0) -> str:
@@ -160,7 +168,8 @@ def attack_r2(host: str, port: int) -> None:
         c = http.client.HTTPConnection(host, port, timeout=4)
         try:
             c.request(method, path, headers=hdrs)
-            r = c.getresponse(); r.read()
+            r = c.getresponse()
+            r.read()
             return f"status={r.status}"
         finally:
             c.close()
@@ -208,14 +217,41 @@ def attack_r1(host: str, port: int) -> None:
         print(f"  POST long-key raised {type(e).__name__}:{e}", flush=True)
 
 
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Single-shot forcing probes for the documented network-stack "
+            "wedge/crash vectors on the Ultimate 64. Runs ONE attack per "
+            "invocation and samples REST health before, during (attack sockets "
+            "held) and after release, classifying the vector as "
+            "fixed / transient / persistent-wedge / crash. Recover the device with "
+            "a Nios reset (JTAG redeploy) between destructive runs."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "attacks:\n"
+            "  h1  header-field array overflow (>20 header lines)\n"
+            "  h2  oversized-header busy-spin\n"
+            "  h5  slowloris slot exhaustion (idle held connections)\n"
+            "  h7  negative Content-Length stuck body\n"
+            "  n2  idle netconn-pool exhaustion (FTP/Telnet/HTTP)\n"
+            "  r1  oversized REST error -> stack smash\n"
+            "  r2  REST password NULL strcmp\n"
+            "\n"
+            "example:\n"
+            "  netstack_force.py -H u64 --attack r1\n"
+        ),
+    )
+    parser.add_argument("-H", "--host", default=HOST, help="Target host or IP")
+    parser.add_argument("--http-port", type=int, default=HTTP_PORT, help="REST HTTP port")
+    parser.add_argument("--ftp-port", type=int, default=FTP_PORT, help="FTP control port")
+    parser.add_argument("--telnet-port", type=int, default=TELNET_PORT, help="Telnet port")
+    parser.add_argument("--attack", required=True, choices=ATTACKS, help="Which forcing vector to run (see below).")
+    return parser
+
+
 def main(argv: list[str]) -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("-H", "--host", default="u64")
-    ap.add_argument("--http-port", type=int, default=80)
-    ap.add_argument("--ftp-port", type=int, default=21)
-    ap.add_argument("--telnet-port", type=int, default=23)
-    ap.add_argument("--attack", required=True, choices=("h1", "h2", "h5", "h7", "n2", "r1", "r2"))
-    args = ap.parse_args(argv)
+    args = build_parser().parse_args(argv)
 
     print(f"=== attack {args.attack} on {args.host} ===", flush=True)
     print(f"  health BEFORE = {health(args.host, args.http_port)}", flush=True)

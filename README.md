@@ -302,6 +302,6 @@ For real-device checks outside the Pico UI, start with:
 
 - `./scripts/c64_health_check` for one concise pass across both configured targets
 - `./scripts/vivipulse_stress_test.sh` for an artifacted soak run
-- `./scripts/u64_connection_test.py --profile soak|stress -H u64|c64u` for direct protocol exercise
+- `./scripts/u64/u64_connection_test.py --profile soak|stress -H u64|c64u` for direct protocol exercise
 
 See [docs/c64u-u64-cli.md](docs/c64u-u64-cli.md) for when to use each tool, example commands, and the key defaults.
