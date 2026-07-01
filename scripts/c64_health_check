@@ -54,13 +54,13 @@ sys.stderr.write("__SECRETS__" + json.dumps(load_network_secrets()) + "\n")
 load_local_secrets
 
 status=0
-"$PYTHON" "$ROOT_DIR/scripts/u64_health_check.py" c64u "$@"
+"$PYTHON" "$ROOT_DIR/scripts/u64/u64_health_check.py" c64u "$@"
 rc=$?
 if [[ "$rc" -ne 0 && "$status" -eq 0 ]]; then
     status=$rc
 fi
 
-"$PYTHON" "$ROOT_DIR/scripts/u64_health_check.py" u64 "$@"
+"$PYTHON" "$ROOT_DIR/scripts/u64/u64_health_check.py" u64 "$@"
 rc=$?
 if [[ "$rc" -ne 0 && "$status" -eq 0 ]]; then
     status=$rc

@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-REPO_ROOT = SCRIPT_DIR.parent
+REPO_ROOT = SCRIPT_DIR.parent.parent  # scripts/u64/<this> -> repo root
 DEFAULT_TRAFFIC_CONFIG = "config/u64_dma_rest_benchmark_traffic.json"
 DEFAULT_TRAFFIC_NAME = "c64cast"
 TOOL_NAME = "u64_dma_rest_benchmark"
