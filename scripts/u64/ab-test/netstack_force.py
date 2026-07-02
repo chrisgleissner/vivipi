@@ -28,7 +28,7 @@ HTTP_PORT = int(os.getenv("HTTP_PORT", "80"))
 FTP_PORT = int(os.getenv("FTP_PORT", "21"))
 TELNET_PORT = int(os.getenv("TELNET_PORT", "23"))
 
-ATTACKS = ("h1", "h2", "h5", "h7", "n2", "r1", "r2")
+ATTACKS = ("h1", "h2", "h5", "h7", "n2", "r1", "r2", "f7", "idlereap")
 
 
 def health(host: str, port: int, timeout: float = 4.0) -> str:
@@ -221,6 +221,95 @@ def attack_r1(host: str, port: int) -> None:
         print(f"  POST long-key raised {type(e).__name__}:{e}", flush=True)
 
 
+def attack_f7(host: str, port: int) -> None:
+    """POST a body with NO Content-Type header. In route_configs the handler does
+    strcasecmp(req->ContentType, ...) where ContentType is NULL -> NULL deref.
+    After the fix it returns a clean 400 and the device stays up."""
+    body = b'{"Audio Mixer":{"Vol UltiSid 1":"+1 dB"}}'
+    req = (b"POST /v1/configs HTTP/1.1\r\nHost: x\r\n"
+           b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+           b"Connection: close\r\n\r\n" + body)
+    s = None
+    try:
+        s = socket.create_connection((host, port), timeout=6)
+        s.sendall(req)
+        try:
+            data = s.recv(400)
+            print(f"  POST-without-Content-Type resp={data[:40]!r} (expect 400 after fix)", flush=True)
+        except OSError as e:
+            print(f"  recv raised {type(e).__name__}:{e} (=> possible crash before fix)", flush=True)
+    except OSError as e:
+        print(f"  connect/send failed: {e}", flush=True)
+    finally:
+        if s is not None:
+            try:
+                s.close()
+            except OSError:
+                pass
+
+
+def attack_idlereap(host: str, http_port: int, ftp_port: int, telnet_port: int, hold_secs: float) -> None:
+    """Open several idle FTP+Telnet connections and hold them WITHOUT sending
+    anything, watching for the server to reap them (server-initiated close).
+    Before the FTP/Telnet idle-reaper fix these leak until reboot; after, each is
+    closed around its idle deadline. REST is health-probed throughout."""
+    conns = []  # [label, port, sock, reap_time]
+    for p, label in [(ftp_port, "ftp"), (telnet_port, "telnet")] * 3:
+        try:
+            s = socket.create_connection((host, p), timeout=4)
+            s.settimeout(0.5)
+            try:
+                s.recv(256)  # drain any greeting banner (FTP 220 ...)
+            except OSError:
+                pass
+            s.setblocking(False)
+            conns.append([label, p, s, None])
+        except OSError as e:
+            print(f"  connect {label}:{p} failed: {e}", flush=True)
+    if not conns:
+        print("  RESULT: no idle connections could be opened (nothing to observe)", flush=True)
+        return
+    print(f"  holding {len(conns)} idle FTP/Telnet connections for up to {hold_secs:.0f}s", flush=True)
+    start = 0.0
+    reaped = 0
+    while start < hold_secs and reaped < len(conns):
+        time.sleep(5)
+        start += 5
+        for c in conns:
+            if c[3] is not None:
+                continue
+            try:
+                data = c[2].recv(1)
+                if data == b"":  # orderly server close
+                    c[3] = start
+                    reaped += 1
+                    print(f"  {c[0]} connection reaped by server at ~t={start:.0f}s", flush=True)
+            except (BlockingIOError, InterruptedError):
+                pass
+            except OSError:
+                c[3] = start
+                reaped += 1
+                print(f"  {c[0]} connection closed (reset) at ~t={start:.0f}s", flush=True)
+        print(f"  t={start:.0f}s: reaped {reaped}/{len(conns)}; REST={health(host, http_port)}", flush=True)
+    for c in conns:
+        try:
+            c[2].close()
+        except OSError:
+            pass
+    # Report FTP and Telnet separately: only FTP has an idle reaper; Telnet is
+    # cap-only, so its idle sessions are expected NOT to be reaped. Conflating them
+    # would let held Telnet connections mask (or falsely pass) the FTP reaper.
+    def counts(label):
+        held = [c for c in conns if c[0] == label]
+        return sum(1 for c in held if c[3] is not None), len(held)
+    ftp_reaped, ftp_total = counts("ftp")
+    tel_reaped, tel_total = counts("telnet")
+    print(f"  FTP idle reaper: {ftp_reaped}/{ftp_total} reaped "
+          f"({'working' if ftp_reaped == ftp_total and ftp_total else 'LEAK (pre-fix behaviour)' if ftp_total else 'n/a'})", flush=True)
+    print(f"  Telnet (cap-only, no idle reaper): {tel_reaped}/{tel_total} reaped "
+          f"({'held as expected' if tel_reaped == 0 else 'unexpected reap'})", flush=True)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -241,6 +330,8 @@ def build_parser() -> argparse.ArgumentParser:
             "  n2  idle netconn-pool exhaustion (FTP/Telnet/HTTP)\n"
             "  r1  oversized REST error -> stack smash\n"
             "  r2  REST password NULL strcmp\n"
+            "  f7  POST body with no Content-Type -> NULL deref in config route\n"
+            "  idlereap  hold idle FTP/Telnet connections, watch for the reaper\n"
             "\n"
             "example:\n"
             "  netstack_force.py -H u64 --attack r1\n"
@@ -251,6 +342,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ftp-port", type=int, default=FTP_PORT, help="FTP control port")
     parser.add_argument("--telnet-port", type=int, default=TELNET_PORT, help="Telnet port")
     parser.add_argument("--attack", required=True, choices=ATTACKS, help="Which forcing vector to run (see below).")
+    parser.add_argument("--hold-secs", type=float, default=330.0,
+                        help="idlereap: seconds to hold idle connections while watching for the reaper.")
     return parser
 
 
@@ -273,6 +366,10 @@ def main(argv: list[str]) -> int:
         attack_n2(args.host, args.http_port, args.ftp_port, args.telnet_port)
     elif args.attack == "r1":
         attack_r1(args.host, args.http_port)
+    elif args.attack == "f7":
+        attack_f7(args.host, args.http_port)
+    elif args.attack == "idlereap":
+        attack_idlereap(args.host, args.http_port, args.ftp_port, args.telnet_port, args.hold_secs)
     print("  health AFTER release (recovery test):", flush=True)
     health_series(args.host, args.http_port, "after", n=6, gap=1.5)
     final = health(args.host, args.http_port)
