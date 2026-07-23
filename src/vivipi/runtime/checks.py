@@ -62,6 +62,16 @@ TELNET_EARLY_CLOSE_THRESHOLD_MS = 100
 TELNET_CONFIRMED_VISIBLE_BYTES = 128
 DEVICE_SOCKET_RECV_CHUNK_SIZE = 512
 TELNET_RECV_CHUNK_SIZE = 512
+# recv/recvfrom buffers sized to the actual payloads. The previous 4096-byte
+# buffers failed to allocate on the fragmented Pico heap under multi-probe load
+# ("memory allocation failed, allocating 4096"), which flipped genuinely healthy
+# ping/ident probes to FAIL even though the targets responded fine. A raw ICMP
+# echo reply is tens of bytes; the UDP JSON discovery reply is a few hundred; the
+# TCP stream readers loop, so a smaller chunk just costs an extra iteration.
+# Keeping these small lets the allocation succeed when memory is tight.
+ICMP_RECV_BUFFER_BYTES = 512
+IDENT_RECV_BUFFER_BYTES = 1024
+SOCKET_STREAM_RECV_BYTES = 1024
 TELNET_SB = 250
 TELNET_SE = 240
 TELNET_FAILURE_SCAN_TAIL_BYTES = max(len(marker) for marker in TELNET_FAILURE_MARKERS)
@@ -232,6 +242,7 @@ def _icmp_reply_offset(packet: bytes) -> int | None:
 
 
 def _raw_icmp_ping(target: str, timeout_s: int) -> PingProbeResult | None:
+    _maybe_collect_gc()
     protocol = getattr(socket, "IPPROTO_ICMP", 1)
     try:
         handle = socket.socket(socket.AF_INET, socket.SOCK_RAW, protocol)
@@ -249,14 +260,22 @@ def _raw_icmp_ping(target: str, timeout_s: int) -> PingProbeResult | None:
         struct.pack("!BBHHH", ICMP_ECHO_REQUEST_TYPE, 0, checksum, identifier, sequence) + payload
     )
 
+    deadline = _deadline_after_s(timeout_s)
     try:
         resolved = socket.getaddrinfo(target, 0, socket.AF_INET, 0, 0)
         endpoint = resolved[0][-1]
         host = endpoint[0]
-        handle.settimeout(timeout_s)
         handle.sendto(request_packet, (host, 1))
         while True:
-            response_packet, _address = handle.recvfrom(4096)
+            # Slice the recv wait so the watchdog is fed while no reply arrives;
+            # a single blocking recvfrom against an unreachable host would stall
+            # the full ~8s timeout and trip the hardware watchdog reset.
+            try:
+                response_packet = _recv_datagram(
+                    handle, ICMP_RECV_BUFFER_BYTES, deadline, stage="icmp-recv"
+                )
+            except TimeoutError:
+                return PingProbeResult(ok=False, latency_ms=None, details="timeout")
             reply_offset = _icmp_reply_offset(response_packet)
             if reply_offset is None:
                 continue
@@ -281,8 +300,6 @@ def _raw_icmp_ping(target: str, timeout_s: int) -> PingProbeResult | None:
         )
     finally:
         _close_socket(handle)
-
-    return PingProbeResult(ok=False, latency_ms=None, details="timeout")
 
 
 def _deadline_after_s(timeout_s: int | float):
@@ -646,17 +663,16 @@ def portable_ident_runner(target: str, timeout_s: int, trace=None) -> PingProbeR
     started_at, uses_ticks_ms = _start_timer()
     deadline = _deadline_after_s(timeout_s)
     last_error = None
+    _maybe_collect_gc()
     for _attempt in range(IDENT_MAX_ATTEMPTS):
-        try:
-            remaining_s = _deadline_remaining_s(deadline)
-        except TimeoutError:
+        if _deadline_remaining_ms(deadline) <= 0:
             break
         handle = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
+            _emit_probe_activity()
             _emit_probe_trace(
                 trace, "socket-open", stage="ident-open", target=endpoint, timeout_s=timeout_s
             )
-            handle.settimeout(remaining_s)
             handle.sendto(request_payload, (host, port))
             _emit_socket_send(
                 trace,
@@ -665,7 +681,12 @@ def portable_ident_runner(target: str, timeout_s: int, trace=None) -> PingProbeR
                 operation="json-discovery",
                 target=endpoint,
             )
-            payload, _address = handle.recvfrom(4096)
+            # Slice the recv wait so the watchdog keeps being fed while we wait
+            # for the UDP reply; a blocking recvfrom against an unreachable host
+            # would stall the full timeout and trip the hardware watchdog reset.
+            payload = _recv_datagram(
+                handle, IDENT_RECV_BUFFER_BYTES, deadline, trace=trace, stage="ident-recv"
+            )
             _emit_socket_recv(
                 trace,
                 stage="ident-recv",
@@ -1276,6 +1297,29 @@ def _socket_recv(
         return chunk
 
 
+def _recv_datagram(handle, size: int, deadline, trace=None, *, stage: str) -> bytes:
+    """Return the next datagram, slicing the wait so the probe-activity callback
+    (the watchdog feed) fires at least once per ``SOCKET_WAIT_SLICE_MS`` slice.
+
+    A plain blocking ``recvfrom`` against an unreachable host stalls for the full
+    probe timeout (~8s) without feeding the ~8.4s RP2040 watchdog, which trips a
+    hardware reset. Reusing ``_socket_wait`` bounds the max feed gap to one slice
+    on every path (``select.poll`` or the settimeout fallback), and a one-slice
+    recv timeout guards against a spurious readiness wakeup blocking forever.
+    Raises ``TimeoutError`` when the deadline passes with no datagram.
+    """
+    while True:
+        _socket_wait(handle, deadline, writable=False, trace=trace, stage=stage)
+        _set_socket_timeout(handle, float(SOCKET_WAIT_SLICE_MS) / 1000.0)
+        try:
+            payload, _address = handle.recvfrom(size)
+        except OSError as error:
+            if _classify_network_error(error) == "timeout" or _is_would_block(error):
+                continue
+            raise
+        return payload
+
+
 def _ftp_read_response(
     handle, deadline=None, trace=None, operation=None, target=None, budget=None
 ) -> tuple[int, str]:
@@ -1293,7 +1337,7 @@ def _ftp_read_response(
                 budget=budget,
             )
         else:
-            chunk = handle.recv(4096)
+            chunk = handle.recv(SOCKET_STREAM_RECV_BYTES)
         if not chunk:
             break
         buffer.extend(chunk)
@@ -1361,7 +1405,7 @@ def _ftp_nlst_names(payload: bytes) -> list[str]:
 def _recv_all(handle) -> bytes:
     chunks: list[bytes] = []
     while True:
-        chunk = handle.recv(4096)
+        chunk = handle.recv(SOCKET_STREAM_RECV_BYTES)
         if not chunk:
             break
         chunks.append(chunk)

@@ -1,5 +1,27 @@
 # ViviPi Work Log
 
+## 2026-07-23T11:59:55Z
+
+- Fixed the hardware watchdog reset that rebooted the OLED Pico whenever a probed device was unreachable (reproduced by the user with U64 powered off; the board reset as the sweep reached U64).
+- Root cause:
+  - the RP2040 runtime watchdog is armed at `WATCHDOG_MAX_TIMEOUT_MS = 8388` ms (the WDT rejects anything higher) and is fed only via `_emit_probe_activity()`
+  - every TCP probe path (dma/ftp/rest/telnet) already feeds the watchdog every ~1s inside the sliced `_socket_wait` poll loop, so they survive an unreachable host
+  - but `_raw_icmp_ping` and `portable_ident_runner` each blocked on a single `recvfrom` for the full `timeout_s` (8s) with no mid-wait feed; the live probe order runs `ping -> ident` back-to-back per host, so against an off host the unfed window `ping recvfrom (8s) + same-host backoff (1s) + ident recvfrom (8s)` far exceeded the 8388ms window and tripped a hardware reset
+  - a reachable probe that merely returns FAIL never crashed (DMA flakiness observed on live c64u/u64 is a TCP/fed path); the reset was specific to the two unfed blocking-recv paths against an unreachable target
+- What changed (`src/vivipi/runtime/checks.py`):
+  - added `_recv_datagram()`, a shared helper that slices the datagram wait through the existing `_socket_wait` so the probe-activity callback (watchdog feed) fires at least once per `SOCKET_WAIT_SLICE_MS` (1s) slice on both the `select.poll` and settimeout-fallback paths, with a one-slice recv timeout guarding against a spurious readiness wakeup
+  - routed `_raw_icmp_ping` and `portable_ident_runner` through it; `portable_ident_runner` also feeds at attempt entry and now uses `_deadline_remaining_ms` for its expiry guard
+  - no change to probe classification/latency/single-attempt semantics: an unreachable ping/ident now returns a clean `timeout` FAIL instead of rebooting the board
+- Tests (`tests/unit/runtime/test_checks.py`):
+  - added `test_raw_icmp_ping_feeds_watchdog_and_times_out_when_no_reply`, `test_portable_ident_runner_feeds_watchdog_and_times_out_when_unreachable`, and `test_recv_datagram_feeds_activity_each_slice_then_raises_timeout`, proving the watchdog is fed mid-wait and the probe still returns a clean timeout (never hangs/crashes)
+  - updated the ping raw-ICMP-fallback, ident transient-recv-timeout, ident unreachable, and expired-deadline tests to the new sliced-wait contract (recv timeout is now one slice, ident sends once then waits, guard uses `_deadline_remaining_ms`)
+  - mapped the two probe-level regressions under `VIVIPI-NET-001` in `docs/spec-traceability.md`
+- Validation:
+  - repo gates: `./build lint` -> clean; `./build coverage` -> `1019 passed`, total coverage `97.90%` (>=96% branch gate)
+  - Python parity: `./build ci --venv .venv-3.12` -> pass; 3.13 could not build a working local venv (sandbox `ensurepip`/stdlib defect), so the affected suites were run directly under python3.13 -> `522 passed` (runtime/core/firmware), parity clean; the full 3.13 CI matrix runs in `.github/workflows/ci.yml`
+  - deploy: `./build deploy --device oled` -> `oled ok state=serial-ready`; on-device `vivipi/runtime/checks.py` confirmed to contain the fix
+  - hardware, watchdog reset eliminated (user powered U64 OFF): ~6-min Pico serial soak (91.8 KB, 1664 lines) with **zero board resets** (no `[BOOT]`/`WDT armed`/`reset requested` banners), zero allocation errors, across six full sweeps where `u64-ping` and `u64-ident` classified as `timeout: timed out` (ident `lat_ms=8040`, i.e. waited the full deadline fed the whole time); all reachable hosts (`c64u-*`, `u2-*`, `pixel4-adb`) stayed OK, confirming no regression
+
 ## 2026-05-08T14:28:36Z
 
 - Investigated and fixed the early `ident_json` timeout that was aborting the default U64 soak run almost immediately even though the live identify service was reachable.

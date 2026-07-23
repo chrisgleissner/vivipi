@@ -31,6 +31,7 @@ class AppMode(str, Enum):
 class DisplayMode(str, Enum):
     STANDARD = "standard"
     COMPACT = "compact"
+    MATRIX = "matrix"
 
 
 @dataclass(frozen=True)

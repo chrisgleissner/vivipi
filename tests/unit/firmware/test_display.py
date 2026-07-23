@@ -297,6 +297,33 @@ def test_render_to_surface_supports_180_degree_rotation():
     assert lit_pixels(surface.buffer, 2, 8) == {(1, 7)}
 
 
+def test_render_to_surface_honors_frame_row_layout_with_enlarged_glyphs():
+    # A per-row pixel layout lets the matrix view place rows at custom y origins
+    # and render each at a larger glyph height. Here row 0 sits at y=0 (height 4)
+    # and row 1 at y=8 (height 4), leaving a gap at y=4..7.
+    def glyph_builder(width, height):
+        return lambda character: () if character == " " else tuple((x, y) for y in range(height) for x in range(width))
+
+    frame = SimpleNamespace(
+        rows=("A", "A"),
+        inverted_row=None,
+        shift_offset=(0, 0),
+        inverted_spans=(),
+        failure_spans=(),
+        bottom_pixels=(),
+        row_layout=((0, 4), (8, 4)),
+    )
+    surface = MonochromeSurface(1, 16)
+
+    render_to_surface(frame, surface, 1, 8, fake_glyph_lookup, glyph_builder=glyph_builder)
+
+    pixels = lit_pixels(surface.buffer, surface.width, surface.height)
+    # Row 0 fills y 0..3, row 1 fills y 8..11, the gap y 4..7 stays dark, and
+    # each glyph is enlarged to 4px (not the 1px base glyph).
+    assert pixels == {(0, 0), (0, 1), (0, 2), (0, 3), (0, 8), (0, 9), (0, 10), (0, 11)}
+    assert not any(4 <= y <= 7 for _, y in pixels)
+
+
 def test_scale_glyph_pixels_balances_horizontal_and_vertical_strokes():
     source_rows = (
         0b00011000,

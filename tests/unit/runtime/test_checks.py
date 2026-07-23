@@ -1,6 +1,7 @@
 import sys
 import builtins
 import struct
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -859,7 +860,10 @@ def test_portable_ident_runner_accepts_valid_json_echo(monkeypatch):
     assert calls[-1] == "close"
 
 
-def test_portable_ident_runner_retries_on_timeout_then_succeeds(monkeypatch):
+def test_portable_ident_runner_tolerates_transient_recv_timeout_then_succeeds(monkeypatch):
+    # A per-slice recvfrom timeout means "no reply this slice" — the sliced wait
+    # keeps waiting for the reply on the same request (one send), rather than
+    # resending. This is the bounded-progress-within-a-single-attempt contract.
     attempts = []
     recvfrom_call_count = {"count": 0}
 
@@ -893,11 +897,18 @@ def test_portable_ident_runner_retries_on_timeout_then_succeeds(monkeypatch):
     assert result.ok is True
     assert result.details == "product=U64 hostname=u64"
     sendto_calls = [a for a in attempts if isinstance(a, tuple) and a[0] == "sendto"]
-    assert len(sendto_calls) == 2
+    assert len(sendto_calls) == 1
+    # It waited across two recv slices before the reply landed.
+    assert recvfrom_call_count["count"] == 2
 
 
-def test_portable_ident_runner_fails_after_retries_exhausted(monkeypatch):
+def test_portable_ident_runner_feeds_watchdog_and_times_out_when_unreachable(monkeypatch):
+    # Regression for the RP2040 watchdog reset: against an unreachable host the
+    # UDP recvfrom must not stall the full probe timeout without feeding the
+    # watchdog. The sliced wait feeds the probe-activity callback while waiting,
+    # then returns a clean timeout result (never crashes / never reboots).
     attempts = []
+    feeds = []
 
     class AlwaysTimeoutSocket:
         def settimeout(self, timeout):
@@ -917,12 +928,25 @@ def test_portable_ident_runner_fails_after_retries_exhausted(monkeypatch):
     monkeypatch.setattr(
         runtime_checks.socket, "socket", lambda *args, **kwargs: AlwaysTimeoutSocket()
     )
+    # Short real deadline: the attempt guard and _socket_wait share it, so the
+    # probe terminates in ~50ms of sliced waiting instead of the full timeout.
+    monkeypatch.setattr(
+        runtime_checks, "_deadline_after_s", lambda _timeout_s: ("perf", time.perf_counter() + 0.05)
+    )
 
-    result = portable_ident_runner("ident://u64.example.local:64", 10)
+    runtime_checks.set_probe_activity_callback(lambda: feeds.append("feed"))
+    try:
+        result = portable_ident_runner("ident://u64.example.local:64", 8)
+    finally:
+        runtime_checks.set_probe_activity_callback(None)
 
     assert result.ok is False
+    assert "timeout" in result.details
+    # The watchdog was fed while waiting for the reply.
+    assert len(feeds) >= 1
+    # Send once, then wait for the reply across slices — no per-slice resend storm.
     sendto_calls = [a for a in attempts if isinstance(a, tuple) and a[0] == "sendto"]
-    assert len(sendto_calls) == runtime_checks.IDENT_MAX_ATTEMPTS
+    assert len(sendto_calls) == 1
 
 
 def test_portable_dma_runner_authenticates_and_reads_metadata(monkeypatch):
@@ -2398,7 +2422,9 @@ def test_portable_ping_runner_uses_raw_icmp_fallback_on_micropython(monkeypatch)
 
     assert result.ok is True
     assert result.details == "reachable"
-    assert raw_socket.timeout == 10
+    # The recv wait is now sliced so the watchdog keeps being fed: the socket
+    # timeout is bounded to one slice, never the full probe timeout.
+    assert raw_socket.timeout == runtime_checks.SOCKET_WAIT_SLICE_MS / 1000.0
     assert raw_socket.sent[0][1] == ("192.168.1.1", 1)
     assert raw_socket.closed is True
 
@@ -4769,6 +4795,71 @@ def test_raw_icmp_ping_returns_fail_on_socket_exception(monkeypatch):
     assert result.ok is False
 
 
+def test_raw_icmp_ping_feeds_watchdog_and_times_out_when_no_reply(monkeypatch):
+    # Regression for the RP2040 watchdog reset: a single blocking recvfrom
+    # against an unreachable host stalled the full ~8s timeout without feeding
+    # the ~8.4s watchdog. The sliced wait feeds the probe-activity callback
+    # while no reply arrives, then returns a clean timeout result.
+    feeds = []
+
+    class NoReplySocket:
+        def settimeout(self, _t):
+            pass
+
+        def sendto(self, _data, _addr):
+            pass
+
+        def recvfrom(self, _n):
+            raise OSError(110, "timed out")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(runtime_checks.socket, "socket", lambda *a, **kw: NoReplySocket())
+    monkeypatch.setattr(
+        runtime_checks.socket,
+        "getaddrinfo",
+        lambda *a, **kw: [(None, None, None, None, ("192.0.2.1", 0))],
+    )
+    monkeypatch.setattr(
+        runtime_checks, "_deadline_after_s", lambda _timeout_s: ("perf", time.perf_counter() + 0.05)
+    )
+
+    runtime_checks.set_probe_activity_callback(lambda: feeds.append("feed"))
+    try:
+        result = runtime_checks._raw_icmp_ping("192.0.2.1", 8)
+    finally:
+        runtime_checks.set_probe_activity_callback(None)
+
+    assert result is not None
+    assert result.ok is False
+    assert result.details == "timeout"
+    assert len(feeds) >= 1
+
+
+def test_recv_datagram_feeds_activity_each_slice_then_raises_timeout(monkeypatch):
+    # Direct coverage of the shared sliced-wait helper: every slice feeds the
+    # watchdog, and it raises TimeoutError (not a hang) once the deadline passes.
+    feeds = []
+
+    class NeverReadySocket:
+        def settimeout(self, _t):
+            pass
+
+        def recvfrom(self, _n):
+            raise OSError(110, "timed out")
+
+    runtime_checks.set_probe_activity_callback(lambda: feeds.append("feed"))
+    try:
+        deadline = ("perf", time.perf_counter() + 0.05)
+        with pytest.raises(TimeoutError):
+            runtime_checks._recv_datagram(NeverReadySocket(), 512, deadline, stage="test-recv")
+    finally:
+        runtime_checks.set_probe_activity_callback(None)
+
+    assert len(feeds) >= 1
+
+
 def test_icmp_reply_offset_returns_header_length_for_ipv4_encapsulated_packet():
     # IPv4 packet: version=4, IHL=5 (0x45), total 28+ bytes, ICMP payload after header
     # First byte 0x45: version=4 (>>4 == 4), IHL=5 (& 0x0F == 5, header_length = 20)
@@ -4780,12 +4871,9 @@ def test_icmp_reply_offset_returns_header_length_for_ipv4_encapsulated_packet():
 
 def test_portable_ident_runner_breaks_on_expired_deadline(monkeypatch):
     monkeypatch.setattr(runtime_checks, "_probe_nonce", lambda: "nonce-1")
-    # Provide a deadline that is already past so _deadline_remaining_s raises immediately
-    monkeypatch.setattr(
-        runtime_checks,
-        "_deadline_remaining_s",
-        lambda _deadline: (_ for _ in ()).throw(TimeoutError("expired")),
-    )
+    # Deadline already past: the attempt guard short-circuits before any socket
+    # is opened, so socket.socket returning None never gets dereferenced.
+    monkeypatch.setattr(runtime_checks, "_deadline_remaining_ms", lambda _deadline: 0)
     monkeypatch.setattr(runtime_checks.socket, "socket", lambda *a, **kw: None)
 
     result = portable_ident_runner("ident://host:64", 1)

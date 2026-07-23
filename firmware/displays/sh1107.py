@@ -138,6 +138,7 @@ class SH1107Display:
             self._glyph_lookup,
             failure_color=getattr(self, "failure_color", "red"),
             rotation=getattr(self, "rotation", 0),
+            glyph_builder=_build_glyph_lookup,
         )
         self.buffer[:] = surface.buffer
         contrast = getattr(frame, "contrast", None)
