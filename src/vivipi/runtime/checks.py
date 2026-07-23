@@ -569,13 +569,17 @@ def portable_ping_runner(target: str, timeout_s: int, trace=None) -> PingProbeRe
 
     def _single_ping() -> PingProbeResult:
         _emit_probe_activity()
+        if _is_micropython_runtime():
+            # Prefer the watchdog-fed raw ICMP path on device. uping.ping() is a
+            # single blocking call (up to 3 x timeout_s*500ms) with no activity
+            # callback; at an 8s timeout that is ~12s, which exceeds the ~8.4s
+            # RP2040 watchdog and would reset the board.
+            raw_socket_result = _raw_icmp_ping(target, timeout_s)
+            if raw_socket_result is not None:
+                return raw_socket_result
         try:
             import uping  # type: ignore
         except ImportError:
-            if _is_micropython_runtime():
-                raw_socket_result = _raw_icmp_ping(target, timeout_s)
-                if raw_socket_result is not None:
-                    return raw_socket_result
             try:
                 import subprocess
             except ImportError:
@@ -1001,11 +1005,15 @@ def portable_http_runner(
             reachable=True,
         )
     except Exception as error:
+        # http.client sets connection.sock once the TCP connect succeeds, so a
+        # request that fails after connecting (reset mid-request, malformed
+        # response before a status line) is reachable -> DEG, not a full outage.
         return HttpResponseResult(
             status_code=None,
             body=None,
             latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
             details=_probe_error_detail(error),
+            reachable=getattr(connection, "sock", None) is not None,
         )
     finally:
         connection.close()

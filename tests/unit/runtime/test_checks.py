@@ -3619,6 +3619,50 @@ def test_portable_ftp_runner_ftplib_bad_greeting_is_degraded(monkeypatch):
     assert outage.status == Status.FAIL
 
 
+def test_portable_http_runner_stdlib_connected_request_failure_is_reachable(monkeypatch):
+    # http.client sets connection.sock on TCP connect, so a request that fails
+    # after connecting (reset before a status line) is reachable -> the result
+    # carries reachable=True so execution maps it to DEG, not a full outage.
+    monkeypatch.setattr(runtime_checks, "_is_micropython_runtime", lambda: False)
+    import http.client
+
+    class ConnectedThenResetConn:
+        def __init__(self, host, port, timeout=None):
+            self.sock = object()  # TCP connected
+
+        def request(self, *args, **kwargs):
+            raise OSError("connection reset by peer")
+
+        def getresponse(self):
+            raise AssertionError("should not be reached")
+
+        def close(self):
+            self.sock = None
+
+    monkeypatch.setattr(http.client, "HTTPConnection", ConnectedThenResetConn)
+    reachable = portable_http_runner("GET", "http://host.example.local/health", 10)
+    assert reachable.status_code is None
+    assert reachable.reachable is True
+
+    class RefusedConn:
+        def __init__(self, host, port, timeout=None):
+            self.sock = None  # connect never succeeded
+
+        def request(self, *args, **kwargs):
+            raise OSError("connection refused")
+
+        def getresponse(self):
+            raise AssertionError("should not be reached")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(http.client, "HTTPConnection", RefusedConn)
+    outage = portable_http_runner("GET", "http://host.example.local/health", 10)
+    assert outage.status_code is None
+    assert outage.reachable is False
+
+
 def test_read_telnet_until_idle_counts_visible_bytes_across_chunks_without_buffering_full_transcript():
     # Two sub-threshold chunks that together cross the confirmation threshold:
     # proves visible bytes are accumulated incrementally across reads (via
