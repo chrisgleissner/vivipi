@@ -46,6 +46,20 @@ TELNET_IDLE_TIMEOUT_S = 0.12
 TELNET_POST_DATA_IDLE_TIMEOUT_S = 0.1
 TELNET_STABLE_OPEN_THRESHOLD_MS = 500
 TELNET_EARLY_CLOSE_THRESHOLD_MS = 100
+# Once this many visible (non-whitespace, ANSI/IAC-stripped) bytes have arrived,
+# the listener has demonstrably served its terminal UI: telnet is confirmed
+# working and the probe can stop. This makes the probe's runtime track the actual
+# response (time to deliver a real screen) instead of TCP fragmentation artifacts.
+# Without it, a fast-bursting device (e.g. U64: whole screen in one burst, <8
+# chunks) idles all the way to TELNET_STABLE_OPEN_THRESHOLD_MS, while a device
+# whose screen fragments into >=8 TCP segments (e.g. U2) exits early at the
+# TELNET_MAX_RECV_CHUNKS cap -- so two devices running the same firmware report
+# wildly different latencies (~570ms vs ~335ms) for identical ~630-byte screens.
+# The 1541Ultimate telnet UI (U64/U64ii/U2/U2+) delivers ~290 visible bytes in
+# its first ~512-byte chunk, so any target that is genuinely serving crosses this
+# threshold in its first read. Sub-threshold responses (small banners, prompts,
+# silence) still fall through to the existing stable-open / idle-timeout logic.
+TELNET_CONFIRMED_VISIBLE_BYTES = 128
 DEVICE_SOCKET_RECV_CHUNK_SIZE = 512
 TELNET_RECV_CHUNK_SIZE = 512
 TELNET_SB = 250
@@ -2017,6 +2031,12 @@ def _read_telnet_until_idle(
         )
         if failure_detected:
             return snapshot("failure-marker", failure_detected=True)
+        if visible_bytes >= TELNET_CONFIRMED_VISIBLE_BYTES:
+            # The listener has served a substantial slice of its terminal UI;
+            # telnet is confirmed working. Stop here so the probe's latency
+            # reflects the response, not how the ~2KB screen happened to be split
+            # across TCP segments or the arbitrary stable-open wait.
+            return snapshot("response-confirmed")
     return snapshot("idle-timeout")
 
 

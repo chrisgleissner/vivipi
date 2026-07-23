@@ -3438,14 +3438,14 @@ def test_portable_telnet_runner_waits_for_response_drain_before_success(monkeypa
     ]
 
 
-def test_portable_telnet_runner_accepts_chunk_limited_banner_response(monkeypatch):
+def test_portable_telnet_runner_confirms_multi_chunk_banner_response(monkeypatch):
     banner = (
         b'\xff\xfe"\xff\xfb\x01\x1bc\x1b[0;37;2m\x1b[1;1H\x1bc\x1b[0;37;2m\x1b[1;1H'
         b"\x1b[1;6H\x1b[0;37;1m*** C64 Ultimate (V1.49) 1.1.0 *** Remote ***\x1b[24;53H\x1b(BF7=HELP"
         b"\r\nREADY\r\n" * 32
     )
 
-    class ChunkLimitedBannerSocket(FakeSocket):
+    class MultiChunkBannerSocket(FakeSocket):
         def __init__(self):
             chunks = [banner[index : index + 96] for index in range(0, len(banner), 96)]
             super().__init__(chunks)
@@ -3453,19 +3453,34 @@ def test_portable_telnet_runner_accepts_chunk_limited_banner_response(monkeypatc
         def recv(self, _size):
             return super().recv(_size)
 
-    handle = ChunkLimitedBannerSocket()
+    handle = MultiChunkBannerSocket()
     monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: handle)
 
     result = portable_telnet_runner(
         "telnet://switch.example.local", 10, trace=lambda event, **fields: None
     )
 
+    # A banner that spans many chunks is confirmed as soon as enough visible
+    # terminal text has arrived, without draining the whole repaint stream.
     assert result.ok is True
     assert result.status == Status.OK
     assert result.details == "response-received"
-    assert result.metadata["close_reason"] == "chunk-limit"
+    assert result.metadata["close_reason"] == "response-confirmed"
     assert result.metadata["response_received"] is True
     assert result.metadata["handshake_detected"] is True
+
+
+def test_read_telnet_until_idle_confirms_once_visible_threshold_reached():
+    # A single chunk carrying more than the confirmation threshold of visible
+    # bytes must short-circuit to "response-confirmed" on the first read.
+    payload = b"A" * (runtime_checks.TELNET_CONFIRMED_VISIBLE_BYTES + 40)
+    handle = FakeSocket([payload, b"later repaint bytes that must not be read", b""])
+
+    session = runtime_checks._read_telnet_until_idle(handle)
+
+    assert session["close_reason"] == "response-confirmed"
+    assert session["has_visible_text"] is True
+    assert session["visible_bytes"] == runtime_checks.TELNET_CONFIRMED_VISIBLE_BYTES + 40
 
 
 def test_portable_telnet_runner_rejects_escape_only_terminal_control(monkeypatch):
@@ -3508,10 +3523,16 @@ def test_portable_telnet_runner_rejects_explicit_failure_text_and_reports_socket
     assert socket_failure.details == "refused"
 
 
-def test_read_telnet_until_idle_counts_visible_bytes_without_buffering_full_transcript():
+def test_read_telnet_until_idle_counts_visible_bytes_across_chunks_without_buffering_full_transcript():
+    # Two sub-threshold chunks that together cross the confirmation threshold:
+    # proves visible bytes are accumulated incrementally across reads (via
+    # recv_into, no full-transcript buffering) before the fast-path confirms.
+    first = b"A" * (runtime_checks.TELNET_CONFIRMED_VISIBLE_BYTES - 28)
+    second = b"B" * 60
+
     class LargeBannerSocket(FakeSocket):
         def __init__(self):
-            super().__init__([b"A" * 2048, b"B" * 1024, b""])
+            super().__init__([first, second, b""])
             self.timeout_values = []
 
         def settimeout(self, value):
@@ -3537,13 +3558,13 @@ def test_read_telnet_until_idle_counts_visible_bytes_without_buffering_full_tran
     finally:
         monkeypatch.undo()
 
-    assert session["visible_bytes"] == 3072
+    assert session["visible_bytes"] == len(first) + len(second)
     assert session["has_visible_text"] is True
     assert session["handshake_detected"] is False
-    assert session["close_reason"] == "remote-close"
+    assert session["close_reason"] == "response-confirmed"
+    # Only the two data reads were needed; the trailing b"" was never read.
     assert handle.timeout_values == [
         runtime_checks.TELNET_IDLE_TIMEOUT_S,
-        runtime_checks.TELNET_POST_DATA_IDLE_TIMEOUT_S,
         runtime_checks.TELNET_POST_DATA_IDLE_TIMEOUT_S,
     ]
 
@@ -3853,6 +3874,10 @@ def test_socket_wait_falls_back_to_local_wait_accounting_when_deadline_stalls(mo
 
 
 def test_read_telnet_until_idle_terminates_at_max_recv_chunks(monkeypatch):
+    # A peer that streams low-visible-density chunks forever (never reaching the
+    # confirmation threshold) must still be bounded by the max-chunk safety cap.
+    per_chunk = 20  # 4 * 20 = 80 visible bytes, below TELNET_CONFIRMED_VISIBLE_BYTES
+
     class ChattyPeer:
         def __init__(self):
             self.calls = 0
@@ -3862,7 +3887,7 @@ def test_read_telnet_until_idle_terminates_at_max_recv_chunks(monkeypatch):
 
         def recv(self, _size):
             self.calls += 1
-            return b"." * 64
+            return b"." * per_chunk
 
         def sendall(self, payload):
             return None
@@ -3870,7 +3895,8 @@ def test_read_telnet_until_idle_terminates_at_max_recv_chunks(monkeypatch):
     handle = ChattyPeer()
     session = runtime_checks._read_telnet_until_idle(handle, max_chunks=4)
     assert handle.calls == 4
-    assert session["visible_bytes"] <= 4 * 64
+    assert session["visible_bytes"] <= 4 * per_chunk
+    assert session["visible_bytes"] < runtime_checks.TELNET_CONFIRMED_VISIBLE_BYTES
     assert session["has_visible_text"] is True
     assert session["close_reason"] == "chunk-limit"
 
