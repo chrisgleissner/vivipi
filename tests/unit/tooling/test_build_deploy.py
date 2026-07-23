@@ -1079,7 +1079,7 @@ def test_build_deploy_helper_parsers_cover_string_float_and_error_paths():
     with pytest.raises(ValueError, match="0-255"):
         _parse_brightness("bright")
 
-    with pytest.raises(ValueError, match="standard' or 'compact"):
+    with pytest.raises(ValueError, match="'standard', 'compact', or 'matrix'"):
         _parse_display_mode(3)
 
     with pytest.raises(ValueError, match="integer from 1 to 4"):

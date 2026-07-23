@@ -274,7 +274,39 @@ def test_explicit_degraded_observation_keeps_degraded_state():
     )
 
     assert updated.status == Status.DEG
-    assert updated.consecutive_failures == 1
+    # A DEG observation means the device was reachable, so it resets the
+    # consecutive-UNREACHABLE counter (a reachable blip can never escalate to a
+    # full outage). The DEG status itself is still shown.
+    assert updated.consecutive_failures == 0
+
+
+def test_reachable_degraded_never_escalates_a_single_unreachable_miss_to_failed():
+    # Product invariant: a full outage (FAIL) requires two consecutive
+    # UNREACHABLE misses. A reachable-but-degraded blip (DEG) followed by a
+    # single unreachable miss must stay degraded, never become a false outage.
+    thresholds = TransitionThresholds(failures_to_degraded=1, failures_to_failed=2)
+    runtime = make_check("Router", status=Status.OK)
+
+    degraded = apply_observation(
+        runtime,
+        CheckObservation(identifier="router", name="Router", status=Status.DEG),
+        thresholds=thresholds,
+    )
+    assert degraded.status == Status.DEG
+
+    one_miss = apply_observation(
+        degraded,
+        CheckObservation(identifier="router", name="Router", status=Status.FAIL),
+        thresholds=thresholds,
+    )
+    assert one_miss.status == Status.DEG  # first unreachable after DEG -> still '!', not 'X'
+
+    two_misses = apply_observation(
+        one_miss,
+        CheckObservation(identifier="router", name="Router", status=Status.FAIL),
+        thresholds=thresholds,
+    )
+    assert two_misses.status == Status.FAIL  # two consecutive unreachable -> outage
 
 
 def test_move_selection_on_empty_state_keeps_no_selection():

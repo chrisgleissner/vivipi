@@ -348,6 +348,7 @@ class WaveshareEPaper213BV4Display:
             self._glyph_lookup,
             failure_color=self.failure_color,
             rotation=getattr(self, "rotation", 0),
+            glyph_builder=_build_glyph_lookup,
         )
         self._show_buffers(surface.black_buffer, surface.accent_buffer)
 

@@ -398,7 +398,7 @@ def _draw_text(surface, value, origin_x, origin_y, font_width, text_color, glyph
             surface.set_pixel(cell_x + delta_x, origin_y + delta_y, text_color(column_index))
 
 
-def render_to_surface(frame, surface, font_width, font_height, glyph_lookup, failure_color="red", rotation=0):
+def render_to_surface(frame, surface, font_width, font_height, glyph_lookup, failure_color="red", rotation=0, glyph_builder=None):
     surface = _render_surface(surface, int(rotation))
     surface.clear(surface.background_color)
     x_offset, y_offset = frame.shift_offset
@@ -410,10 +410,30 @@ def render_to_surface(frame, surface, font_width, font_height, glyph_lookup, fai
         failure_by_row.setdefault(span.row_index, []).append((span.start_column, span.end_column))
 
     failure_color_supported = surface.can_render_color(failure_color)
+    row_layout = getattr(frame, "row_layout", None)
+    # Glyph lookups keyed by height so a per-row layout (matrix) can render
+    # enlarged glyphs without rebuilding them every row. The base size reuses
+    # the caller-supplied lookup; other sizes are built on demand.
+    glyph_lookups_by_height = {font_height: glyph_lookup}
+
+    def lookup_for_height(glyph_height):
+        cached = glyph_lookups_by_height.get(glyph_height)
+        if cached is not None:
+            return cached
+        if glyph_builder is None:
+            return glyph_lookup
+        built = glyph_builder(font_width, glyph_height)
+        glyph_lookups_by_height[glyph_height] = built
+        return built
 
     # Hot path: rendering stays deterministic and free of logging or dynamic state growth.
     for row_index, row in enumerate(frame.rows):
-        y = (row_index * font_height) + y_offset
+        if row_layout is not None and row_index < len(row_layout):
+            y_origin, row_glyph_height = row_layout[row_index]
+        else:
+            y_origin, row_glyph_height = (row_index * font_height), font_height
+        y = y_origin + y_offset
+        row_glyph_lookup = lookup_for_height(row_glyph_height)
         row_inverted = frame.inverted_row == row_index
         inverted_ranges = tuple(inverted_by_row.get(row_index, ()))
         failure_ranges = tuple(failure_by_row.get(row_index, ()))
@@ -422,13 +442,13 @@ def render_to_surface(frame, surface, font_width, font_height, glyph_lookup, fai
             effective_inverted = effective_inverted + failure_ranges
 
         if row_inverted:
-            surface.fill_rect(0, y, surface.width, font_height, surface.foreground_color)
+            surface.fill_rect(0, y, surface.width, row_glyph_height, surface.foreground_color)
         for start, end in effective_inverted:
             surface.fill_rect(
                 x_offset + (start * font_width),
                 y,
                 (end - start) * font_width,
-                font_height,
+                row_glyph_height,
                 surface.foreground_color,
             )
 
@@ -439,7 +459,7 @@ def render_to_surface(frame, surface, font_width, font_height, glyph_lookup, fai
                 return failure_color
             return surface.foreground_color
 
-        _draw_text(surface, row, x_offset, y, font_width, text_color, glyph_lookup)
+        _draw_text(surface, row, x_offset, y, font_width, text_color, row_glyph_lookup)
 
     bottom_pixel_width = max(1, int(getattr(frame, "bottom_pixel_width_px", 1)))
     bottom_pixel_height = max(1, int(getattr(frame, "bottom_pixel_height_px", 1)))

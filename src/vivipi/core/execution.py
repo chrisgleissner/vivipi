@@ -21,6 +21,10 @@ class HttpResponseResult:
     body: object | None = None
     latency_ms: float | None = None
     details: str = ""
+    # True once the TCP connection to the endpoint succeeded. Lets a connected
+    # server that never returned a parseable HTTP response classify as DEG
+    # (reachable but degraded) instead of a full outage.
+    reachable: bool = False
 
 
 @dataclass(frozen=True)
@@ -87,12 +91,15 @@ _HTTP_REACHABLE_AUTH_STATUS_CODES = frozenset({401, 403})
 
 def _status_for_http(status_code: int | None) -> Status:
     if status_code is None:
+        # No HTTP response at all -> the endpoint was unavailable (outage).
         return Status.FAIL
     if 200 <= status_code < 400:
         return Status.OK
     if status_code in _HTTP_REACHABLE_AUTH_STATUS_CODES:
         return Status.OK
-    return Status.FAIL
+    # The server answered but with an error code (e.g. 5xx / unexpected 4xx):
+    # it is reachable, just degraded -> DEG, never a full outage.
+    return Status.DEG
 
 
 def _status_for_probe_result(result) -> Status:
@@ -249,6 +256,10 @@ def execute_check(
             return _execution_error(definition, observed_at_s, "HTTP", "request failed")
 
         status = _status_for_http(result.status_code)
+        if result.status_code is None and getattr(result, "reachable", False):
+            # Connected but no parseable HTTP response: reachable but degraded,
+            # not a full outage.
+            status = Status.DEG
         details = result.details.strip() or (
             f"HTTP {result.status_code}" if result.status_code is not None else "request failed"
         )
@@ -288,12 +299,20 @@ def execute_check(
         details = result.details.strip() or (
             f"HTTP {result.status_code}" if result.status_code is not None else "request failed"
         )
+        # The service answered (any status) or at least connected -> reachable
+        # but degraded (DEG), never a full outage. Only a total failure to reach
+        # the service host is an outage (FAIL).
+        service_status = (
+            Status.DEG
+            if result.status_code is not None or getattr(result, "reachable", False)
+            else Status.FAIL
+        )
         return CheckExecutionResult(
             source_identifier=definition.identifier,
             observations=(
                 _direct_observation(
                     definition,
-                    status=Status.FAIL,
+                    status=service_status,
                     observed_at_s=observed_at_s,
                     details=details,
                     latency_ms=result.latency_ms,
@@ -311,12 +330,14 @@ def execute_check(
             source_identifier=definition.identifier,
         )
     except ValueError:
+        # The service returned a 2xx response but its payload did not parse: it
+        # is reachable, just answering wrongly -> DEG, not a full outage.
         return CheckExecutionResult(
             source_identifier=definition.identifier,
             observations=(
                 _direct_observation(
                     definition,
-                    status=Status.FAIL,
+                    status=Status.DEG,
                     observed_at_s=observed_at_s,
                     details="schema error",
                     latency_ms=result.latency_ms,

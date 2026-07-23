@@ -17,7 +17,7 @@ MAX_FONT_SIZE_PX = 32
 DEFAULT_FAILURE_COLOR = "red"
 DEFAULT_FONT_SIZE = "medium"
 DEFAULT_BOOT_LOGO_DURATION_S = 4
-DISPLAY_MODES = frozenset({"standard", "compact"})
+DISPLAY_MODES = frozenset({"standard", "compact", "matrix"})
 LIVENESS_POSITIONS = frozenset({"left", "center", "right"})
 DISPLAY_ROTATIONS = frozenset({0, 180})
 BRIGHTNESS_PRESETS = {
@@ -551,11 +551,11 @@ def _parse_display_mode(value: object) -> str:
     if value is None:
         return "standard"
     if not isinstance(value, str):
-        raise ValueError("device.display.mode must be 'standard' or 'compact'")
+        raise ValueError("device.display.mode must be 'standard', 'compact', or 'matrix'")
 
     normalized = _fold(value)
     if normalized not in DISPLAY_MODES:
-        raise ValueError("device.display.mode must be 'standard' or 'compact'")
+        raise ValueError("device.display.mode must be 'standard', 'compact', or 'matrix'")
     return normalized
 
 

@@ -46,8 +46,32 @@ TELNET_IDLE_TIMEOUT_S = 0.12
 TELNET_POST_DATA_IDLE_TIMEOUT_S = 0.1
 TELNET_STABLE_OPEN_THRESHOLD_MS = 500
 TELNET_EARLY_CLOSE_THRESHOLD_MS = 100
+# Once this many visible (non-whitespace, ANSI/IAC-stripped) bytes have arrived,
+# the listener has demonstrably served its terminal UI: telnet is confirmed
+# working and the probe can stop. This makes the probe's runtime track the actual
+# response (time to deliver a real screen) instead of TCP fragmentation artifacts.
+# Without it, a fast-bursting device (e.g. U64: whole screen in one burst, <8
+# chunks) idles all the way to TELNET_STABLE_OPEN_THRESHOLD_MS, while a device
+# whose screen fragments into >=8 TCP segments (e.g. U2) exits early at the
+# TELNET_MAX_RECV_CHUNKS cap -- so two devices running the same firmware report
+# wildly different latencies (~570ms vs ~335ms) for identical ~630-byte screens.
+# The 1541Ultimate telnet UI (U64/U64ii/U2/U2+) delivers ~290 visible bytes in
+# its first ~512-byte chunk, so any target that is genuinely serving crosses this
+# threshold in its first read. Sub-threshold responses (small banners, prompts,
+# silence) still fall through to the existing stable-open / idle-timeout logic.
+TELNET_CONFIRMED_VISIBLE_BYTES = 128
 DEVICE_SOCKET_RECV_CHUNK_SIZE = 512
 TELNET_RECV_CHUNK_SIZE = 512
+# recv/recvfrom buffers sized to the actual payloads. The previous 4096-byte
+# buffers failed to allocate on the fragmented Pico heap under multi-probe load
+# ("memory allocation failed, allocating 4096"), which flipped genuinely healthy
+# ping/ident probes to FAIL even though the targets responded fine. A raw ICMP
+# echo reply is tens of bytes; the UDP JSON discovery reply is a few hundred; the
+# TCP stream readers loop, so a smaller chunk just costs an extra iteration.
+# Keeping these small lets the allocation succeed when memory is tight.
+ICMP_RECV_BUFFER_BYTES = 512
+IDENT_RECV_BUFFER_BYTES = 1024
+SOCKET_STREAM_RECV_BYTES = 1024
 TELNET_SB = 250
 TELNET_SE = 240
 TELNET_FAILURE_SCAN_TAIL_BYTES = max(len(marker) for marker in TELNET_FAILURE_MARKERS)
@@ -218,6 +242,7 @@ def _icmp_reply_offset(packet: bytes) -> int | None:
 
 
 def _raw_icmp_ping(target: str, timeout_s: int) -> PingProbeResult | None:
+    _maybe_collect_gc()
     protocol = getattr(socket, "IPPROTO_ICMP", 1)
     try:
         handle = socket.socket(socket.AF_INET, socket.SOCK_RAW, protocol)
@@ -235,14 +260,22 @@ def _raw_icmp_ping(target: str, timeout_s: int) -> PingProbeResult | None:
         struct.pack("!BBHHH", ICMP_ECHO_REQUEST_TYPE, 0, checksum, identifier, sequence) + payload
     )
 
+    deadline = _deadline_after_s(timeout_s)
     try:
         resolved = socket.getaddrinfo(target, 0, socket.AF_INET, 0, 0)
         endpoint = resolved[0][-1]
         host = endpoint[0]
-        handle.settimeout(timeout_s)
         handle.sendto(request_packet, (host, 1))
         while True:
-            response_packet, _address = handle.recvfrom(4096)
+            # Slice the recv wait so the watchdog is fed while no reply arrives;
+            # a single blocking recvfrom against an unreachable host would stall
+            # the full ~8s timeout and trip the hardware watchdog reset.
+            try:
+                response_packet = _recv_datagram(
+                    handle, ICMP_RECV_BUFFER_BYTES, deadline, stage="icmp-recv"
+                )
+            except TimeoutError:
+                return PingProbeResult(ok=False, latency_ms=None, details="timeout")
             reply_offset = _icmp_reply_offset(response_packet)
             if reply_offset is None:
                 continue
@@ -267,8 +300,6 @@ def _raw_icmp_ping(target: str, timeout_s: int) -> PingProbeResult | None:
         )
     finally:
         _close_socket(handle)
-
-    return PingProbeResult(ok=False, latency_ms=None, details="timeout")
 
 
 def _deadline_after_s(timeout_s: int | float):
@@ -538,13 +569,17 @@ def portable_ping_runner(target: str, timeout_s: int, trace=None) -> PingProbeRe
 
     def _single_ping() -> PingProbeResult:
         _emit_probe_activity()
+        if _is_micropython_runtime():
+            # Prefer the watchdog-fed raw ICMP path on device. uping.ping() is a
+            # single blocking call (up to 3 x timeout_s*500ms) with no activity
+            # callback; at an 8s timeout that is ~12s, which exceeds the ~8.4s
+            # RP2040 watchdog and would reset the board.
+            raw_socket_result = _raw_icmp_ping(target, timeout_s)
+            if raw_socket_result is not None:
+                return raw_socket_result
         try:
             import uping  # type: ignore
         except ImportError:
-            if _is_micropython_runtime():
-                raw_socket_result = _raw_icmp_ping(target, timeout_s)
-                if raw_socket_result is not None:
-                    return raw_socket_result
             try:
                 import subprocess
             except ImportError:
@@ -575,7 +610,10 @@ def portable_ping_runner(target: str, timeout_s: int, trace=None) -> PingProbeRe
             )
 
         started_at, uses_ticks_ms = _start_timer()
-        per_packet_timeout_ms = max(1000, timeout_s * 500)
+        # Cap the per-packet wait so 3 packets stay well under the ~8.4s RP2040
+        # watchdog even in this unfed fallback (only reached on MicroPython when
+        # raw ICMP is unavailable): 3 x 2000ms = 6s < 8388ms.
+        per_packet_timeout_ms = max(1000, min(timeout_s * 500, 2000))
         response = uping.ping(target, count=3, timeout=per_packet_timeout_ms, quiet=True)
         packets_received = int(response[1]) if len(response) > 1 else 0
         latency_ms = float(response[-1]) if response else None
@@ -621,7 +659,9 @@ def _parse_socket_target_with_schemes(
     return raw_target, default_port
 
 
-IDENT_MAX_ATTEMPTS = 2
+# Single attempt only: retries are deferred to the next scheduled interval
+# (VIVIPI-NET-001), and resending would hide genuine device flakiness.
+IDENT_MAX_ATTEMPTS = 1
 
 
 def portable_ident_runner(target: str, timeout_s: int, trace=None) -> PingProbeResult:
@@ -632,17 +672,16 @@ def portable_ident_runner(target: str, timeout_s: int, trace=None) -> PingProbeR
     started_at, uses_ticks_ms = _start_timer()
     deadline = _deadline_after_s(timeout_s)
     last_error = None
+    _maybe_collect_gc()
     for _attempt in range(IDENT_MAX_ATTEMPTS):
-        try:
-            remaining_s = _deadline_remaining_s(deadline)
-        except TimeoutError:
+        if _deadline_remaining_ms(deadline) <= 0:
             break
         handle = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
+            _emit_probe_activity()
             _emit_probe_trace(
                 trace, "socket-open", stage="ident-open", target=endpoint, timeout_s=timeout_s
             )
-            handle.settimeout(remaining_s)
             handle.sendto(request_payload, (host, port))
             _emit_socket_send(
                 trace,
@@ -651,7 +690,12 @@ def portable_ident_runner(target: str, timeout_s: int, trace=None) -> PingProbeR
                 operation="json-discovery",
                 target=endpoint,
             )
-            payload, _address = handle.recvfrom(4096)
+            # Slice the recv wait so the watchdog keeps being fed while we wait
+            # for the UDP reply; a blocking recvfrom against an unreachable host
+            # would stall the full timeout and trip the hardware watchdog reset.
+            payload = _recv_datagram(
+                handle, IDENT_RECV_BUFFER_BYTES, deadline, trace=trace, stage="ident-recv"
+            )
             _emit_socket_recv(
                 trace,
                 stage="ident-recv",
@@ -676,8 +720,11 @@ def portable_ident_runner(target: str, timeout_s: int, trace=None) -> PingProbeR
         except (OSError, TimeoutError) as error:
             last_error = error
         except Exception as error:
+            # A reply arrived but was invalid (bad JSON / echo mismatch / missing
+            # field): the device is reachable, just answering wrongly -> DEG.
             return PingProbeResult(
                 ok=False,
+                status=Status.DEG,
                 latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
                 details=_probe_error_detail(error),
             )
@@ -895,8 +942,11 @@ def portable_dma_runner(
             details=f"{identify_detail} {debug_detail} flash_page_size={page_size} flash_pages={page_count}",
         )
     except Exception as error:
+        # Connected (handle opened) but the DMA exchange failed -> reachable but
+        # degraded (DEG). Never connected -> unavailable (FAIL).
         return PingProbeResult(
             ok=False,
+            status=Status.DEG if handle is not None else Status.FAIL,
             latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
             details=_probe_error_detail(error),
         )
@@ -941,19 +991,32 @@ def portable_http_runner(
     try:
         connection.request(method, path, headers=headers)
         response = connection.getresponse()
-        body_bytes = response.read()
+        status_code = int(response.status)
+        # Once the server has answered with a status line it is reachable, so a
+        # subsequent body-read failure must not discard the status and downgrade
+        # a responding endpoint to an outage. Keep the code; _status_for_http
+        # maps a non-OK code to DEG, not FAIL.
+        try:
+            body_bytes = response.read()
+        except Exception:
+            body_bytes = b""
         return HttpResponseResult(
-            status_code=int(response.status),
+            status_code=status_code,
             body=_decode_http_body(body_bytes),
             latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
-            details=f"HTTP {response.status}",
+            details=f"HTTP {status_code}",
+            reachable=True,
         )
     except Exception as error:
+        # http.client sets connection.sock once the TCP connect succeeds, so a
+        # request that fails after connecting (reset mid-request, malformed
+        # response before a status line) is reachable -> DEG, not a full outage.
         return HttpResponseResult(
             status_code=None,
             body=None,
             latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
             details=_probe_error_detail(error),
+            reachable=getattr(connection, "sock", None) is not None,
         )
     finally:
         connection.close()
@@ -1262,6 +1325,29 @@ def _socket_recv(
         return chunk
 
 
+def _recv_datagram(handle, size: int, deadline, trace=None, *, stage: str) -> bytes:
+    """Return the next datagram, slicing the wait so the probe-activity callback
+    (the watchdog feed) fires at least once per ``SOCKET_WAIT_SLICE_MS`` slice.
+
+    A plain blocking ``recvfrom`` against an unreachable host stalls for the full
+    probe timeout (~8s) without feeding the ~8.4s RP2040 watchdog, which trips a
+    hardware reset. Reusing ``_socket_wait`` bounds the max feed gap to one slice
+    on every path (``select.poll`` or the settimeout fallback), and a one-slice
+    recv timeout guards against a spurious readiness wakeup blocking forever.
+    Raises ``TimeoutError`` when the deadline passes with no datagram.
+    """
+    while True:
+        _socket_wait(handle, deadline, writable=False, trace=trace, stage=stage)
+        _set_socket_timeout(handle, float(SOCKET_WAIT_SLICE_MS) / 1000.0)
+        try:
+            payload, _address = handle.recvfrom(size)
+        except OSError as error:
+            if _classify_network_error(error) == "timeout" or _is_would_block(error):
+                continue
+            raise
+        return payload
+
+
 def _ftp_read_response(
     handle, deadline=None, trace=None, operation=None, target=None, budget=None
 ) -> tuple[int, str]:
@@ -1279,7 +1365,7 @@ def _ftp_read_response(
                 budget=budget,
             )
         else:
-            chunk = handle.recv(4096)
+            chunk = handle.recv(SOCKET_STREAM_RECV_BYTES)
         if not chunk:
             break
         buffer.extend(chunk)
@@ -1347,7 +1433,7 @@ def _ftp_nlst_names(payload: bytes) -> list[str]:
 def _recv_all(handle) -> bytes:
     chunks: list[bytes] = []
     while True:
-        chunk = handle.recv(4096)
+        chunk = handle.recv(SOCKET_STREAM_RECV_BYTES)
         if not chunk:
             break
         chunks.append(chunk)
@@ -1417,8 +1503,10 @@ def portable_ftp_runner(
         else:
             ftp = ftplib.FTP()
             started_at, uses_ticks_ms = _start_timer()
+            reached = False
             try:
                 greeting = ftp.connect(host, port, timeout=timeout_s)
+                reached = True
                 if not greeting.startswith("220"):
                     raise RuntimeError(f"expected FTP 220, got {greeting}")
                 try:
@@ -1445,8 +1533,15 @@ def portable_ftp_runner(
                     details=f"pwd={working_directory}",
                 )
             except Exception as error:
+                # Connected to the FTP control port but the exchange failed ->
+                # reachable but degraded (DEG). Never connected -> unavailable.
+                # ftplib.connect() opens the socket (sets ftp.sock) *before*
+                # reading the greeting, so a bad/partial greeting still counts as
+                # reached even though connect() raised before `reached = True`.
+                reachable = reached or getattr(ftp, "sock", None) is not None
                 return PingProbeResult(
                     ok=False,
+                    status=Status.DEG if reachable else Status.FAIL,
                     latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
                     details=_probe_error_detail(error),
                 )
@@ -1561,8 +1656,11 @@ def portable_ftp_runner(
             details=f"pwd={working_directory}",
         )
     except Exception as error:
+        # Connected to the FTP control port but the exchange failed -> reachable
+        # but degraded (DEG). Never connected -> unavailable (FAIL).
         return PingProbeResult(
             ok=False,
+            status=Status.DEG if control_socket is not None else Status.FAIL,
             latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
             details=_probe_error_detail(error),
         )
@@ -1877,20 +1975,23 @@ def _classify_telnet_session(session: dict[str, object]) -> tuple[Status, str]:
         and session_duration_ms < TELNET_EARLY_CLOSE_THRESHOLD_MS
     )
 
+    # This classifier only runs on a session that actually connected, so every
+    # non-OK outcome is "reachable but degraded" (DEG), never a full outage (X).
+    # A connect failure is handled by the runner's except path instead.
     if bool(session["failure_detected"]):
-        return Status.FAIL, "telnet failure marker present"
+        return Status.DEG, "telnet failure marker present"
     if has_visible_text:
         return Status.OK, "response-received"
     if early_close:
-        return Status.FAIL, "closed immediately"
+        return Status.DEG, "closed immediately"
     if handshake_detected or close_reason in {
         "idle-timeout",
         "stable-open",
         "remote-close",
         "reset",
     }:
-        return Status.FAIL, "no telnet response"
-    return Status.FAIL, _telnet_failure_detail(session)
+        return Status.DEG, "no telnet response"
+    return Status.DEG, _telnet_failure_detail(session)
 
 
 def _read_telnet_until_idle(
@@ -2017,6 +2118,12 @@ def _read_telnet_until_idle(
         )
         if failure_detected:
             return snapshot("failure-marker", failure_detected=True)
+        if visible_bytes >= TELNET_CONFIRMED_VISIBLE_BYTES:
+            # The listener has served a substantial slice of its terminal UI;
+            # telnet is confirmed working. Stop here so the probe's latency
+            # reflects the response, not how the ~2KB screen happened to be split
+            # across TCP segments or the arbitrary stable-open wait.
+            return snapshot("response-confirmed")
     return snapshot("idle-timeout")
 
 
@@ -2058,9 +2165,11 @@ def portable_telnet_runner(
             )
             return _telnet_result_from_session(session, _elapsed_ms(started_at, uses_ticks_ms))
         except Exception as error:
+            # Connected but the telnet session failed -> reachable but degraded
+            # (DEG). Never connected -> unavailable (FAIL).
             return PingProbeResult(
                 ok=False,
-                status=Status.FAIL,
+                status=Status.DEG if handle is not None else Status.FAIL,
                 latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
                 details=_probe_error_detail(error),
                 metadata=_telnet_result_metadata(_classify_network_error(error), 0.0, False, False),
@@ -2080,9 +2189,11 @@ def portable_telnet_runner(
         )
         return _telnet_result_from_session(session, _elapsed_ms(started_at, uses_ticks_ms))
     except Exception as error:
+        # Connected but the telnet session failed -> reachable but degraded
+        # (DEG). Never connected -> unavailable (FAIL).
         return PingProbeResult(
             ok=False,
-            status=Status.FAIL,
+            status=Status.DEG if handle is not None else Status.FAIL,
             latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
             details=_probe_error_detail(error),
             metadata=_telnet_result_metadata(_classify_network_error(error), 0.0, False, False),
@@ -2188,13 +2299,18 @@ def _portable_http_runner_socket(
             body=body,
             latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
             details=f"HTTP {status_code}",
+            reachable=True,
         )
     except Exception as error:
+        # Connected (handle opened) but the HTTP exchange failed -> reachable
+        # but degraded, so execution maps a missing status to DEG not FAIL.
+        # Never connected -> unavailable (reachable stays False -> FAIL).
         return HttpResponseResult(
             status_code=None,
             body=None,
             latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
             details=_probe_error_detail(error),
+            reachable=handle is not None,
         )
     finally:
         _close_socket(handle, trace=trace, target=f"{host}:{port}")

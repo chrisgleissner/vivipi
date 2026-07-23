@@ -223,6 +223,16 @@ This is different from the detail view. Each check has exactly one detail page. 
   <em>Overview state when the Pixel 4-backed service check becomes unreachable</em>
 </p>
 
+### Matrix view
+
+To fit every probe on a single non-scrolling screen, set `mode: matrix` on the display in `config/build-deploy.local.yaml` (the supported modes are `standard` (default), `compact`, and `matrix`). The matrix draws one row per device and one column per probe class — `P` ping, `R` REST/HTTP, `F` FTP, `T` telnet, `I` ident, `D` DMA — with a single glyph per cell: `.` OK, `!` degraded, `X` failed (reverse video), `?` unknown, and blank when that probe is not configured for the device.
+
+<p align="center">
+  <img src="./docs/img/vivipi_tested_pico_oled_fail_matrix.jpg" alt="Waveshare Pico OLED 1.3 in matrix mode: a compact glyph grid with one row per device (C64U, U2, U64, PIXEL4) and one column per probe class (P R F T I D). Every cell shows a dot for OK except two failing U64 probes, PING and IDENT, each marked by an inverse X." width="720">
+  <br>
+  <em>Matrix view: all probes on one page, all OK except two U64 failures (PING and IDENT), each shown as an inverse X</em>
+</p>
+
 On the tested monochrome OLED build, `Key 1` / button `b` toggles between the overview and the detail page for the currently selected check. `Key 0` / button `a` advances through the checks; in detail mode, that means stepping from one probe's detail page to the next. Displays without buttons still show the overview pages, but they cannot open probe-specific detail pages interactively.
 
 The deployed OLED runtime keeps the overview acting like a clean status board rather than a menu with a persistent cursor. The buttons therefore matter mainly for entering detail mode and moving between probe details, not for turning the overview into a visibly highlighted selector.
@@ -300,7 +310,7 @@ Examples of merged Ultimate 64 firmware pull request which leveraged these CLI t
 
 For real-device checks outside the Pico UI, start with:
 
-- `./scripts/c64_health_check` for one concise pass across both configured targets
+- `./scripts/c64_health_check` for one concise pass across all configured targets (`c64u`, `u64`, `u2`)
 - `./scripts/vivipulse_stress_test.sh` for an artifacted soak run
 - `./scripts/u64/u64_connection_test.py --profile soak|stress -H u64|c64u` for direct protocol exercise
 

@@ -75,6 +75,12 @@ PROBE_SURFACE_CHOICES = {
     "modem": (ProbeSurface.SMOKE,),
 }
 PROBE_SURFACE_ORDER = (ProbeSurface.SMOKE, ProbeSurface.READ, ProbeSurface.READWRITE)
+# Degradation ladder used by _fallback_correctness to pick the "nearest supported
+# lower" mode when a globally requested --mode is not available for a protocol.
+# VANISH is deliberately excluded: it is a telnet-only reap lane, not a point on
+# the correctness continuum. Including it here made `--mode vanish` degrade every
+# other protocol (ftp -> INVALID, http -> INCOMPLETE) as a side effect. Keeping it
+# out means a VANISH request falls back to the safe default for non-telnet probes.
 PROBE_CORRECTNESS_ORDER = (
     ProbeCorrectness.COMPLETE,
     ProbeCorrectness.OPEN,
@@ -85,7 +91,7 @@ PROBE_CORRECTNESS_CHOICES = {
     "ping": (ProbeCorrectness.COMPLETE,),
     "ident": (ProbeCorrectness.COMPLETE,),
     "dma": (ProbeCorrectness.COMPLETE,),
-    "telnet": (ProbeCorrectness.COMPLETE, ProbeCorrectness.OPEN, ProbeCorrectness.INCOMPLETE),
+    "telnet": (ProbeCorrectness.COMPLETE, ProbeCorrectness.OPEN, ProbeCorrectness.INCOMPLETE, ProbeCorrectness.VANISH),
     "ftp": (ProbeCorrectness.COMPLETE, ProbeCorrectness.OPEN, ProbeCorrectness.INCOMPLETE, ProbeCorrectness.INVALID),
     "http": (ProbeCorrectness.COMPLETE, ProbeCorrectness.INCOMPLETE),
     "modem": (ProbeCorrectness.COMPLETE,),
@@ -317,6 +323,26 @@ def parse_duration_s(value: str) -> int:
     return duration_s
 
 
+def parse_session_slots(value: str) -> int:
+    try:
+        slots = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("--session-slots must be an integer >= 1") from error
+    if slots < 1:
+        raise argparse.ArgumentTypeError("--session-slots must be >= 1")
+    return slots
+
+
+def parse_reap_timeout_s(value: str) -> float:
+    try:
+        reap_timeout_s = float(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("--reap-timeout-s must be a number > 0") from error
+    if reap_timeout_s <= 0:
+        raise argparse.ArgumentTypeError("--reap-timeout-s must be > 0")
+    return reap_timeout_s
+
+
 def _fallback_surface(protocol: str, requested: ProbeSurface) -> ProbeSurface:
     available = PROBE_SURFACE_CHOICES[protocol]
     if requested in available:
@@ -332,6 +358,11 @@ def _fallback_correctness(protocol: str, requested: ProbeCorrectness) -> ProbeCo
     available = PROBE_CORRECTNESS_CHOICES[protocol]
     if requested in available:
         return requested
+    if requested not in PROBE_CORRECTNESS_ORDER:
+        # A protocol-specific mode (e.g. the telnet-only VANISH reap lane) was
+        # requested globally for a protocol that does not support it. Fall back to
+        # the safe default rather than silently degrading this protocol.
+        return available[0]
     requested_index = PROBE_CORRECTNESS_ORDER.index(requested)
     for candidate in reversed(PROBE_CORRECTNESS_ORDER[: requested_index + 1]):
         if candidate in available:
@@ -412,6 +443,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--http-mode", choices=[value.value for value in ProbeCorrectness], default=None, help="HTTP probe correctness.")
     parser.add_argument("--ftp-mode", choices=[value.value for value in ProbeCorrectness], default=None, help="FTP probe correctness.")
     parser.add_argument("--telnet-mode", choices=[value.value for value in ProbeCorrectness], default=None, help="Telnet probe correctness.")
+    parser.add_argument("--iface", default=os.environ.get("C64_LAN_IFACE"),
+                        help="LAN interface to add the throwaway victim IP on for --telnet-mode vanish.")
+    parser.add_argument("--victim-ip", default=os.environ.get("C64_VICTIM_IP"),
+                        help="Unused LAN IP to source the vanishing half-open connections from (--telnet-mode vanish).")
+    parser.add_argument("--session-slots", type=parse_session_slots, default=4,
+                        help="Telnet session slots to fill for the half-open lane (= firmware TELNET_MAX_SESSIONS).")
+    parser.add_argument("--reap-timeout-s", type=parse_reap_timeout_s, default=75.0,
+                        help="Seconds to wait for keepalive reaping before the half-open lane declares RED.")
     parser.add_argument(
         "--stream",
         nargs="*",
@@ -442,6 +481,10 @@ def build_runtime_settings(args: argparse.Namespace) -> RuntimeSettings:
         verbose=args.verbose,
         network_password=shared_network_password,
         modem_port=args.modem_port,
+        lan_iface=args.iface or "",
+        victim_ip=args.victim_ip or "",
+        session_slots=args.session_slots,
+        reap_timeout_s=args.reap_timeout_s,
     )
 
 
@@ -567,6 +610,18 @@ def resolve_execution_config(args: argparse.Namespace) -> ExecutionConfig:
 
 
 def validate_execution_config(config: ExecutionConfig) -> None:
+    if ProbeCorrectness.VANISH in config.probe_correctness.values():
+        # The vanish reap lane fills and monopolises the whole telnet session
+        # table for one fill/vanish/recover cycle and mutates a shared victim IP
+        # alias. Any concurrency (multiple runner threads, or the per-probe
+        # threads spawned by the concurrent schedule) races on that table and the
+        # alias, producing misleading EEXIST/"could not saturate" failures. Require
+        # a single runner and sequential scheduling so it runs alone.
+        if config.runners != 1 or config.schedule != SCHEDULE_SEQUENTIAL:
+            raise ValueError(
+                "telnet vanish mode monopolises the whole telnet session table and "
+                "cannot run with concurrency; use --runners 1 --schedule sequential"
+            )
     if config.schedule != SCHEDULE_CONCURRENT:
         return
     if config.runners <= u64_http.PROBE_WRITE_RUNNER_SLOT_COUNT:

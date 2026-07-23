@@ -3,8 +3,35 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from vivipi.core.models import AppMode, AppState, CheckRuntime, DisplayMode, Status
-from vivipi.core.state import selected_check, visible_checks
+from vivipi.core.state import overview_checks, selected_check, visible_checks
 from vivipi.core.text import center_text, column_widths, compact_overview_cell, overview_row_layout, truncate_text
+
+
+# --- Matrix overview -------------------------------------------------------
+# Targets are rows, probe types are columns. Each check name is
+# "<TARGET> <PROBE>"; its last word selects the column. This lets the whole fleet
+# (many targets x several probes) fit on one static screen: a calm dot grid when
+# healthy, with failed probes rendered as a loud inverted block at a fixed
+# (target, probe) position -- glanceable from across the room, no paging, no
+# reordering, so positional memory holds.
+MATRIX_DEFAULT_COLUMNS = ("P", "R", "F", "T", "I", "D")
+MATRIX_COLUMN_KEYWORDS = {
+    "P": ("PING", "ADB"),  # ADB reachability is treated as a ping-class probe
+    "R": ("REST", "HTTP"),
+    "F": ("FTP",),
+    "T": ("TELNET",),
+    "I": ("IDENT",),
+    "D": ("DMA",),
+}
+_MATRIX_KEYWORD_TO_COLUMN = {
+    keyword: column for column, keywords in MATRIX_COLUMN_KEYWORDS.items() for keyword in keywords
+}
+MATRIX_GLYPH_NONE = " "  # no such (target, probe) check is configured
+MATRIX_GLYPH_OK = "."
+MATRIX_GLYPH_DEG = "!"
+MATRIX_GLYPH_FAIL = "X"
+MATRIX_GLYPH_UNKNOWN = "?"
+_MATRIX_COLUMN_CELL_WIDTH = 2  # one leading space + one status glyph per column
 
 
 def _enum_text(value) -> str:
@@ -33,6 +60,12 @@ class Frame:
     bottom_pixel_height_px: int = 1
     bottom_pixel_gap_px: int = 0
     contrast: int | None = None
+    # Optional per-row pixel layout. When set, each entry is
+    # (y_origin_px, glyph_height_px) for the row at that index, overriding the
+    # default "row_index * font_height" placement and uniform glyph height. Used
+    # by the matrix view to spread a small number of configured rows across the
+    # full display height with a larger glyph. None keeps the legacy layout.
+    row_layout: tuple[tuple[int, int], ...] | None = None
 
 
 def _blank_rows(row_width: int, page_size: int) -> list[str]:
@@ -169,7 +202,130 @@ def _compact_overview_frame(state: AppState, checks: tuple[CheckRuntime, ...], h
     )
 
 
-def _overview_frame(state: AppState, highlight_selection: bool) -> Frame:
+def _matrix_parse_check(name: str) -> tuple[str | None, str | None]:
+    tokens = str(name).split()
+    if len(tokens) < 2:
+        return None, None
+    column = _MATRIX_KEYWORD_TO_COLUMN.get(tokens[-1].upper())
+    if column is None:
+        return None, None
+    return " ".join(tokens[:-1]), column
+
+
+def _matrix_cell_glyph(check: CheckRuntime | None) -> str:
+    if check is None:
+        return MATRIX_GLYPH_NONE
+    if check.status == Status.FAIL:
+        return MATRIX_GLYPH_FAIL
+    if check.status == Status.DEG:
+        return MATRIX_GLYPH_DEG
+    if check.status == Status.OK:
+        return MATRIX_GLYPH_OK
+    return MATRIX_GLYPH_UNKNOWN
+
+
+def matrix_row_layout(
+    content_row_count: int,
+    display_height_px: int,
+    reserved_bottom_px: int,
+    base_font_height_px: int,
+) -> tuple[tuple[int, int], ...] | None:
+    # Spread the configured matrix rows across the full display height (minus the
+    # reserved bottom liveness band) and enlarge each glyph to fill its row, so a
+    # small fleet uses the whole screen instead of a thin strip at the top.
+    if content_row_count < 1 or display_height_px < 1 or base_font_height_px < 1:
+        return None
+    usable = max(base_font_height_px, int(display_height_px) - max(0, int(reserved_bottom_px)))
+    pitch = usable // content_row_count
+    # Only apply the enlarged layout when it actually grows the rows; otherwise
+    # keep the standard uniform spacing so dense fleets do not shrink text.
+    if pitch <= base_font_height_px:
+        return None
+    return tuple((row_index * pitch, pitch) for row_index in range(content_row_count))
+
+
+def _matrix_overview_frame(
+    state: AppState,
+    checks: tuple[CheckRuntime, ...],
+    geometry: dict[str, int] | None = None,
+) -> Frame | None:
+    columns = MATRIX_DEFAULT_COLUMNS
+    label_width = state.row_width - (_MATRIX_COLUMN_CELL_WIDTH * len(columns))
+    if label_width < 1:
+        return None  # not enough width for this many columns; caller falls back
+
+    grid: dict[str, dict[str, CheckRuntime]] = {}
+    target_order: list[str] = []
+    for check in checks:
+        target, column = _matrix_parse_check(check.name)
+        if target is None or column not in columns:
+            continue
+        if target not in grid:
+            grid[target] = {}
+            target_order.append(target)
+        # First check wins per (target, column) so a stable name sort is honoured.
+        grid[target].setdefault(column, check)
+
+    if not grid:
+        return None  # nothing parsed into the matrix; caller falls back
+
+    # Multi-probe targets first (by name), single-probe targets (e.g. the phone)
+    # last -- deterministic and stable, so each row keeps a fixed home.
+    target_order.sort(key=lambda target: (len(grid[target]) <= 1, target))
+
+    header = _pad_right(
+        (" " * label_width) + "".join(" " + column for column in columns),
+        state.row_width,
+    )
+    rows = [header]
+    failure_spans: list[TextSpan] = []
+
+    for target in target_order[: state.page_size - 1]:
+        row_index = len(rows)
+        parts = [_pad_right(target[:label_width], label_width)]
+        cursor = label_width
+        for column in columns:
+            check = grid[target].get(column)
+            parts.append(" " + _matrix_cell_glyph(check))
+            if check is not None and check.status == Status.FAIL:
+                failure_spans.append(_status_span(row_index, cursor, cursor + _MATRIX_COLUMN_CELL_WIDTH))
+            cursor += _MATRIX_COLUMN_CELL_WIDTH
+        rows.append(_pad_right("".join(parts), state.row_width))
+
+    row_layout = _resolve_matrix_row_layout(rows, geometry)
+    if row_layout is None:
+        while len(rows) < state.page_size:
+            rows.append(" " * state.row_width)
+
+    return Frame(
+        rows=tuple(rows[: state.page_size]),
+        shift_offset=state.shift_offset,
+        failure_spans=tuple(failure_spans),
+        row_layout=row_layout,
+    )
+
+
+def _resolve_matrix_row_layout(rows: list[str], geometry: dict[str, int] | None) -> tuple[tuple[int, int], ...] | None:
+    if not geometry:
+        return None
+    display_height_px = geometry.get("display_height_px")
+    font_height_px = geometry.get("font_height_px")
+    if display_height_px is None or font_height_px is None:
+        return None
+    reserved_bottom_px = geometry.get("reserved_bottom_px", 0)
+    return matrix_row_layout(len(rows), int(display_height_px), int(reserved_bottom_px), int(font_height_px))
+
+
+def _overview_frame(state: AppState, highlight_selection: bool, geometry: dict[str, int] | None = None) -> Frame:
+    if state.display_mode == DisplayMode.MATRIX:
+        # The matrix packs every check onto one static screen, so it draws from
+        # the full check set rather than a single paged slice.
+        matrix = _matrix_overview_frame(state, overview_checks(state), geometry)
+        if matrix is not None:
+            return matrix
+        # Fall through to the paged views if the checks do not fit the matrix
+        # model (e.g. names that are not "<TARGET> <PROBE>").
+
     checks = visible_checks(state)
     if not checks:
         rows = _blank_rows(state.row_width, state.page_size)
@@ -177,13 +333,20 @@ def _overview_frame(state: AppState, highlight_selection: bool) -> Frame:
         rows[idle_row] = center_text("IDLE", state.row_width)
         return Frame(rows=tuple(rows), shift_offset=state.shift_offset)
 
-    if state.display_mode == DisplayMode.STANDARD and state.overview_columns == 1:
+    if state.display_mode in (DisplayMode.STANDARD, DisplayMode.MATRIX) and state.overview_columns == 1:
         return _legacy_overview_frame(state, checks, highlight_selection)
 
     return _compact_overview_frame(state, checks, highlight_selection)
 
 
-def render_frame(state: AppState, now_s: float | None = None, highlight_selection: bool = True) -> Frame:
+def render_frame(
+    state: AppState,
+    now_s: float | None = None,
+    highlight_selection: bool = True,
+    display_height_px: int | None = None,
+    font_height_px: int | None = None,
+    reserved_bottom_px: int | None = None,
+) -> Frame:
     if state.mode == AppMode.DETAIL:
         selected = selected_check(state)
         failure_spans = ()
@@ -206,4 +369,15 @@ def render_frame(state: AppState, now_s: float | None = None, highlight_selectio
             rows=_about_rows(state, state.row_width, state.page_size),
             shift_offset=state.shift_offset,
         )
-    return _overview_frame(state, highlight_selection)
+    # Display pixel geometry lets the matrix view spread its rows across the
+    # full screen with a larger glyph; other overview modes ignore it.
+    geometry = (
+        {
+            "display_height_px": int(display_height_px),
+            "font_height_px": int(font_height_px),
+            "reserved_bottom_px": int(reserved_bottom_px or 0),
+        }
+        if display_height_px is not None and font_height_px is not None
+        else None
+    )
+    return _overview_frame(state, highlight_selection, geometry)

@@ -1,6 +1,7 @@
 import sys
 import builtins
 import struct
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -289,9 +290,9 @@ def test_telnet_session_helpers_cover_negotiated_and_fallback_failure_paths():
         }
     )
 
-    assert negotiated_status == Status.FAIL
+    assert negotiated_status == Status.DEG
     assert negotiated_detail == "no telnet response"
-    assert fallback_status == Status.FAIL
+    assert fallback_status == Status.DEG
     assert fallback_detail == "refused"
     assert (
         runtime_checks._telnet_failure_detail(
@@ -859,7 +860,10 @@ def test_portable_ident_runner_accepts_valid_json_echo(monkeypatch):
     assert calls[-1] == "close"
 
 
-def test_portable_ident_runner_retries_on_timeout_then_succeeds(monkeypatch):
+def test_portable_ident_runner_tolerates_transient_recv_timeout_then_succeeds(monkeypatch):
+    # A per-slice recvfrom timeout means "no reply this slice" — the sliced wait
+    # keeps waiting for the reply on the same request (one send), rather than
+    # resending. This is the bounded-progress-within-a-single-attempt contract.
     attempts = []
     recvfrom_call_count = {"count": 0}
 
@@ -893,11 +897,18 @@ def test_portable_ident_runner_retries_on_timeout_then_succeeds(monkeypatch):
     assert result.ok is True
     assert result.details == "product=U64 hostname=u64"
     sendto_calls = [a for a in attempts if isinstance(a, tuple) and a[0] == "sendto"]
-    assert len(sendto_calls) == 2
+    assert len(sendto_calls) == 1
+    # It waited across two recv slices before the reply landed.
+    assert recvfrom_call_count["count"] == 2
 
 
-def test_portable_ident_runner_fails_after_retries_exhausted(monkeypatch):
+def test_portable_ident_runner_feeds_watchdog_and_times_out_when_unreachable(monkeypatch):
+    # Regression for the RP2040 watchdog reset: against an unreachable host the
+    # UDP recvfrom must not stall the full probe timeout without feeding the
+    # watchdog. The sliced wait feeds the probe-activity callback while waiting,
+    # then returns a clean timeout result (never crashes / never reboots).
     attempts = []
+    feeds = []
 
     class AlwaysTimeoutSocket:
         def settimeout(self, timeout):
@@ -917,12 +928,25 @@ def test_portable_ident_runner_fails_after_retries_exhausted(monkeypatch):
     monkeypatch.setattr(
         runtime_checks.socket, "socket", lambda *args, **kwargs: AlwaysTimeoutSocket()
     )
+    # Short real deadline: the attempt guard and _socket_wait share it, so the
+    # probe terminates in ~50ms of sliced waiting instead of the full timeout.
+    monkeypatch.setattr(
+        runtime_checks, "_deadline_after_s", lambda _timeout_s: ("perf", time.perf_counter() + 0.05)
+    )
 
-    result = portable_ident_runner("ident://u64.example.local:64", 10)
+    runtime_checks.set_probe_activity_callback(lambda: feeds.append("feed"))
+    try:
+        result = portable_ident_runner("ident://u64.example.local:64", 8)
+    finally:
+        runtime_checks.set_probe_activity_callback(None)
 
     assert result.ok is False
+    assert "timeout" in result.details
+    # The watchdog was fed while waiting for the reply.
+    assert len(feeds) >= 1
+    # Send once, then wait for the reply across slices — no per-slice resend storm.
     sendto_calls = [a for a in attempts if isinstance(a, tuple) and a[0] == "sendto"]
-    assert len(sendto_calls) == runtime_checks.IDENT_MAX_ATTEMPTS
+    assert len(sendto_calls) == 1
 
 
 def test_portable_dma_runner_authenticates_and_reads_metadata(monkeypatch):
@@ -1730,7 +1754,7 @@ def test_portable_telnet_runner_treats_micropython_etimedout_after_connect_as_de
     result = portable_telnet_runner("192.0.2.10:23", 8)
 
     assert result.ok is False
-    assert result.status == Status.FAIL
+    assert result.status == Status.DEG
     assert result.details == "no telnet response"
     assert handle.timeout_values == [runtime_checks.TELNET_IDLE_TIMEOUT_S] * 5
     assert handle.closed is True
@@ -1973,7 +1997,7 @@ def test_portable_telnet_runner_stdlib_and_raw_error_paths(monkeypatch):
 
     empty = portable_telnet_runner("telnet://switch.example.local", 10)
     assert empty.ok is False
-    assert empty.status == Status.FAIL
+    assert empty.status == Status.DEG
     assert empty.details == "no telnet response"
 
     class TimeoutSocket(FakeSocket):
@@ -1993,7 +2017,7 @@ def test_portable_telnet_runner_stdlib_and_raw_error_paths(monkeypatch):
         "telnet://switch.example.local", 10, trace=lambda event, **fields: None
     )
     assert timeout_result.ok is False
-    assert timeout_result.status == Status.FAIL
+    assert timeout_result.status == Status.DEG
     assert timeout_result.details == "no telnet response"
     assert timeout_handle.calls == 5
 
@@ -2007,7 +2031,7 @@ def test_portable_telnet_runner_stdlib_and_raw_error_paths(monkeypatch):
         "telnet://switch.example.local", 10, trace=lambda event, **fields: None
     )
     assert broken_result.ok is False
-    assert broken_result.status == Status.FAIL
+    assert broken_result.status == Status.DEG
     assert broken_result.details == "closed immediately"
 
 
@@ -2032,7 +2056,7 @@ def test_portable_telnet_runner_stdlib_rejects_immediate_post_connect_reset(monk
     result = portable_telnet_runner("telnet://switch.example.local", 10)
 
     assert result.ok is False
-    assert result.status == Status.FAIL
+    assert result.status == Status.DEG
     assert result.details == "closed immediately"
     assert handle.closed is True
 
@@ -2333,7 +2357,8 @@ def test_portable_ping_runner_uping_sends_three_packets(monkeypatch):
     assert result.ok is True
     assert len(ping_calls) == 1
     assert ping_calls[0][2] == 3
-    assert ping_calls[0][3] == 5000
+    # Per-packet wait is capped at 2000ms so 3 packets stay under the watchdog.
+    assert ping_calls[0][3] == 2000
 
 
 def test_portable_ping_runner_uses_raw_icmp_fallback_on_micropython(monkeypatch):
@@ -2398,7 +2423,9 @@ def test_portable_ping_runner_uses_raw_icmp_fallback_on_micropython(monkeypatch)
 
     assert result.ok is True
     assert result.details == "reachable"
-    assert raw_socket.timeout == 10
+    # The recv wait is now sliced so the watchdog keeps being fed: the socket
+    # timeout is bounded to one slice, never the full probe timeout.
+    assert raw_socket.timeout == runtime_checks.SOCKET_WAIT_SLICE_MS / 1000.0
     assert raw_socket.sent[0][1] == ("192.168.1.1", 1)
     assert raw_socket.closed is True
 
@@ -3295,7 +3322,7 @@ def test_portable_telnet_runner_rejects_blank_sessions(monkeypatch):
     )
 
     assert result.ok is False
-    assert result.status == Status.FAIL
+    assert result.status == Status.DEG
     assert result.details == "closed immediately"
     assert handle.sent == []
 
@@ -3322,7 +3349,7 @@ def test_portable_telnet_runner_rejects_stable_idle_open_without_response(monkey
     )
 
     assert result.ok is False
-    assert result.status == Status.FAIL
+    assert result.status == Status.DEG
     assert result.details == "no telnet response"
     assert result.metadata["close_reason"] == "idle-timeout"
     assert result.metadata["handshake_detected"] is False
@@ -3438,14 +3465,14 @@ def test_portable_telnet_runner_waits_for_response_drain_before_success(monkeypa
     ]
 
 
-def test_portable_telnet_runner_accepts_chunk_limited_banner_response(monkeypatch):
+def test_portable_telnet_runner_confirms_multi_chunk_banner_response(monkeypatch):
     banner = (
         b'\xff\xfe"\xff\xfb\x01\x1bc\x1b[0;37;2m\x1b[1;1H\x1bc\x1b[0;37;2m\x1b[1;1H'
         b"\x1b[1;6H\x1b[0;37;1m*** C64 Ultimate (V1.49) 1.1.0 *** Remote ***\x1b[24;53H\x1b(BF7=HELP"
         b"\r\nREADY\r\n" * 32
     )
 
-    class ChunkLimitedBannerSocket(FakeSocket):
+    class MultiChunkBannerSocket(FakeSocket):
         def __init__(self):
             chunks = [banner[index : index + 96] for index in range(0, len(banner), 96)]
             super().__init__(chunks)
@@ -3453,19 +3480,34 @@ def test_portable_telnet_runner_accepts_chunk_limited_banner_response(monkeypatc
         def recv(self, _size):
             return super().recv(_size)
 
-    handle = ChunkLimitedBannerSocket()
+    handle = MultiChunkBannerSocket()
     monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: handle)
 
     result = portable_telnet_runner(
         "telnet://switch.example.local", 10, trace=lambda event, **fields: None
     )
 
+    # A banner that spans many chunks is confirmed as soon as enough visible
+    # terminal text has arrived, without draining the whole repaint stream.
     assert result.ok is True
     assert result.status == Status.OK
     assert result.details == "response-received"
-    assert result.metadata["close_reason"] == "chunk-limit"
+    assert result.metadata["close_reason"] == "response-confirmed"
     assert result.metadata["response_received"] is True
     assert result.metadata["handshake_detected"] is True
+
+
+def test_read_telnet_until_idle_confirms_once_visible_threshold_reached():
+    # A single chunk carrying more than the confirmation threshold of visible
+    # bytes must short-circuit to "response-confirmed" on the first read.
+    payload = b"A" * (runtime_checks.TELNET_CONFIRMED_VISIBLE_BYTES + 40)
+    handle = FakeSocket([payload, b"later repaint bytes that must not be read", b""])
+
+    session = runtime_checks._read_telnet_until_idle(handle)
+
+    assert session["close_reason"] == "response-confirmed"
+    assert session["has_visible_text"] is True
+    assert session["visible_bytes"] == runtime_checks.TELNET_CONFIRMED_VISIBLE_BYTES + 40
 
 
 def test_portable_telnet_runner_rejects_escape_only_terminal_control(monkeypatch):
@@ -3477,7 +3519,7 @@ def test_portable_telnet_runner_rejects_escape_only_terminal_control(monkeypatch
     )
 
     assert result.ok is False
-    assert result.status == Status.FAIL
+    assert result.status == Status.DEG
     assert result.details == "closed immediately"
     assert result.metadata["response_received"] is False
 
@@ -3491,7 +3533,7 @@ def test_portable_telnet_runner_rejects_explicit_failure_text_and_reports_socket
     )
 
     assert failed_login.ok is False
-    assert failed_login.status == Status.FAIL
+    assert failed_login.status == Status.DEG
     assert failed_login.details == "telnet failure marker present"
 
     monkeypatch.setattr(
@@ -3508,10 +3550,206 @@ def test_portable_telnet_runner_rejects_explicit_failure_text_and_reports_socket
     assert socket_failure.details == "refused"
 
 
-def test_read_telnet_until_idle_counts_visible_bytes_without_buffering_full_transcript():
+def test_portable_telnet_runner_connected_session_error_is_degraded_not_outage(monkeypatch):
+    # A telnet session that connects and then raises mid-read (reset / timeout /
+    # memory error) is reachable-but-degraded (DEG '!'), never a full outage.
+    handle = FakeSocket([])
+    monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: handle)
+    monkeypatch.setattr(
+        runtime_checks,
+        "_read_telnet_until_idle",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("session boom")),
+    )
+    result = portable_telnet_runner(
+        "telnet://switch.example.local", 10, trace=lambda event, **fields: None
+    )
+    assert result.ok is False
+    assert result.status == Status.DEG
+
+
+def test_portable_telnet_runner_connect_failure_is_outage(monkeypatch):
+    # Never connected -> unavailable (FAIL 'X').
+    monkeypatch.setattr(
+        "vivipi.runtime.checks._open_socket",
+        lambda host, port, timeout_s: (_ for _ in ()).throw(OSError("connection refused")),
+    )
+    result = portable_telnet_runner(
+        "telnet://switch.example.local", 10, trace=lambda event, **fields: None
+    )
+    assert result.ok is False
+    assert result.status == Status.FAIL
+
+
+def test_portable_ftp_runner_ftplib_bad_greeting_is_degraded(monkeypatch):
+    # ftplib.connect() opens the TCP socket (sets ftp.sock) before reading the
+    # greeting, so a bad/partial greeting on a connected server is reachable but
+    # degraded (DEG), while a refused connection stays a full outage (FAIL).
+    import ftplib
+
+    monkeypatch.setattr(runtime_checks, "_is_micropython_runtime", lambda: False)
+
+    class BadGreetingFTP:
+        def __init__(self):
+            self.sock = None
+
+        def connect(self, host, port, timeout=None):
+            self.sock = object()  # TCP connected before the greeting is read
+            raise RuntimeError("expected FTP 220, got noise")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(ftplib, "FTP", BadGreetingFTP)
+    degraded = portable_ftp_runner("ftp://host.example.local", 10)
+    assert degraded.ok is False
+    assert degraded.status == Status.DEG
+
+    class RefusedFTP:
+        def __init__(self):
+            self.sock = None
+
+        def connect(self, host, port, timeout=None):
+            raise OSError("connection refused")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(ftplib, "FTP", RefusedFTP)
+    outage = portable_ftp_runner("ftp://host.example.local", 10)
+    assert outage.ok is False
+    assert outage.status == Status.FAIL
+
+
+def test_portable_http_runner_stdlib_connected_request_failure_is_reachable(monkeypatch):
+    # http.client sets connection.sock on TCP connect, so a request that fails
+    # after connecting (reset before a status line) is reachable -> the result
+    # carries reachable=True so execution maps it to DEG, not a full outage.
+    monkeypatch.setattr(runtime_checks, "_is_micropython_runtime", lambda: False)
+    import http.client
+
+    class ConnectedThenResetConn:
+        def __init__(self, host, port, timeout=None):
+            self.sock = object()  # TCP connected
+
+        def request(self, *args, **kwargs):
+            raise OSError("connection reset by peer")
+
+        def getresponse(self):
+            raise AssertionError("should not be reached")
+
+        def close(self):
+            self.sock = None
+
+    monkeypatch.setattr(http.client, "HTTPConnection", ConnectedThenResetConn)
+    reachable = portable_http_runner("GET", "http://host.example.local/health", 10)
+    assert reachable.status_code is None
+    assert reachable.reachable is True
+
+    class RefusedConn:
+        def __init__(self, host, port, timeout=None):
+            self.sock = None  # connect never succeeded
+
+        def request(self, *args, **kwargs):
+            raise OSError("connection refused")
+
+        def getresponse(self):
+            raise AssertionError("should not be reached")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(http.client, "HTTPConnection", RefusedConn)
+    outage = portable_http_runner("GET", "http://host.example.local/health", 10)
+    assert outage.status_code is None
+    assert outage.reachable is False
+
+
+def test_portable_http_runner_stdlib_body_read_failure_preserves_status(monkeypatch):
+    # Status line received but the body read fails: keep the status (reachable),
+    # so a responding endpoint is never downgraded to an outage.
+    monkeypatch.setattr(runtime_checks, "_is_micropython_runtime", lambda: False)
+    import http.client
+
+    class Resp:
+        status = 200
+
+        def read(self):
+            raise OSError("timed out")
+
+    class Conn:
+        def __init__(self, host, port, timeout=None):
+            self.sock = object()
+
+        def request(self, *args, **kwargs):
+            pass
+
+        def getresponse(self):
+            return Resp()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(http.client, "HTTPConnection", Conn)
+    result = portable_http_runner("GET", "http://host.example.local/health", 10)
+    assert result.status_code == 200
+    assert result.reachable is True
+
+
+def test_portable_http_runner_socket_connected_failure_is_reachable(monkeypatch):
+    # Pico socket HTTP path: connected (handle opened) but the exchange fails ->
+    # reachable=True (execution maps to DEG); connect failure -> reachable=False.
+    handle = FakeSocket([])
+    monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: handle)
+    monkeypatch.setattr(
+        runtime_checks,
+        "_socket_sendall",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("connection reset")),
+    )
+    reachable = runtime_checks._portable_http_runner_socket(
+        "GET", "http://host.example.local/health", 10, trace=lambda event, **fields: None
+    )
+    assert reachable.status_code is None
+    assert reachable.reachable is True
+
+    monkeypatch.setattr(
+        "vivipi.runtime.checks._open_socket",
+        lambda host, port, timeout_s: (_ for _ in ()).throw(OSError("refused")),
+    )
+    outage = runtime_checks._portable_http_runner_socket(
+        "GET", "http://host.example.local/health", 10, trace=lambda event, **fields: None
+    )
+    assert outage.status_code is None
+    assert outage.reachable is False
+
+
+def test_portable_ping_runner_falls_back_to_uping_when_raw_icmp_unavailable(monkeypatch):
+    # On MicroPython, if raw ICMP is unavailable (socket creation fails -> None),
+    # fall through to the capped uping path (per-packet wait bounded to 2000ms).
+    monkeypatch.setattr(runtime_checks, "_is_micropython_runtime", lambda: True)
+    monkeypatch.setattr(runtime_checks, "_raw_icmp_ping", lambda target, timeout_s: None)
+    ping_calls = []
+
+    def fake_ping(target, count=1, timeout=5000, quiet=True):
+        ping_calls.append((count, timeout))
+        return (3, 1, 5.0, 5.0)
+
+    monkeypatch.setitem(sys.modules, "uping", SimpleNamespace(ping=fake_ping))
+    result = portable_ping_runner("192.168.1.1", 10)
+    assert result.ok is True
+    assert len(ping_calls) == 1
+    assert ping_calls[0][1] == 2000
+
+
+def test_read_telnet_until_idle_counts_visible_bytes_across_chunks_without_buffering_full_transcript():
+    # Two sub-threshold chunks that together cross the confirmation threshold:
+    # proves visible bytes are accumulated incrementally across reads (via
+    # recv_into, no full-transcript buffering) before the fast-path confirms.
+    first = b"A" * (runtime_checks.TELNET_CONFIRMED_VISIBLE_BYTES - 28)
+    second = b"B" * 60
+
     class LargeBannerSocket(FakeSocket):
         def __init__(self):
-            super().__init__([b"A" * 2048, b"B" * 1024, b""])
+            super().__init__([first, second, b""])
             self.timeout_values = []
 
         def settimeout(self, value):
@@ -3537,13 +3775,13 @@ def test_read_telnet_until_idle_counts_visible_bytes_without_buffering_full_tran
     finally:
         monkeypatch.undo()
 
-    assert session["visible_bytes"] == 3072
+    assert session["visible_bytes"] == len(first) + len(second)
     assert session["has_visible_text"] is True
     assert session["handshake_detected"] is False
-    assert session["close_reason"] == "remote-close"
+    assert session["close_reason"] == "response-confirmed"
+    # Only the two data reads were needed; the trailing b"" was never read.
     assert handle.timeout_values == [
         runtime_checks.TELNET_IDLE_TIMEOUT_S,
-        runtime_checks.TELNET_POST_DATA_IDLE_TIMEOUT_S,
         runtime_checks.TELNET_POST_DATA_IDLE_TIMEOUT_S,
     ]
 
@@ -3853,6 +4091,10 @@ def test_socket_wait_falls_back_to_local_wait_accounting_when_deadline_stalls(mo
 
 
 def test_read_telnet_until_idle_terminates_at_max_recv_chunks(monkeypatch):
+    # A peer that streams low-visible-density chunks forever (never reaching the
+    # confirmation threshold) must still be bounded by the max-chunk safety cap.
+    per_chunk = 20  # 4 * 20 = 80 visible bytes, below TELNET_CONFIRMED_VISIBLE_BYTES
+
     class ChattyPeer:
         def __init__(self):
             self.calls = 0
@@ -3862,7 +4104,7 @@ def test_read_telnet_until_idle_terminates_at_max_recv_chunks(monkeypatch):
 
         def recv(self, _size):
             self.calls += 1
-            return b"." * 64
+            return b"." * per_chunk
 
         def sendall(self, payload):
             return None
@@ -3870,7 +4112,8 @@ def test_read_telnet_until_idle_terminates_at_max_recv_chunks(monkeypatch):
     handle = ChattyPeer()
     session = runtime_checks._read_telnet_until_idle(handle, max_chunks=4)
     assert handle.calls == 4
-    assert session["visible_bytes"] <= 4 * 64
+    assert session["visible_bytes"] <= 4 * per_chunk
+    assert session["visible_bytes"] < runtime_checks.TELNET_CONFIRMED_VISIBLE_BYTES
     assert session["has_visible_text"] is True
     assert session["close_reason"] == "chunk-limit"
 
@@ -4743,6 +4986,71 @@ def test_raw_icmp_ping_returns_fail_on_socket_exception(monkeypatch):
     assert result.ok is False
 
 
+def test_raw_icmp_ping_feeds_watchdog_and_times_out_when_no_reply(monkeypatch):
+    # Regression for the RP2040 watchdog reset: a single blocking recvfrom
+    # against an unreachable host stalled the full ~8s timeout without feeding
+    # the ~8.4s watchdog. The sliced wait feeds the probe-activity callback
+    # while no reply arrives, then returns a clean timeout result.
+    feeds = []
+
+    class NoReplySocket:
+        def settimeout(self, _t):
+            pass
+
+        def sendto(self, _data, _addr):
+            pass
+
+        def recvfrom(self, _n):
+            raise OSError(110, "timed out")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(runtime_checks.socket, "socket", lambda *a, **kw: NoReplySocket())
+    monkeypatch.setattr(
+        runtime_checks.socket,
+        "getaddrinfo",
+        lambda *a, **kw: [(None, None, None, None, ("192.0.2.1", 0))],
+    )
+    monkeypatch.setattr(
+        runtime_checks, "_deadline_after_s", lambda _timeout_s: ("perf", time.perf_counter() + 0.05)
+    )
+
+    runtime_checks.set_probe_activity_callback(lambda: feeds.append("feed"))
+    try:
+        result = runtime_checks._raw_icmp_ping("192.0.2.1", 8)
+    finally:
+        runtime_checks.set_probe_activity_callback(None)
+
+    assert result is not None
+    assert result.ok is False
+    assert result.details == "timeout"
+    assert len(feeds) >= 1
+
+
+def test_recv_datagram_feeds_activity_each_slice_then_raises_timeout(monkeypatch):
+    # Direct coverage of the shared sliced-wait helper: every slice feeds the
+    # watchdog, and it raises TimeoutError (not a hang) once the deadline passes.
+    feeds = []
+
+    class NeverReadySocket:
+        def settimeout(self, _t):
+            pass
+
+        def recvfrom(self, _n):
+            raise OSError(110, "timed out")
+
+    runtime_checks.set_probe_activity_callback(lambda: feeds.append("feed"))
+    try:
+        deadline = ("perf", time.perf_counter() + 0.05)
+        with pytest.raises(TimeoutError):
+            runtime_checks._recv_datagram(NeverReadySocket(), 512, deadline, stage="test-recv")
+    finally:
+        runtime_checks.set_probe_activity_callback(None)
+
+    assert len(feeds) >= 1
+
+
 def test_icmp_reply_offset_returns_header_length_for_ipv4_encapsulated_packet():
     # IPv4 packet: version=4, IHL=5 (0x45), total 28+ bytes, ICMP payload after header
     # First byte 0x45: version=4 (>>4 == 4), IHL=5 (& 0x0F == 5, header_length = 20)
@@ -4754,12 +5062,9 @@ def test_icmp_reply_offset_returns_header_length_for_ipv4_encapsulated_packet():
 
 def test_portable_ident_runner_breaks_on_expired_deadline(monkeypatch):
     monkeypatch.setattr(runtime_checks, "_probe_nonce", lambda: "nonce-1")
-    # Provide a deadline that is already past so _deadline_remaining_s raises immediately
-    monkeypatch.setattr(
-        runtime_checks,
-        "_deadline_remaining_s",
-        lambda _deadline: (_ for _ in ()).throw(TimeoutError("expired")),
-    )
+    # Deadline already past: the attempt guard short-circuits before any socket
+    # is opened, so socket.socket returning None never gets dereferenced.
+    monkeypatch.setattr(runtime_checks, "_deadline_remaining_ms", lambda _deadline: 0)
     monkeypatch.setattr(runtime_checks.socket, "socket", lambda *a, **kw: None)
 
     result = portable_ident_runner("ident://host:64", 1)

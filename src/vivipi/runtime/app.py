@@ -476,7 +476,14 @@ class RuntimeApp:
         if self.display_retry_at_s is not None and now_s < self.display_retry_at_s:
             return reason
         frame = self._decorate_frame(
-            render_frame(display_state, now_s=now_s, highlight_selection=self.highlight_selection),
+            render_frame(
+                display_state,
+                now_s=now_s,
+                highlight_selection=self.highlight_selection,
+                display_height_px=int(getattr(self.display, "height", 0)) or None,
+                font_height_px=int(getattr(self.display, "font_height", 0)) or None,
+                reserved_bottom_px=self._bottom_indicator_reserved_px(),
+            ),
             now_s,
         )
         if frame == self.last_rendered_frame:
@@ -1592,6 +1599,12 @@ class RuntimeApp:
             step_px=int(config.get("pixel_width_px", 1)),
         )
 
+    def _bottom_indicator_reserved_px(self) -> int:
+        heartbeat = self.display_liveness.get("bottom_heartbeat", {})
+        if not heartbeat.get("enabled"):
+            return 0
+        return max(0, int(heartbeat.get("pixel_height_px", 1))) + max(0, int(heartbeat.get("gap_px", 0)))
+
     def _current_liveness_signature(self, now_s: float) -> tuple[int | None, tuple[int, ...]]:
         return (
             self._frame_contrast(now_s),
@@ -1710,6 +1723,11 @@ class RuntimeApp:
             self.state = normalized
 
         if self.state.mode != AppMode.OVERVIEW:
+            return
+
+        # The matrix view renders every check on one static screen, so it never
+        # paginates -- keeping the display stable (no page toggling).
+        if self.state.display_mode == DisplayMode.MATRIX:
             return
 
         total_pages = page_count(overview_checks(self.state), self.state.page_size * self.state.overview_columns)

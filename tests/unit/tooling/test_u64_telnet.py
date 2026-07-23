@@ -716,3 +716,126 @@ def test_collect_telnet_visible_ignores_subnegotiation_and_keeps_literal_iac():
 
     assert visible == b"A\xffB"
     assert replies == [bytes([module.IAC, module.WONT, 1])]
+
+
+class _FakeVictimSocket:
+    def settimeout(self, *_):
+        return None
+
+    def recv(self, *_):
+        return b""
+
+    def close(self):
+        return None
+
+
+def _make_vanish_settings(runtime, **overrides):
+    base = dict(lan_iface="eth0", victim_ip="192.0.2.240", session_slots=2, reap_timeout_s=0.05)
+    base.update(overrides)
+    return runtime.RuntimeSettings("192.0.2.1", "v1/version", 80, 23, 21, "anonymous", "", 0, 1, True, **base)
+
+
+def test_telnet_vanish_is_a_valid_telnet_mode():
+    runtime = load_runtime()
+    connection_test = load_connection_test()
+    assert runtime.ProbeCorrectness.VANISH in connection_test.PROBE_CORRECTNESS_CHOICES["telnet"]
+    # A requested telnet vanish mode must be honoured, not silently degraded.
+    assert connection_test._fallback_correctness("telnet", runtime.ProbeCorrectness.VANISH) == runtime.ProbeCorrectness.VANISH
+
+
+def test_telnet_vanish_missing_iface_fails_fast():
+    runtime = load_runtime()
+    module = load_telnet()
+    settings = _make_vanish_settings(runtime, lan_iface="", victim_ip="")
+    outcome = module.run_probe(settings, runtime.ProbeCorrectness.VANISH)
+    assert outcome.result == "FAIL"
+    assert "missing lan_iface" in outcome.detail
+
+
+def _ok_del_alias(module):
+    return lambda iface, victim: module.subprocess.CompletedProcess([], 0, "", "")
+
+
+def test_telnet_vanish_green_reaps_reports_ok(monkeypatch):
+    runtime = load_runtime()
+    module = load_telnet()
+    settings = _make_vanish_settings(runtime, reap_timeout_s=5.0)
+    monkeypatch.setattr(module.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(module, "_vanish_measure_capacity", lambda host, port, cap: cap)
+    monkeypatch.setattr(module, "_vanish_add_alias", lambda iface, victim: None)
+    monkeypatch.setattr(module, "_vanish_del_alias", _ok_del_alias(module))
+    monkeypatch.setattr(module, "_vanish_connect", lambda *a, **k: _FakeVictimSocket())
+    calls = {"state": 0}
+
+    def fake_state(host, port):
+        calls["state"] += 1
+        # First call is the saturation check (table full = busy); later calls are
+        # the recovery poll (the fix reaped the slots, so a fresh probe is free).
+        return module._VANISH_BUSY if calls["state"] == 1 else module._VANISH_FREE
+
+    monkeypatch.setattr(module, "_vanish_probe_state", fake_state)
+    outcome = module.run_probe(settings, runtime.ProbeCorrectness.VANISH)
+    assert outcome.result == "OK", outcome.detail
+    assert "reaped" in outcome.detail
+
+
+def test_telnet_vanish_red_stays_wedged_reports_fail(monkeypatch):
+    runtime = load_runtime()
+    module = load_telnet()
+    settings = _make_vanish_settings(runtime, reap_timeout_s=0.05)
+    monkeypatch.setattr(module.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(module, "_vanish_measure_capacity", lambda host, port, cap: cap)
+    monkeypatch.setattr(module, "_vanish_add_alias", lambda iface, victim: None)
+    monkeypatch.setattr(module, "_vanish_del_alias", _ok_del_alias(module))
+    monkeypatch.setattr(module, "_vanish_connect", lambda *a, **k: _FakeVictimSocket())
+    # Never recovers: saturation reads full and the recovery poll stays busy.
+    monkeypatch.setattr(module, "_vanish_probe_state", lambda host, port: module._VANISH_BUSY)
+    outcome = module.run_probe(settings, runtime.ProbeCorrectness.VANISH)
+    assert outcome.result == "FAIL"
+    assert "still wedged" in outcome.detail
+
+
+def test_telnet_vanish_listener_outage_during_recovery_is_not_reported_as_wedged(monkeypatch):
+    runtime = load_runtime()
+    module = load_telnet()
+    settings = _make_vanish_settings(runtime, reap_timeout_s=0.05)
+    monkeypatch.setattr(module.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(module, "_vanish_measure_capacity", lambda host, port, cap: cap)
+    monkeypatch.setattr(module, "_vanish_add_alias", lambda iface, victim: None)
+    monkeypatch.setattr(module, "_vanish_del_alias", _ok_del_alias(module))
+    monkeypatch.setattr(module, "_vanish_connect", lambda *a, **k: _FakeVictimSocket())
+    calls = {"state": 0}
+
+    def fake_state(host, port):
+        calls["state"] += 1
+        # Saturated first, then the listener goes unreachable during recovery.
+        return module._VANISH_BUSY if calls["state"] == 1 else module._VANISH_UNREACHABLE
+
+    monkeypatch.setattr(module, "_vanish_probe_state", fake_state)
+    outcome = module.run_probe(settings, runtime.ProbeCorrectness.VANISH)
+    assert outcome.result == "FAIL"
+    assert "unreachable" in outcome.detail
+    assert "still wedged" not in outcome.detail
+
+
+def test_telnet_vanish_alias_delete_failure_fails_and_retries_cleanup(monkeypatch):
+    runtime = load_runtime()
+    module = load_telnet()
+    settings = _make_vanish_settings(runtime, reap_timeout_s=5.0)
+    monkeypatch.setattr(module.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(module, "_vanish_measure_capacity", lambda host, port, cap: cap)
+    monkeypatch.setattr(module, "_vanish_add_alias", lambda iface, victim: None)
+    monkeypatch.setattr(module, "_vanish_connect", lambda *a, **k: _FakeVictimSocket())
+    monkeypatch.setattr(module, "_vanish_probe_state", lambda host, port: module._VANISH_BUSY)
+    del_calls = []
+
+    def failing_del(iface, victim):
+        del_calls.append((iface, victim))
+        return module.subprocess.CompletedProcess([], 1, "", "RTNETLINK answers: Cannot assign requested address")
+
+    monkeypatch.setattr(module, "_vanish_del_alias", failing_del)
+    outcome = module.run_probe(settings, runtime.ProbeCorrectness.VANISH)
+    assert outcome.result == "FAIL"
+    assert "could not delete victim IP alias" in outcome.detail
+    # The step-4 delete failed, so the finally block must retry the cleanup delete.
+    assert len(del_calls) == 2

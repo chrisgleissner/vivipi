@@ -1,5 +1,27 @@
 # ViviPi Work Log
 
+## 2026-07-23T11:59:55Z
+
+- Fixed the hardware watchdog reset that rebooted the OLED Pico whenever a probed device was unreachable (reproduced by the user with U64 powered off; the board reset as the sweep reached U64).
+- Root cause:
+  - the RP2040 runtime watchdog is armed at `WATCHDOG_MAX_TIMEOUT_MS = 8388` ms (the WDT rejects anything higher) and is fed only via `_emit_probe_activity()`
+  - every TCP probe path (dma/ftp/rest/telnet) already feeds the watchdog every ~1s inside the sliced `_socket_wait` poll loop, so they survive an unreachable host
+  - but `_raw_icmp_ping` and `portable_ident_runner` each blocked on a single `recvfrom` for the full `timeout_s` (8s) with no mid-wait feed; the live probe order runs `ping -> ident` back-to-back per host, so against an off host the unfed window `ping recvfrom (8s) + same-host backoff (1s) + ident recvfrom (8s)` far exceeded the 8388ms window and tripped a hardware reset
+  - a reachable probe that merely returns FAIL never crashed (DMA flakiness observed on live c64u/u64 is a TCP/fed path); the reset was specific to the two unfed blocking-recv paths against an unreachable target
+- What changed (`src/vivipi/runtime/checks.py`):
+  - added `_recv_datagram()`, a shared helper that slices the datagram wait through the existing `_socket_wait` so the probe-activity callback (watchdog feed) fires at least once per `SOCKET_WAIT_SLICE_MS` (1s) slice on both the `select.poll` and settimeout-fallback paths, with a one-slice recv timeout guarding against a spurious readiness wakeup
+  - routed `_raw_icmp_ping` and `portable_ident_runner` through it; `portable_ident_runner` also feeds at attempt entry and now uses `_deadline_remaining_ms` for its expiry guard
+  - no change to probe classification/latency/single-attempt semantics: an unreachable ping/ident now returns a clean `timeout` FAIL instead of rebooting the board
+- Tests (`tests/unit/runtime/test_checks.py`):
+  - added `test_raw_icmp_ping_feeds_watchdog_and_times_out_when_no_reply`, `test_portable_ident_runner_feeds_watchdog_and_times_out_when_unreachable`, and `test_recv_datagram_feeds_activity_each_slice_then_raises_timeout`, proving the watchdog is fed mid-wait and the probe still returns a clean timeout (never hangs/crashes)
+  - updated the ping raw-ICMP-fallback, ident transient-recv-timeout, ident unreachable, and expired-deadline tests to the new sliced-wait contract (recv timeout is now one slice, ident sends once then waits, guard uses `_deadline_remaining_ms`)
+  - mapped the two probe-level regressions under `VIVIPI-NET-001` in `docs/spec-traceability.md`
+- Validation:
+  - repo gates: `./build lint` -> clean; `./build coverage` -> `1019 passed`, total coverage `97.90%` (>=96% branch gate)
+  - Python parity: `./build ci --venv .venv-3.12` -> pass; 3.13 could not build a working local venv (sandbox `ensurepip`/stdlib defect), so the affected suites were run directly under python3.13 -> `522 passed` (runtime/core/firmware), parity clean; the full 3.13 CI matrix runs in `.github/workflows/ci.yml`
+  - deploy: `./build deploy --device oled` -> `oled ok state=serial-ready`; on-device `vivipi/runtime/checks.py` confirmed to contain the fix
+  - hardware, watchdog reset eliminated (user powered U64 OFF): ~6-min Pico serial soak (91.8 KB, 1664 lines) with **zero board resets** (no `[BOOT]`/`WDT armed`/`reset requested` banners), zero allocation errors, across six full sweeps where `u64-ping` and `u64-ident` classified as `timeout: timed out` (ident `lat_ms=8040`, i.e. waited the full deadline fed the whole time); all reachable hosts (`c64u-*`, `u2-*`, `pixel4-adb`) stayed OK, confirming no regression
+
 ## 2026-05-08T14:28:36Z
 
 - Investigated and fixed the early `ident_json` timeout that was aborting the default U64 soak run almost immediately even though the live identify service was reachable.
@@ -1771,3 +1793,90 @@
   from ~36-46 FPS to ~7.5 FPS on its default mode — below its 20-30 FPS target.
   The bottleneck is the HTTP front door (no keep-alive, POST disk round-trip),
   not the shared `C64_DMA_RAW_WRITE` memcpy.
+
+## 2026-07-23T06:46:29Z
+
+- Extended the `h`-alias quick health check (`scripts/c64_health_check`) so it now
+  probes the `u2` device in addition to `c64u` and `u64`, matching the `u2` soak
+  target added on this branch.
+- What changed:
+  - added `"u2": "U2"` to `TARGET_LABELS` in `scripts/u64/u64_health_check.py`, so
+    `u2` is a valid `target` choice and reuses the same host/build-config resolution
+    (`u2` alias in `config/build-deploy.local.yaml`, `U2 REST/FTP/TELNET` in
+    `config/checks.local.yaml`) as `c64u`/`u64`
+  - added a third `u64_health_check.py u2` invocation to the `c64_health_check`
+    wrapper, preserving the existing first-failure exit-status accumulation
+  - refreshed `docs/c64u-u64-cli.md` and `README.md` (wrapper now runs three
+    targets; mermaid + prose updated)
+- Why it changed:
+  - the branch already registered `u2` as a soak/telnet-keepalive target and added
+    its checks config, but the `h` alias still only covered `c64u` and `u64`, so the
+    fast "what is the state right now?" pass silently skipped `u2`
+- Validation:
+  - updated `tests/unit/tooling/test_c64_health_check_entrypoint.py` to assert the
+    wrapper invokes `c64u`, `u64`, then `u2`; added `u2` alias + `U2` checks to
+    `tests/unit/tooling/test_u64_health_check.py` with focused resolution and
+    arg-parse coverage
+  - `./build lint` -> All checks passed
+  - `./build test` -> `999 passed`
+
+## 2026-07-23T06:59:54Z
+
+- Fixed the `u2` health check: the synthesized `DMA` probe failed against the
+  real `u2` device, so it is now skipped for `u2` (kept for `c64u`/`u64`).
+- Firmware investigation (`/home/chris/dev/c64/1541ultimate`):
+  - the health-check DMA probe (`portable_dma_runner`) issues `IDENTIFY` (0xFF0E),
+    `DEBUG_REG` (0xFF76) and `READFLASH` (0xFF75) over TCP/64
+  - in `software/network/socket_dma.cc`, `SOCKET_CMD_DEBUG_REG` sits inside the
+    `#ifdef U64 ... #endif` block (lines 287-295), while `IDENTIFY`/`READFLASH`
+    and the UDP `json` discovery responder (IDENT) are unconditional
+  - the `U64` macro is only defined for `target/u64/*` (`-DU64=1`) and
+    `target/u64ii/*` (`-DU64=2`); the `u2`/`u2plus` targets build with `-DU2`/
+    `-DU2P=1` and no `-DU64`, though they still compile `socket_dma.cc`
+  - net: the `u2` firmware serves IDENTIFY/READFLASH on TCP/64 but has no
+    DEBUG_REG case, so it never replies and the probe hangs until timeout ->
+    `DMA FAIL`. IDENT (UDP/64 json discovery) is unaffected and stays enabled.
+- What changed:
+  - added `DMA_PROBE_TARGETS = frozenset({"c64u", "u64"})` to
+    `scripts/u64/u64_health_check.py` and made `load_target_definitions` append
+    the DMA probe only for those U64-family targets
+  - documented the U64-family restriction in `docs/c64u-u64-cli.md`
+- Validation:
+  - `tests/unit/tooling/test_u64_health_check.py`: u2 resolution test now asserts
+    the DMA probe is omitted (PING/REST/IDENT/FTP/TELNET only); added a probe-gating
+    test proving DMA is present for `c64u`/`u64` and absent for `u2`
+  - `./build lint` -> All checks passed
+  - `./build test` -> `1000 passed`
+
+## 2026-07-23T07:09:23Z
+
+- Addressed the PR #37 Kilo code-review findings on the telnet `vanish` reap lane.
+- `scripts/u64/u64_connection_test.py`:
+  - dropped `VANISH` from `PROBE_CORRECTNESS_ORDER` (the global degradation ladder)
+    and taught `_fallback_correctness` to return each protocol's safe default for
+    modes outside the ladder. `--mode vanish` no longer silently degrades ftp to
+    `INVALID` / http to `INCOMPLETE`; only telnet takes the reap lane.
+  - added `parse_session_slots` (int >= 1) and `parse_reap_timeout_s` (float > 0)
+    and wired them as the `--session-slots` / `--reap-timeout-s` arg types, matching
+    the existing `parse_runners` / `parse_duration_s` guards.
+  - `validate_execution_config` now rejects `vanish` unless `--runners 1
+    --schedule sequential`: the concurrent schedule spawns one thread per probe
+    (and stress lists telnet twice), so any concurrency races on the shared session
+    table and victim IP alias.
+- `scripts/u64/u64_telnet.py`:
+  - `_vanish_del_alias` now returns the `CompletedProcess`; step 4 checks the
+    return code, surfaces stderr, and only clears `alias_added` on success so the
+    `finally` retries cleanup on a failed delete (no more stale alias -> misleading
+    "sudo -n ip" failure on the next run).
+  - replaced `_vanish_probe_is_free` with tri-state `_vanish_probe_state`
+    (free/busy/unreachable) so a listener outage during saturation or recovery is
+    reported as a connectivity problem, not a false "could not saturate" / "still
+    wedged" reap verdict.
+  - `_vanish_measure_capacity` now closes the socket opened in an iteration before
+    breaking on `OSError`, fixing an fd leak on partial-read failures.
+- Tests: added coverage for the vanish global-mode fallback, the two new arg
+  validators, the vanish concurrency rejection, listener-unreachable-during-recovery,
+  and alias-delete-failure cleanup retry.
+- Validation:
+  - `./build lint` -> All checks passed
+  - `./build test` -> `1006 passed`

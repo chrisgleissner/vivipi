@@ -140,6 +140,11 @@ def apply_observation(
         )
 
     if observation_status == Status.DEG:
+        # A DEG observation means the device was reachable (it answered, just
+        # badly), so it breaks any run of consecutive UNREACHABLE misses: reset
+        # the outage counter to zero. This keeps a full outage ('X') reserved
+        # for `failures_to_failed` consecutive genuinely-unreachable probes, so
+        # a reachable-but-degraded blip can never escalate a device to an outage.
         return replace(
             runtime,
             name=observation.name,
@@ -147,7 +152,7 @@ def apply_observation(
             details=observation.details,
             latency_ms=observation.latency_ms,
             last_update_s=observation.observed_at_s,
-            consecutive_failures=max(policy.failures_to_degraded, runtime.consecutive_failures + 1),
+            consecutive_failures=0,
             consecutive_successes=0,
             source_identifier=observation.source_identifier,
         )

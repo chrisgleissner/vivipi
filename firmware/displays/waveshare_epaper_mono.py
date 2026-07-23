@@ -552,6 +552,7 @@ class WaveshareEPaperMonoDisplay:
             self._glyph_lookup,
             failure_color=self.failure_color,
             rotation=getattr(self, "rotation", 0),
+            glyph_builder=_build_glyph_lookup,
         )
         if self.profile["surface_kind"] == "horizontal":
             self._send_horizontal_buffer(surface.buffer)

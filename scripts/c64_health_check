@@ -66,4 +66,10 @@ if [[ "$rc" -ne 0 && "$status" -eq 0 ]]; then
     status=$rc
 fi
 
+"$PYTHON" "$ROOT_DIR/scripts/u64/u64_health_check.py" u2 "$@"
+rc=$?
+if [[ "$rc" -ne 0 && "$status" -eq 0 ]]; then
+    status=$rc
+fi
+
 exit "$status"

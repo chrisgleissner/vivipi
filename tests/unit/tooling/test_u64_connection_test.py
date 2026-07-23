@@ -281,6 +281,63 @@ def test_validate_execution_config_allows_large_runner_count_without_http_readwr
     module.validate_execution_config(config)
 
 
+def test_global_vanish_mode_does_not_degrade_non_telnet_probes():
+    module = load_module()
+    parser = module.build_parser()
+
+    resolved = module.resolve_execution_config(parser.parse_args(["--mode", "vanish", "--schedule", "sequential"]))
+
+    # telnet gets the reap lane; every other protocol falls back to the safe
+    # default (COMPLETE) rather than the next-lower degradation.
+    assert resolved.probe_correctness == {
+        "ping": module.ProbeCorrectness.COMPLETE,
+        "ident": module.ProbeCorrectness.COMPLETE,
+        "dma": module.ProbeCorrectness.COMPLETE,
+        "telnet": module.ProbeCorrectness.VANISH,
+        "ftp": module.ProbeCorrectness.COMPLETE,
+        "http": module.ProbeCorrectness.COMPLETE,
+        "modem": module.ProbeCorrectness.COMPLETE,
+    }
+
+
+def test_session_slots_and_reap_timeout_reject_non_positive_values():
+    module = load_module()
+    parser = module.build_parser()
+
+    for args in (["--session-slots", "0"], ["--session-slots", "-1"], ["--reap-timeout-s", "0"], ["--reap-timeout-s", "-5"]):
+        with pytest.raises(SystemExit):
+            parser.parse_args(args)
+
+
+def test_validate_execution_config_rejects_vanish_with_concurrency():
+    module = load_module()
+    parser = module.build_parser()
+
+    # Default soak schedule is concurrent -> vanish must be rejected.
+    concurrent = module.resolve_execution_config(parser.parse_args(["--telnet-mode", "vanish"]))
+    with pytest.raises(ValueError, match="vanish"):
+        module.validate_execution_config(concurrent)
+
+    # Sequential but multi-runner is still concurrent execution -> rejected.
+    multi_runner = module.resolve_execution_config(
+        parser.parse_args(["--telnet-mode", "vanish", "--schedule", "sequential", "--runners", "2"])
+    )
+    with pytest.raises(ValueError, match="vanish"):
+        module.validate_execution_config(multi_runner)
+
+
+def test_validate_execution_config_allows_vanish_single_runner_sequential():
+    module = load_module()
+    parser = module.build_parser()
+
+    resolved = module.resolve_execution_config(
+        parser.parse_args(["--telnet-mode", "vanish", "--schedule", "sequential"])
+    )
+
+    assert resolved.probe_correctness["telnet"] == module.ProbeCorrectness.VANISH
+    module.validate_execution_config(resolved)
+
+
 def test_help_output_mentions_restored_default_shape():
     module = load_module()
 

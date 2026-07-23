@@ -56,7 +56,9 @@ def test_execute_check_maps_http_status_codes_to_observations():
         ),
     )
 
-    assert result.observations[0].status == Status.FAIL
+    # 503: the server answered, so it is reachable but degraded (DEG / '!'),
+    # never a full outage ('X').
+    assert result.observations[0].status == Status.DEG
     assert result.observations[0].latency_ms == 45.0
     assert result.probe_latency_ms == 45.0
 
@@ -86,9 +88,37 @@ def test_status_for_http_distinguishes_auth_failures_from_other_errors():
     assert execution_module._status_for_http(200) == Status.OK
     assert execution_module._status_for_http(401) == Status.OK
     assert execution_module._status_for_http(403) == Status.OK
-    assert execution_module._status_for_http(404) == Status.FAIL
-    assert execution_module._status_for_http(500) == Status.FAIL
+    # Responded with an error code -> reachable but degraded (DEG), not an outage.
+    assert execution_module._status_for_http(404) == Status.DEG
+    assert execution_module._status_for_http(500) == Status.DEG
+    # No response at all -> unavailable (FAIL / outage).
     assert execution_module._status_for_http(None) == Status.FAIL
+
+
+def test_execute_check_maps_connected_http_without_response_to_degraded():
+    # Connected to the server but no parseable HTTP response (reachable=True):
+    # reachable but degraded, never a full outage.
+    definition = make_definition("c64u-rest", CheckType.HTTP)
+    degraded = execute_check(
+        definition,
+        observed_at_s=10.0,
+        ping_runner=None,
+        http_runner=lambda method, target, timeout_s: HttpResponseResult(
+            status_code=None, reachable=True, details="timeout"
+        ),
+    )
+    assert degraded.observations[0].status == Status.DEG
+
+    # Never connected (reachable=False) -> unavailable (FAIL / outage).
+    outage = execute_check(
+        definition,
+        observed_at_s=10.0,
+        ping_runner=None,
+        http_runner=lambda method, target, timeout_s: HttpResponseResult(
+            status_code=None, reachable=False, details="refused"
+        ),
+    )
+    assert outage.observations[0].status == Status.FAIL
 
 
 def test_probe_helpers_normalize_enum_like_status_and_ignore_non_mapping_metadata():
@@ -143,9 +173,37 @@ def test_execute_check_reports_service_schema_errors_via_diagnostics():
     )
 
     assert result.observations[0].identifier == "android-devices"
-    assert result.observations[0].status == Status.FAIL
+    # The service answered (HTTP 200) but its payload did not parse: reachable
+    # but degraded (DEG), never a full outage, while still raising a diagnostic.
+    assert result.observations[0].status == Status.DEG
     assert result.diagnostics[0].code == "SERV"
     assert result.probe_latency_ms == 5.0
+
+
+def test_execute_check_service_error_code_is_degraded_but_unreachable_is_outage():
+    definition = make_definition("android-devices", CheckType.SERVICE)
+
+    # The service host answered with an error code -> reachable but degraded.
+    degraded = execute_check(
+        definition,
+        observed_at_s=30.0,
+        ping_runner=None,
+        http_runner=lambda method, target, timeout_s: HttpResponseResult(
+            status_code=503, latency_ms=5.0, details="HTTP 503"
+        ),
+    )
+    assert degraded.observations[0].status == Status.DEG
+
+    # Never reached the service host (no response, not connected) -> full outage.
+    outage = execute_check(
+        definition,
+        observed_at_s=30.0,
+        ping_runner=None,
+        http_runner=lambda method, target, timeout_s: HttpResponseResult(
+            status_code=None, reachable=False, details="refused"
+        ),
+    )
+    assert outage.observations[0].status == Status.FAIL
 
 
 def test_execute_check_reports_ping_and_http_executor_failures_via_diagnostics():

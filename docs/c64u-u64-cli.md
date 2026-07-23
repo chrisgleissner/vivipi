@@ -8,8 +8,8 @@ If you just want the right command, start with this table:
 
 | Goal | Command | Best when |
 | --- | --- | --- |
-| Quick check, both targets | `./scripts/c64_health_check` | You want the fastest answer |
-| Quick check, one target | `./scripts/u64_health_check.py u64` | You only care about `u64` or `c64u` |
+| Quick check, all targets | `./scripts/c64_health_check` | You want the fastest answer |
+| Quick check, one target | `./scripts/u64_health_check.py u64` | You only care about `u64`, `c64u`, or `u2` |
 | Longer ViviPi-style run with artifacts | `./scripts/vivipulse_stress_test.sh` | You want a shared-config soak |
 | Direct per-host control | `./scripts/u64_connection_test.py --profile soak -H u64` | You want exact control over probes and behavior |
 
@@ -17,14 +17,14 @@ If you just want the right command, start with this table:
 
 Under the hood:
 
-- `c64_health_check` is a thin wrapper that runs `u64_health_check.py` twice: once for `c64u`, once for `u64`.
+- `c64_health_check` is a thin wrapper that runs `u64_health_check.py` three times: once each for `c64u`, `u64`, and `u2`.
 - `u64_health_check.py` and `vivipulse` both reuse ViviPi's shared runtime definition and executor path.
 - `vivipulse_stress_test.sh` is a thin wrapper around `vivipulse --mode soak`.
 - `u64_connection_test.py` is the separate direct path. It talks to protocol drivers directly instead of going through the shared ViviPi scheduler.
 
 ```mermaid
 flowchart TD
-    A[c64_health_check] -->|runs c64u, then u64| B[u64_health_check.py]
+    A[c64_health_check] -->|runs c64u, u64, then u2| B[u64_health_check.py]
     B -->|reuses| C[shared runtime definitions<br/>+ executor]
     D[vivipulse_stress_test.sh] -->|wraps| E[vivipulse]
     E -->|reuses| C
@@ -33,13 +33,15 @@ flowchart TD
 
 ## Quick health checks
 
-Use `./scripts/c64_health_check` for the fastest "what is the state right now?" check. It runs the concise ViviPi-compatible probe set for both configured targets and prints one line per probe, such as `PING`, `REST`, `IDENT`, `DMA`, `FTP`, and `TELNET`.
+Use `./scripts/c64_health_check` for the fastest "what is the state right now?" check. It runs the concise ViviPi-compatible probe set for all configured targets (`c64u`, `u64`, and `u2`) and prints one line per probe, such as `PING`, `REST`, `IDENT`, `DMA`, `FTP`, and `TELNET`.
+
+The `DMA` probe reads the U64 debug register (`SOCKET_CMD_DEBUG_REG = 0xFF76`), which the 1541Ultimate firmware only builds for the U64 family (`#ifdef U64`). The Ultimate-II+ (`u2`) firmware does not answer that command, so the DMA probe is skipped for `u2` and only runs for `c64u` and `u64`.
 
 ```bash
 ./scripts/c64_health_check
 ./scripts/u64_health_check.py u64
 ./scripts/u64_health_check.py c64u --build-config config/build-deploy.local.yaml
-./scripts/u64_health_check.py u64 --checks-config config/checks.local.yaml
+./scripts/u64_health_check.py u2 --checks-config config/checks.local.yaml
 ```
 
 These commands resolve targets from the active build and checks configs. Keep real device addresses current in `config/build-deploy.local.yaml`.

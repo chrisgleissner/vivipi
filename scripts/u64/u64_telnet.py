@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import atexit
+import os
 import re
 import select
 import socket
+import subprocess
 import threading
 import time
 from dataclasses import dataclass
@@ -934,6 +936,11 @@ def run_probe(
     *,
     context: ProbeExecutionContext | None = None,
 ) -> ProbeOutcome:
+    if correctness == ProbeCorrectness.VANISH:
+        # True half-open reap lane. Single-shot regardless of surface/context:
+        # it monopolises the whole session table for one fill/vanish/recover
+        # cycle, so it must run single-runner, telnet-only.
+        return run_vanish_probe(settings)
     if context is not None:
         surface = context.surface
         if correctness == ProbeCorrectness.OPEN:
@@ -1017,5 +1024,191 @@ def run_probe_incomplete(settings: RuntimeSettings) -> ProbeOutcome:
         if str(error) == "login failed":
             return ProbeOutcome("FAIL", "login failed", elapsed_ms)
         return ProbeOutcome("FAIL", f"telnet failed: {error}", elapsed_ms)
+
+
+# ---------------------------------------------------------------------------
+# True half-open (VANISH) telnet reap lane
+#
+# A telnet client that vanishes at the network level (WiFi sleep/drop, powered
+# off phone, AP roam) never sends FIN/RST and never ACKs the device's keepalive
+# probes, so without the reaping fix its run_remote() session polls recv() ->
+# EAGAIN forever and permanently leaks a TELNET_MAX_SESSIONS slot. A plain
+# close() sends FIN/RST and is torn down promptly - that is NOT this leak. We
+# reproduce the real thing by sourcing the victim connections from a throwaway
+# secondary IP alias, then deleting the alias so the host stops answering ARP
+# and keepalive probes for that address. GREEN=device reaps the dead slots
+# within the keepalive window; RED=it stays wedged past it. Needs CAP_NET_ADMIN
+# (sudo -n ip) to add/remove the alias.
+# ---------------------------------------------------------------------------
+
+_VANISH_BUSY_MARKER = b"Too many connections"
+
+
+def _vanish_run_ip(args: list[str], *, check: bool) -> subprocess.CompletedProcess:
+    return subprocess.run(["sudo", "-n", "ip", *args], check=check, capture_output=True, text=True)
+
+
+def _vanish_add_alias(iface: str, victim_ip: str) -> None:
+    _vanish_run_ip(["addr", "add", f"{victim_ip}/24", "dev", iface], check=True)
+
+
+def _vanish_del_alias(iface: str, victim_ip: str) -> subprocess.CompletedProcess:
+    return _vanish_run_ip(["addr", "del", f"{victim_ip}/24", "dev", iface], check=False)
+
+
+def _vanish_connect(host: str, port: int, *, source_ip: str | None = None, timeout: float = 4.0) -> socket.socket:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    if source_ip:
+        sock.bind((source_ip, 0))
+    sock.connect((host, port))
+    return sock
+
+
+# Tri-state reachability of the telnet listener from the primary IP.
+_VANISH_FREE = "free"  # accepted the connection and served a banner (a slot is free)
+_VANISH_BUSY = "busy"  # accepted the connection but reported the table full / wedged
+_VANISH_UNREACHABLE = "unreachable"  # could not connect at all (listener outage, not busy)
+
+
+def _vanish_probe_state(host: str, port: int) -> str:
+    """Classify a fresh connection from the primary IP as free/busy/unreachable.
+
+    Distinguishing "unreachable" from "busy" matters: a transient listener outage
+    must not be reported as a saturation or keepalive-reaping (wedged) verdict.
+    """
+    try:
+        sock = _vanish_connect(host, port)
+    except (ConnectionRefusedError, socket.timeout, TimeoutError, socket.gaierror):
+        return _VANISH_UNREACHABLE
+    except OSError:
+        return _VANISH_UNREACHABLE
+    try:
+        sock.settimeout(1.5)
+        data = sock.recv(128)
+        if _VANISH_BUSY_MARKER in data or len(data) == 0:
+            return _VANISH_BUSY
+        return _VANISH_FREE
+    except OSError:
+        return _VANISH_UNREACHABLE
+    finally:
+        close_socket(sock)
+
+
+def _vanish_measure_capacity(host: str, port: int, cap: int) -> int:
+    """Count how many concurrent sessions the listener will currently accept."""
+    conns: list[socket.socket] = []
+    free = 0
+    for _ in range(cap + 1):
+        sock = None
+        try:
+            sock = _vanish_connect(host, port)
+            time.sleep(0.15)
+            data = sock.recv(64)
+            if _VANISH_BUSY_MARKER in data:
+                close_socket(sock)
+            else:
+                conns.append(sock)
+                free += 1
+        except OSError:
+            # Release the socket opened this iteration before bailing out so a
+            # partial-read failure does not leak the fd.
+            if sock is not None:
+                close_socket(sock)
+            break
+    for sock in conns:
+        close_socket(sock)
+    # These were clean closes; let the firmware reap them before capacity is
+    # relied on again.
+    time.sleep(2.0)
+    return free
+
+
+def run_vanish_probe(settings: RuntimeSettings) -> ProbeOutcome:
+    started_at = time.perf_counter_ns()
+
+    def outcome(result: str, detail: str) -> ProbeOutcome:
+        elapsed_ms = (time.perf_counter_ns() - started_at) / 1_000_000.0
+        return ProbeOutcome(result, f"telnet_vanish {detail}", elapsed_ms)
+
+    host = settings.host
+    port = settings.telnet_port
+    iface = settings.lan_iface
+    victim_ip = settings.victim_ip
+    slots = settings.session_slots
+    reap_timeout = settings.reap_timeout_s
+
+    if os.name != "posix":
+        return outcome("FAIL", "requires a posix host with ip(8)")
+    if not iface or not victim_ip:
+        return outcome("FAIL", "missing lan_iface/victim_ip for the half-open lane")
+
+    victims: list[socket.socket] = []
+    alias_added = False
+    try:
+        # 1. Baseline: the whole table must be free, else another client is using
+        #    it and the reproduction would be invalid.
+        free = _vanish_measure_capacity(host, port, slots)
+        if free < slots:
+            return outcome("FAIL", f"baseline not free: {free}/{slots} slots (another telnet client connected?)")
+
+        # 2. Bring up the throwaway source IP and fill every slot with half-open
+        #    victims sourced from it.
+        try:
+            _vanish_add_alias(iface, victim_ip)
+        except subprocess.CalledProcessError as error:
+            stderr = (error.stderr or "").strip()
+            return outcome("FAIL", f"could not add victim IP alias (need passwordless sudo -n ip): {stderr}")
+        alias_added = True
+        for _ in range(slots):
+            try:
+                sock = _vanish_connect(host, port, source_ip=victim_ip)
+            except OSError as error:
+                return outcome("FAIL", f"could not open half-open victim: {error}")
+            try:
+                sock.settimeout(1.0)
+                sock.recv(64)  # drain the banner so the firmware session is fully live
+            except OSError:
+                pass
+            victims.append(sock)
+            time.sleep(0.2)
+
+        # 3. Confirm saturation: a fresh probe from the primary IP is not served.
+        time.sleep(1.0)
+        saturation_state = _vanish_probe_state(host, port)
+        if saturation_state == _VANISH_FREE:
+            return outcome("FAIL", "could not saturate the session table (fresh probe still free)")
+        if saturation_state == _VANISH_UNREACHABLE:
+            return outcome("FAIL", "listener unreachable while confirming saturation (connectivity problem, not a reap test)")
+
+        # 4. Make the victims vanish at the network level: delete the source IP.
+        #    If the delete fails the victims never vanish, so the reap test is
+        #    invalid; surface the error and let the finally block retry cleanup.
+        del_result = _vanish_del_alias(iface, victim_ip)
+        if del_result.returncode != 0:
+            stderr = (del_result.stderr or "").strip()
+            return outcome("FAIL", f"could not delete victim IP alias to trigger vanish: {stderr}")
+        alias_added = False
+
+        # 5. Poll for recovery. GREEN = the device reaped the dead sessions and
+        #    freed capacity; RED = it stays wedged past the reap window.
+        deadline = time.time() + reap_timeout
+        start = time.time()
+        last_state = _VANISH_BUSY
+        while time.time() < deadline:
+            last_state = _vanish_probe_state(host, port)
+            if last_state == _VANISH_FREE:
+                recovered = time.time() - start
+                return outcome("OK", f"reaped {slots} half-open slots in ~{recovered:.0f}s")
+            time.sleep(3.0)
+
+        if last_state == _VANISH_UNREACHABLE:
+            return outcome("FAIL", f"listener unreachable during recovery; keepalive reaping inconclusive after {reap_timeout:.0f}s")
+        return outcome("FAIL", f"still wedged {reap_timeout:.0f}s after peers vanished (half-open sessions not reaped)")
+    finally:
+        for sock in victims:
+            close_socket(sock)
+        if alias_added:
+            _vanish_del_alias(iface, victim_ip)
 
 
