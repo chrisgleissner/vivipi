@@ -2357,7 +2357,8 @@ def test_portable_ping_runner_uping_sends_three_packets(monkeypatch):
     assert result.ok is True
     assert len(ping_calls) == 1
     assert ping_calls[0][2] == 3
-    assert ping_calls[0][3] == 5000
+    # Per-packet wait is capped at 2000ms so 3 packets stay under the watchdog.
+    assert ping_calls[0][3] == 2000
 
 
 def test_portable_ping_runner_uses_raw_icmp_fallback_on_micropython(monkeypatch):

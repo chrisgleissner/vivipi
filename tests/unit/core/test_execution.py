@@ -173,9 +173,37 @@ def test_execute_check_reports_service_schema_errors_via_diagnostics():
     )
 
     assert result.observations[0].identifier == "android-devices"
-    assert result.observations[0].status == Status.FAIL
+    # The service answered (HTTP 200) but its payload did not parse: reachable
+    # but degraded (DEG), never a full outage, while still raising a diagnostic.
+    assert result.observations[0].status == Status.DEG
     assert result.diagnostics[0].code == "SERV"
     assert result.probe_latency_ms == 5.0
+
+
+def test_execute_check_service_error_code_is_degraded_but_unreachable_is_outage():
+    definition = make_definition("android-devices", CheckType.SERVICE)
+
+    # The service host answered with an error code -> reachable but degraded.
+    degraded = execute_check(
+        definition,
+        observed_at_s=30.0,
+        ping_runner=None,
+        http_runner=lambda method, target, timeout_s: HttpResponseResult(
+            status_code=503, latency_ms=5.0, details="HTTP 503"
+        ),
+    )
+    assert degraded.observations[0].status == Status.DEG
+
+    # Never reached the service host (no response, not connected) -> full outage.
+    outage = execute_check(
+        definition,
+        observed_at_s=30.0,
+        ping_runner=None,
+        http_runner=lambda method, target, timeout_s: HttpResponseResult(
+            status_code=None, reachable=False, details="refused"
+        ),
+    )
+    assert outage.observations[0].status == Status.FAIL
 
 
 def test_execute_check_reports_ping_and_http_executor_failures_via_diagnostics():

@@ -610,7 +610,10 @@ def portable_ping_runner(target: str, timeout_s: int, trace=None) -> PingProbeRe
             )
 
         started_at, uses_ticks_ms = _start_timer()
-        per_packet_timeout_ms = max(1000, timeout_s * 500)
+        # Cap the per-packet wait so 3 packets stay well under the ~8.4s RP2040
+        # watchdog even in this unfed fallback (only reached on MicroPython when
+        # raw ICMP is unavailable): 3 x 2000ms = 6s < 8388ms.
+        per_packet_timeout_ms = max(1000, min(timeout_s * 500, 2000))
         response = uping.ping(target, count=3, timeout=per_packet_timeout_ms, quiet=True)
         packets_received = int(response[1]) if len(response) > 1 else 0
         latency_ms = float(response[-1]) if response else None
