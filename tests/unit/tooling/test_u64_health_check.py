@@ -20,6 +20,7 @@ wifi:
   host_aliases:
     c64: 192.0.2.10
     u64: 192.0.2.20
+    u2: 192.0.2.30
 checks_config: checks.yaml
 """.strip(),
         encoding="utf-8",
@@ -64,6 +65,26 @@ checks:
   - name: U64 TELNET
     type: telnet
     target: u64:23
+    username: ${VIVIPI_NETWORK_USERNAME}
+    password: ${VIVIPI_NETWORK_PASSWORD}
+    interval_s: 10
+    timeout_s: 8
+  - name: U2 REST
+    type: rest
+    target: http://u2/v1/version
+    password: ${VIVIPI_NETWORK_PASSWORD}
+    interval_s: 10
+    timeout_s: 8
+  - name: U2 FTP
+    type: ftp
+    target: u2
+    username: ${VIVIPI_NETWORK_USERNAME}
+    password: ${VIVIPI_NETWORK_PASSWORD}
+    interval_s: 10
+    timeout_s: 8
+  - name: U2 TELNET
+    type: telnet
+    target: u2:23
     username: ${VIVIPI_NETWORK_USERNAME}
     password: ${VIVIPI_NETWORK_PASSWORD}
     interval_s: 10
@@ -159,6 +180,39 @@ def test_load_target_definitions_caps_each_probe_timeout_to_two_seconds(tmp_path
         "U64 TELNET",
     ]
     assert definitions[3].password == "secret"
+
+
+def test_load_target_definitions_resolves_u2_target_and_alias(tmp_path):
+    module = load_module()
+    build_config, _checks_config = make_configs(tmp_path)
+
+    definitions = module.load_target_definitions(
+        "u2",
+        build_config_path=build_config,
+        env={"VIVIPI_NETWORK_USERNAME": "user", "VIVIPI_NETWORK_PASSWORD": "secret"},
+    )
+
+    assert [definition.name for definition in definitions] == [
+        "U2 PING",
+        "U2 REST",
+        "U2 IDENT",
+        "U2 DMA",
+        "U2 FTP",
+        "U2 TELNET",
+    ]
+    assert [definition.target for definition in definitions] == [
+        "192.0.2.30",
+        "http://192.0.2.30/v1/version",
+        "192.0.2.30",
+        "192.0.2.30",
+        "192.0.2.30",
+        "192.0.2.30:23",
+    ]
+
+
+def test_parse_args_accepts_u2_target():
+    module = load_module()
+    assert module.parse_args(["u2"]).target == "u2"
 
 
 def test_main_returns_error_when_required_target_checks_are_missing(tmp_path, capsys):

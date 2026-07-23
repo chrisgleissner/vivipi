@@ -300,7 +300,7 @@ Examples of merged Ultimate 64 firmware pull request which leveraged these CLI t
 
 For real-device checks outside the Pico UI, start with:
 
-- `./scripts/c64_health_check` for one concise pass across both configured targets
+- `./scripts/c64_health_check` for one concise pass across all configured targets (`c64u`, `u64`, `u2`)
 - `./scripts/vivipulse_stress_test.sh` for an artifacted soak run
 - `./scripts/u64/u64_connection_test.py --profile soak|stress -H u64|c64u` for direct protocol exercise
 

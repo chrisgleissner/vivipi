@@ -27,6 +27,7 @@ from vivipi.runtime.checks import build_executor, build_runtime_definitions  # n
 TARGET_LABELS = {
     "c64u": "C64U",
     "u64": "U64",
+    "u2": "U2",
 }
 PROBE_ORDER = {
     CheckType.PING: 0,
@@ -262,7 +263,7 @@ def run_target(
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run concise ViviPi-compatible health checks for C64U or U64"
+        description="Run concise ViviPi-compatible health checks for C64U, U64, or U2"
     )
     parser.add_argument("target", choices=tuple(TARGET_LABELS))
     parser.add_argument("--build-config", type=Path, default=None)

@@ -26,7 +26,7 @@ def _python_script_calls(calls: list[dict]) -> list[dict]:
     return [call for call in calls if call["argv"] and not call["argv"][0].startswith("-")]
 
 
-def test_c64_health_check_wrapper_invokes_python_script_for_c64u_then_u64(tmp_path: Path):
+def test_c64_health_check_wrapper_invokes_python_script_for_c64u_u64_then_u2(tmp_path: Path):
     fake_python = tmp_path / "fake-python"
     output_path = tmp_path / "calls.jsonl"
     _write_fake_python(fake_python, output_path)
@@ -54,10 +54,12 @@ def test_c64_health_check_wrapper_invokes_python_script_for_c64u_then_u64(tmp_pa
     assert [Path(call["argv"][0]).name for call in script_calls] == [
         "u64_health_check.py",
         "u64_health_check.py",
+        "u64_health_check.py",
     ]
     assert [call["argv"][1:] for call in script_calls] == [
         ["c64u", "--build-config", str(tmp_path / "build-deploy.yaml")],
         ["u64", "--build-config", str(tmp_path / "build-deploy.yaml")],
+        ["u2", "--build-config", str(tmp_path / "build-deploy.yaml")],
     ]
     assert str(script_path.parent.parent / "src") in script_calls[0]["pythonpath"]
 

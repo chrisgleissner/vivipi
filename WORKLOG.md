@@ -1771,3 +1771,29 @@
   from ~36-46 FPS to ~7.5 FPS on its default mode — below its 20-30 FPS target.
   The bottleneck is the HTTP front door (no keep-alive, POST disk round-trip),
   not the shared `C64_DMA_RAW_WRITE` memcpy.
+
+## 2026-07-23T06:46:29Z
+
+- Extended the `h`-alias quick health check (`scripts/c64_health_check`) so it now
+  probes the `u2` device in addition to `c64u` and `u64`, matching the `u2` soak
+  target added on this branch.
+- What changed:
+  - added `"u2": "U2"` to `TARGET_LABELS` in `scripts/u64/u64_health_check.py`, so
+    `u2` is a valid `target` choice and reuses the same host/build-config resolution
+    (`u2` alias in `config/build-deploy.local.yaml`, `U2 REST/FTP/TELNET` in
+    `config/checks.local.yaml`) as `c64u`/`u64`
+  - added a third `u64_health_check.py u2` invocation to the `c64_health_check`
+    wrapper, preserving the existing first-failure exit-status accumulation
+  - refreshed `docs/c64u-u64-cli.md` and `README.md` (wrapper now runs three
+    targets; mermaid + prose updated)
+- Why it changed:
+  - the branch already registered `u2` as a soak/telnet-keepalive target and added
+    its checks config, but the `h` alias still only covered `c64u` and `u64`, so the
+    fast "what is the state right now?" pass silently skipped `u2`
+- Validation:
+  - updated `tests/unit/tooling/test_c64_health_check_entrypoint.py` to assert the
+    wrapper invokes `c64u`, `u64`, then `u2`; added `u2` alias + `U2` checks to
+    `tests/unit/tooling/test_u64_health_check.py` with focused resolution and
+    arg-parse coverage
+  - `./build lint` -> All checks passed
+  - `./build test` -> `999 passed`
