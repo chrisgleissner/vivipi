@@ -3664,6 +3664,82 @@ def test_portable_http_runner_stdlib_connected_request_failure_is_reachable(monk
     assert outage.reachable is False
 
 
+def test_portable_http_runner_stdlib_body_read_failure_preserves_status(monkeypatch):
+    # Status line received but the body read fails: keep the status (reachable),
+    # so a responding endpoint is never downgraded to an outage.
+    monkeypatch.setattr(runtime_checks, "_is_micropython_runtime", lambda: False)
+    import http.client
+
+    class Resp:
+        status = 200
+
+        def read(self):
+            raise OSError("timed out")
+
+    class Conn:
+        def __init__(self, host, port, timeout=None):
+            self.sock = object()
+
+        def request(self, *args, **kwargs):
+            pass
+
+        def getresponse(self):
+            return Resp()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(http.client, "HTTPConnection", Conn)
+    result = portable_http_runner("GET", "http://host.example.local/health", 10)
+    assert result.status_code == 200
+    assert result.reachable is True
+
+
+def test_portable_http_runner_socket_connected_failure_is_reachable(monkeypatch):
+    # Pico socket HTTP path: connected (handle opened) but the exchange fails ->
+    # reachable=True (execution maps to DEG); connect failure -> reachable=False.
+    handle = FakeSocket([])
+    monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: handle)
+    monkeypatch.setattr(
+        runtime_checks,
+        "_socket_sendall",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("connection reset")),
+    )
+    reachable = runtime_checks._portable_http_runner_socket(
+        "GET", "http://host.example.local/health", 10, trace=lambda event, **fields: None
+    )
+    assert reachable.status_code is None
+    assert reachable.reachable is True
+
+    monkeypatch.setattr(
+        "vivipi.runtime.checks._open_socket",
+        lambda host, port, timeout_s: (_ for _ in ()).throw(OSError("refused")),
+    )
+    outage = runtime_checks._portable_http_runner_socket(
+        "GET", "http://host.example.local/health", 10, trace=lambda event, **fields: None
+    )
+    assert outage.status_code is None
+    assert outage.reachable is False
+
+
+def test_portable_ping_runner_falls_back_to_uping_when_raw_icmp_unavailable(monkeypatch):
+    # On MicroPython, if raw ICMP is unavailable (socket creation fails -> None),
+    # fall through to the capped uping path (per-packet wait bounded to 2000ms).
+    monkeypatch.setattr(runtime_checks, "_is_micropython_runtime", lambda: True)
+    monkeypatch.setattr(runtime_checks, "_raw_icmp_ping", lambda target, timeout_s: None)
+    ping_calls = []
+
+    def fake_ping(target, count=1, timeout=5000, quiet=True):
+        ping_calls.append((count, timeout))
+        return (3, 1, 5.0, 5.0)
+
+    monkeypatch.setitem(sys.modules, "uping", SimpleNamespace(ping=fake_ping))
+    result = portable_ping_runner("192.168.1.1", 10)
+    assert result.ok is True
+    assert len(ping_calls) == 1
+    assert ping_calls[0][1] == 2000
+
+
 def test_read_telnet_until_idle_counts_visible_bytes_across_chunks_without_buffering_full_transcript():
     # Two sub-threshold chunks that together cross the confirmation threshold:
     # proves visible bytes are accumulated incrementally across reads (via
