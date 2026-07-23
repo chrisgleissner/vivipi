@@ -182,7 +182,7 @@ def test_load_target_definitions_caps_each_probe_timeout_to_two_seconds(tmp_path
     assert definitions[3].password == "secret"
 
 
-def test_load_target_definitions_resolves_u2_target_and_alias(tmp_path):
+def test_load_target_definitions_resolves_u2_target_and_omits_dma_probe(tmp_path):
     module = load_module()
     build_config, _checks_config = make_configs(tmp_path)
 
@@ -192,11 +192,13 @@ def test_load_target_definitions_resolves_u2_target_and_alias(tmp_path):
         env={"VIVIPI_NETWORK_USERNAME": "user", "VIVIPI_NETWORK_PASSWORD": "secret"},
     )
 
+    # The u2 (Ultimate-II+) firmware has no SOCKET_CMD_DEBUG_REG handler (it is
+    # #ifdef U64), so the DMA probe would hang; it must be omitted for u2.
+    assert CheckType.DMA not in {definition.check_type for definition in definitions}
     assert [definition.name for definition in definitions] == [
         "U2 PING",
         "U2 REST",
         "U2 IDENT",
-        "U2 DMA",
         "U2 FTP",
         "U2 TELNET",
     ]
@@ -205,9 +207,25 @@ def test_load_target_definitions_resolves_u2_target_and_alias(tmp_path):
         "http://192.0.2.30/v1/version",
         "192.0.2.30",
         "192.0.2.30",
-        "192.0.2.30",
         "192.0.2.30:23",
     ]
+
+
+def test_load_target_definitions_includes_dma_probe_only_for_u64_family(tmp_path):
+    module = load_module()
+    build_config, _checks_config = make_configs(tmp_path)
+
+    def dma_present(target: str) -> bool:
+        definitions = module.load_target_definitions(
+            target,
+            build_config_path=build_config,
+            env={"VIVIPI_NETWORK_USERNAME": "user", "VIVIPI_NETWORK_PASSWORD": "secret"},
+        )
+        return CheckType.DMA in {definition.check_type for definition in definitions}
+
+    assert dma_present("c64u") is True
+    assert dma_present("u64") is True
+    assert dma_present("u2") is False
 
 
 def test_parse_args_accepts_u2_target():

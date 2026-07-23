@@ -40,6 +40,14 @@ PROBE_ORDER = {
 REQUIRED_CHECK_TYPES = (CheckType.HTTP, CheckType.FTP, CheckType.TELNET)
 HEALTH_CHECK_TIMEOUT_CAP_S = 2
 
+# The synthesized DMA probe reads the U64 debug register
+# (SOCKET_CMD_DEBUG_REG = 0xFF76), which the 1541Ultimate firmware only compiles
+# for U64/U64ii targets (`#ifdef U64` in software/network/socket_dma.cc). The
+# Ultimate-II+ (u2) firmware serves IDENTIFY/READFLASH on the same TCP/64 socket
+# but has no DEBUG_REG case, so it never replies and the probe would hang until
+# timeout. Restrict the DMA probe to the U64-family targets that support it.
+DMA_PROBE_TARGETS = frozenset({"c64u", "u64"})
+
 
 def preferred_build_config_path(repo_root: Path = REPO_ROOT) -> Path:
     local_path = repo_root / "config" / "build-deploy.local.yaml"
@@ -188,17 +196,24 @@ def load_target_definitions(
             reference.timeout_s,
             reference.interval_s,
         ),
-        _direct_listener_definition(
-            label,
-            host,
-            CheckType.DMA,
-            reference.timeout_s,
-            reference.interval_s,
-            password=reference.password,
-        ),
-        _health_check_definition(checks_by_type[CheckType.FTP]),
-        _health_check_definition(checks_by_type[CheckType.TELNET]),
     ]
+    if target_name in DMA_PROBE_TARGETS:
+        selected.append(
+            _direct_listener_definition(
+                label,
+                host,
+                CheckType.DMA,
+                reference.timeout_s,
+                reference.interval_s,
+                password=reference.password,
+            )
+        )
+    selected.extend(
+        [
+            _health_check_definition(checks_by_type[CheckType.FTP]),
+            _health_check_definition(checks_by_type[CheckType.TELNET]),
+        ]
+    )
     runtime_config = {
         "wifi": {"host_aliases": _host_aliases(settings)},
         "checks": [_runtime_item(definition) for definition in selected],

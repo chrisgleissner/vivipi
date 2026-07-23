@@ -1797,3 +1797,31 @@
     arg-parse coverage
   - `./build lint` -> All checks passed
   - `./build test` -> `999 passed`
+
+## 2026-07-23T06:59:54Z
+
+- Fixed the `u2` health check: the synthesized `DMA` probe failed against the
+  real `u2` device, so it is now skipped for `u2` (kept for `c64u`/`u64`).
+- Firmware investigation (`/home/chris/dev/c64/1541ultimate`):
+  - the health-check DMA probe (`portable_dma_runner`) issues `IDENTIFY` (0xFF0E),
+    `DEBUG_REG` (0xFF76) and `READFLASH` (0xFF75) over TCP/64
+  - in `software/network/socket_dma.cc`, `SOCKET_CMD_DEBUG_REG` sits inside the
+    `#ifdef U64 ... #endif` block (lines 287-295), while `IDENTIFY`/`READFLASH`
+    and the UDP `json` discovery responder (IDENT) are unconditional
+  - the `U64` macro is only defined for `target/u64/*` (`-DU64=1`) and
+    `target/u64ii/*` (`-DU64=2`); the `u2`/`u2plus` targets build with `-DU2`/
+    `-DU2P=1` and no `-DU64`, though they still compile `socket_dma.cc`
+  - net: the `u2` firmware serves IDENTIFY/READFLASH on TCP/64 but has no
+    DEBUG_REG case, so it never replies and the probe hangs until timeout ->
+    `DMA FAIL`. IDENT (UDP/64 json discovery) is unaffected and stays enabled.
+- What changed:
+  - added `DMA_PROBE_TARGETS = frozenset({"c64u", "u64"})` to
+    `scripts/u64/u64_health_check.py` and made `load_target_definitions` append
+    the DMA probe only for those U64-family targets
+  - documented the U64-family restriction in `docs/c64u-u64-cli.md`
+- Validation:
+  - `tests/unit/tooling/test_u64_health_check.py`: u2 resolution test now asserts
+    the DMA probe is omitted (PING/REST/IDENT/FTP/TELNET only); added a probe-gating
+    test proving DMA is present for `c64u`/`u64` and absent for `u2`
+  - `./build lint` -> All checks passed
+  - `./build test` -> `1000 passed`

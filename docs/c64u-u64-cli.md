@@ -35,6 +35,8 @@ flowchart TD
 
 Use `./scripts/c64_health_check` for the fastest "what is the state right now?" check. It runs the concise ViviPi-compatible probe set for all configured targets (`c64u`, `u64`, and `u2`) and prints one line per probe, such as `PING`, `REST`, `IDENT`, `DMA`, `FTP`, and `TELNET`.
 
+The `DMA` probe reads the U64 debug register (`SOCKET_CMD_DEBUG_REG = 0xFF76`), which the 1541Ultimate firmware only builds for the U64 family (`#ifdef U64`). The Ultimate-II+ (`u2`) firmware does not answer that command, so the DMA probe is skipped for `u2` and only runs for `c64u` and `u64`.
+
 ```bash
 ./scripts/c64_health_check
 ./scripts/u64_health_check.py u64
