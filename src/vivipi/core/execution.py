@@ -87,12 +87,15 @@ _HTTP_REACHABLE_AUTH_STATUS_CODES = frozenset({401, 403})
 
 def _status_for_http(status_code: int | None) -> Status:
     if status_code is None:
+        # No HTTP response at all -> the endpoint was unavailable (outage).
         return Status.FAIL
     if 200 <= status_code < 400:
         return Status.OK
     if status_code in _HTTP_REACHABLE_AUTH_STATUS_CODES:
         return Status.OK
-    return Status.FAIL
+    # The server answered but with an error code (e.g. 5xx / unexpected 4xx):
+    # it is reachable, just degraded -> DEG, never a full outage.
+    return Status.DEG
 
 
 def _status_for_probe_result(result) -> Status:

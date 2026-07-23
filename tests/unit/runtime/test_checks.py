@@ -290,9 +290,9 @@ def test_telnet_session_helpers_cover_negotiated_and_fallback_failure_paths():
         }
     )
 
-    assert negotiated_status == Status.FAIL
+    assert negotiated_status == Status.DEG
     assert negotiated_detail == "no telnet response"
-    assert fallback_status == Status.FAIL
+    assert fallback_status == Status.DEG
     assert fallback_detail == "refused"
     assert (
         runtime_checks._telnet_failure_detail(
@@ -1754,7 +1754,7 @@ def test_portable_telnet_runner_treats_micropython_etimedout_after_connect_as_de
     result = portable_telnet_runner("192.0.2.10:23", 8)
 
     assert result.ok is False
-    assert result.status == Status.FAIL
+    assert result.status == Status.DEG
     assert result.details == "no telnet response"
     assert handle.timeout_values == [runtime_checks.TELNET_IDLE_TIMEOUT_S] * 5
     assert handle.closed is True
@@ -1997,7 +1997,7 @@ def test_portable_telnet_runner_stdlib_and_raw_error_paths(monkeypatch):
 
     empty = portable_telnet_runner("telnet://switch.example.local", 10)
     assert empty.ok is False
-    assert empty.status == Status.FAIL
+    assert empty.status == Status.DEG
     assert empty.details == "no telnet response"
 
     class TimeoutSocket(FakeSocket):
@@ -2017,7 +2017,7 @@ def test_portable_telnet_runner_stdlib_and_raw_error_paths(monkeypatch):
         "telnet://switch.example.local", 10, trace=lambda event, **fields: None
     )
     assert timeout_result.ok is False
-    assert timeout_result.status == Status.FAIL
+    assert timeout_result.status == Status.DEG
     assert timeout_result.details == "no telnet response"
     assert timeout_handle.calls == 5
 
@@ -2031,7 +2031,7 @@ def test_portable_telnet_runner_stdlib_and_raw_error_paths(monkeypatch):
         "telnet://switch.example.local", 10, trace=lambda event, **fields: None
     )
     assert broken_result.ok is False
-    assert broken_result.status == Status.FAIL
+    assert broken_result.status == Status.DEG
     assert broken_result.details == "closed immediately"
 
 
@@ -2056,7 +2056,7 @@ def test_portable_telnet_runner_stdlib_rejects_immediate_post_connect_reset(monk
     result = portable_telnet_runner("telnet://switch.example.local", 10)
 
     assert result.ok is False
-    assert result.status == Status.FAIL
+    assert result.status == Status.DEG
     assert result.details == "closed immediately"
     assert handle.closed is True
 
@@ -3321,7 +3321,7 @@ def test_portable_telnet_runner_rejects_blank_sessions(monkeypatch):
     )
 
     assert result.ok is False
-    assert result.status == Status.FAIL
+    assert result.status == Status.DEG
     assert result.details == "closed immediately"
     assert handle.sent == []
 
@@ -3348,7 +3348,7 @@ def test_portable_telnet_runner_rejects_stable_idle_open_without_response(monkey
     )
 
     assert result.ok is False
-    assert result.status == Status.FAIL
+    assert result.status == Status.DEG
     assert result.details == "no telnet response"
     assert result.metadata["close_reason"] == "idle-timeout"
     assert result.metadata["handshake_detected"] is False
@@ -3518,7 +3518,7 @@ def test_portable_telnet_runner_rejects_escape_only_terminal_control(monkeypatch
     )
 
     assert result.ok is False
-    assert result.status == Status.FAIL
+    assert result.status == Status.DEG
     assert result.details == "closed immediately"
     assert result.metadata["response_received"] is False
 
@@ -3532,7 +3532,7 @@ def test_portable_telnet_runner_rejects_explicit_failure_text_and_reports_socket
     )
 
     assert failed_login.ok is False
-    assert failed_login.status == Status.FAIL
+    assert failed_login.status == Status.DEG
     assert failed_login.details == "telnet failure marker present"
 
     monkeypatch.setattr(

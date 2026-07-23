@@ -56,7 +56,9 @@ def test_execute_check_maps_http_status_codes_to_observations():
         ),
     )
 
-    assert result.observations[0].status == Status.FAIL
+    # 503: the server answered, so it is reachable but degraded (DEG / '!'),
+    # never a full outage ('X').
+    assert result.observations[0].status == Status.DEG
     assert result.observations[0].latency_ms == 45.0
     assert result.probe_latency_ms == 45.0
 
@@ -86,8 +88,10 @@ def test_status_for_http_distinguishes_auth_failures_from_other_errors():
     assert execution_module._status_for_http(200) == Status.OK
     assert execution_module._status_for_http(401) == Status.OK
     assert execution_module._status_for_http(403) == Status.OK
-    assert execution_module._status_for_http(404) == Status.FAIL
-    assert execution_module._status_for_http(500) == Status.FAIL
+    # Responded with an error code -> reachable but degraded (DEG), not an outage.
+    assert execution_module._status_for_http(404) == Status.DEG
+    assert execution_module._status_for_http(500) == Status.DEG
+    # No response at all -> unavailable (FAIL / outage).
     assert execution_module._status_for_http(None) == Status.FAIL
 
 

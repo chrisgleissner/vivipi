@@ -711,8 +711,11 @@ def portable_ident_runner(target: str, timeout_s: int, trace=None) -> PingProbeR
         except (OSError, TimeoutError) as error:
             last_error = error
         except Exception as error:
+            # A reply arrived but was invalid (bad JSON / echo mismatch / missing
+            # field): the device is reachable, just answering wrongly -> DEG.
             return PingProbeResult(
                 ok=False,
+                status=Status.DEG,
                 latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
                 details=_probe_error_detail(error),
             )
@@ -930,8 +933,11 @@ def portable_dma_runner(
             details=f"{identify_detail} {debug_detail} flash_page_size={page_size} flash_pages={page_count}",
         )
     except Exception as error:
+        # Connected (handle opened) but the DMA exchange failed -> reachable but
+        # degraded (DEG). Never connected -> unavailable (FAIL).
         return PingProbeResult(
             ok=False,
+            status=Status.DEG if handle is not None else Status.FAIL,
             latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
             details=_probe_error_detail(error),
         )
@@ -1475,8 +1481,10 @@ def portable_ftp_runner(
         else:
             ftp = ftplib.FTP()
             started_at, uses_ticks_ms = _start_timer()
+            reached = False
             try:
                 greeting = ftp.connect(host, port, timeout=timeout_s)
+                reached = True
                 if not greeting.startswith("220"):
                     raise RuntimeError(f"expected FTP 220, got {greeting}")
                 try:
@@ -1503,8 +1511,11 @@ def portable_ftp_runner(
                     details=f"pwd={working_directory}",
                 )
             except Exception as error:
+                # Connected to the FTP control port but the exchange failed ->
+                # reachable but degraded (DEG). Never connected -> unavailable.
                 return PingProbeResult(
                     ok=False,
+                    status=Status.DEG if reached else Status.FAIL,
                     latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
                     details=_probe_error_detail(error),
                 )
@@ -1619,8 +1630,11 @@ def portable_ftp_runner(
             details=f"pwd={working_directory}",
         )
     except Exception as error:
+        # Connected to the FTP control port but the exchange failed -> reachable
+        # but degraded (DEG). Never connected -> unavailable (FAIL).
         return PingProbeResult(
             ok=False,
+            status=Status.DEG if control_socket is not None else Status.FAIL,
             latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
             details=_probe_error_detail(error),
         )
@@ -1935,20 +1949,23 @@ def _classify_telnet_session(session: dict[str, object]) -> tuple[Status, str]:
         and session_duration_ms < TELNET_EARLY_CLOSE_THRESHOLD_MS
     )
 
+    # This classifier only runs on a session that actually connected, so every
+    # non-OK outcome is "reachable but degraded" (DEG), never a full outage (X).
+    # A connect failure is handled by the runner's except path instead.
     if bool(session["failure_detected"]):
-        return Status.FAIL, "telnet failure marker present"
+        return Status.DEG, "telnet failure marker present"
     if has_visible_text:
         return Status.OK, "response-received"
     if early_close:
-        return Status.FAIL, "closed immediately"
+        return Status.DEG, "closed immediately"
     if handshake_detected or close_reason in {
         "idle-timeout",
         "stable-open",
         "remote-close",
         "reset",
     }:
-        return Status.FAIL, "no telnet response"
-    return Status.FAIL, _telnet_failure_detail(session)
+        return Status.DEG, "no telnet response"
+    return Status.DEG, _telnet_failure_detail(session)
 
 
 def _read_telnet_until_idle(
@@ -2122,9 +2139,11 @@ def portable_telnet_runner(
             )
             return _telnet_result_from_session(session, _elapsed_ms(started_at, uses_ticks_ms))
         except Exception as error:
+            # Connected but the telnet session failed -> reachable but degraded
+            # (DEG). Never connected -> unavailable (FAIL).
             return PingProbeResult(
                 ok=False,
-                status=Status.FAIL,
+                status=Status.DEG if handle is not None else Status.FAIL,
                 latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
                 details=_probe_error_detail(error),
                 metadata=_telnet_result_metadata(_classify_network_error(error), 0.0, False, False),

@@ -50,7 +50,7 @@ check_state:
   failures_to_degraded: 1
   failures_to_failed: 2
   successes_to_recover: 1
-  visible_degraded: false
+  visible_degraded: true
 
 probe_schedule:
   allow_concurrent_hosts: false
