@@ -228,7 +228,7 @@ This is different from the detail view. Each check has exactly one detail page. 
 To fit every probe on a single non-scrolling screen, set `mode: matrix` on the display in `config/build-deploy.local.yaml` (the supported modes are `standard` (default), `compact`, and `matrix`). The matrix draws one row per device and one column per probe class — `P` ping, `R` REST/HTTP, `F` FTP, `T` telnet, `I` ident, `D` DMA — with a single glyph per cell: `.` OK, `!` degraded, `X` failed (reverse video), `?` unknown, and blank when that probe is not configured for the device.
 
 <p align="center">
-  <img src="./docs/img/vivipi_tested_pico_oled_fail_matrix.jpg" alt="Waveshare Pico OLED 1.3 in matrix mode: a compact glyph grid with one row per device (C64U, U2, U64, PIXEL4) and one column per probe class (P R F T I D). Every cell shows a dot for OK except one probe failing, marked by an inverse X." width="360">
+  <img src="./docs/img/vivipi_tested_pico_oled_fail_matrix.jpg" alt="Waveshare Pico OLED 1.3 in matrix mode: a compact glyph grid with one row per device (C64U, U2, U64, PIXEL4) and one column per probe class (P R F T I D). Every cell shows a dot for OK except one probe failing, marked by an inverse X." width="720">
   <br>
   <em>Matrix view: all probes on one page, everything OK except a single failure (inverse X)</em>
 </p>
