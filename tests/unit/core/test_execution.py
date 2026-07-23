@@ -95,6 +95,32 @@ def test_status_for_http_distinguishes_auth_failures_from_other_errors():
     assert execution_module._status_for_http(None) == Status.FAIL
 
 
+def test_execute_check_maps_connected_http_without_response_to_degraded():
+    # Connected to the server but no parseable HTTP response (reachable=True):
+    # reachable but degraded, never a full outage.
+    definition = make_definition("c64u-rest", CheckType.HTTP)
+    degraded = execute_check(
+        definition,
+        observed_at_s=10.0,
+        ping_runner=None,
+        http_runner=lambda method, target, timeout_s: HttpResponseResult(
+            status_code=None, reachable=True, details="timeout"
+        ),
+    )
+    assert degraded.observations[0].status == Status.DEG
+
+    # Never connected (reachable=False) -> unavailable (FAIL / outage).
+    outage = execute_check(
+        definition,
+        observed_at_s=10.0,
+        ping_runner=None,
+        http_runner=lambda method, target, timeout_s: HttpResponseResult(
+            status_code=None, reachable=False, details="refused"
+        ),
+    )
+    assert outage.observations[0].status == Status.FAIL
+
+
 def test_probe_helpers_normalize_enum_like_status_and_ignore_non_mapping_metadata():
     enum_like_status = SimpleNamespace(value="DEG")
     result = SimpleNamespace(ok=False, status=enum_like_status, metadata="not-a-dict")

@@ -652,7 +652,9 @@ def _parse_socket_target_with_schemes(
     return raw_target, default_port
 
 
-IDENT_MAX_ATTEMPTS = 2
+# Single attempt only: retries are deferred to the next scheduled interval
+# (VIVIPI-NET-001), and resending would hide genuine device flakiness.
+IDENT_MAX_ATTEMPTS = 1
 
 
 def portable_ident_runner(target: str, timeout_s: int, trace=None) -> PingProbeResult:
@@ -982,12 +984,21 @@ def portable_http_runner(
     try:
         connection.request(method, path, headers=headers)
         response = connection.getresponse()
-        body_bytes = response.read()
+        status_code = int(response.status)
+        # Once the server has answered with a status line it is reachable, so a
+        # subsequent body-read failure must not discard the status and downgrade
+        # a responding endpoint to an outage. Keep the code; _status_for_http
+        # maps a non-OK code to DEG, not FAIL.
+        try:
+            body_bytes = response.read()
+        except Exception:
+            body_bytes = b""
         return HttpResponseResult(
-            status_code=int(response.status),
+            status_code=status_code,
             body=_decode_http_body(body_bytes),
             latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
-            details=f"HTTP {response.status}",
+            details=f"HTTP {status_code}",
+            reachable=True,
         )
     except Exception as error:
         return HttpResponseResult(
@@ -1513,9 +1524,13 @@ def portable_ftp_runner(
             except Exception as error:
                 # Connected to the FTP control port but the exchange failed ->
                 # reachable but degraded (DEG). Never connected -> unavailable.
+                # ftplib.connect() opens the socket (sets ftp.sock) *before*
+                # reading the greeting, so a bad/partial greeting still counts as
+                # reached even though connect() raised before `reached = True`.
+                reachable = reached or getattr(ftp, "sock", None) is not None
                 return PingProbeResult(
                     ok=False,
-                    status=Status.DEG if reached else Status.FAIL,
+                    status=Status.DEG if reachable else Status.FAIL,
                     latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
                     details=_probe_error_detail(error),
                 )
@@ -2163,9 +2178,11 @@ def portable_telnet_runner(
         )
         return _telnet_result_from_session(session, _elapsed_ms(started_at, uses_ticks_ms))
     except Exception as error:
+        # Connected but the telnet session failed -> reachable but degraded
+        # (DEG). Never connected -> unavailable (FAIL).
         return PingProbeResult(
             ok=False,
-            status=Status.FAIL,
+            status=Status.DEG if handle is not None else Status.FAIL,
             latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
             details=_probe_error_detail(error),
             metadata=_telnet_result_metadata(_classify_network_error(error), 0.0, False, False),
@@ -2271,13 +2288,18 @@ def _portable_http_runner_socket(
             body=body,
             latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
             details=f"HTTP {status_code}",
+            reachable=True,
         )
     except Exception as error:
+        # Connected (handle opened) but the HTTP exchange failed -> reachable
+        # but degraded, so execution maps a missing status to DEG not FAIL.
+        # Never connected -> unavailable (reachable stays False -> FAIL).
         return HttpResponseResult(
             status_code=None,
             body=None,
             latency_ms=_elapsed_ms(started_at, uses_ticks_ms),
             details=_probe_error_detail(error),
+            reachable=handle is not None,
         )
     finally:
         _close_socket(handle, trace=trace, target=f"{host}:{port}")

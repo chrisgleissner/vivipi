@@ -3549,6 +3549,76 @@ def test_portable_telnet_runner_rejects_explicit_failure_text_and_reports_socket
     assert socket_failure.details == "refused"
 
 
+def test_portable_telnet_runner_connected_session_error_is_degraded_not_outage(monkeypatch):
+    # A telnet session that connects and then raises mid-read (reset / timeout /
+    # memory error) is reachable-but-degraded (DEG '!'), never a full outage.
+    handle = FakeSocket([])
+    monkeypatch.setattr("vivipi.runtime.checks._open_socket", lambda host, port, timeout_s: handle)
+    monkeypatch.setattr(
+        runtime_checks,
+        "_read_telnet_until_idle",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("session boom")),
+    )
+    result = portable_telnet_runner(
+        "telnet://switch.example.local", 10, trace=lambda event, **fields: None
+    )
+    assert result.ok is False
+    assert result.status == Status.DEG
+
+
+def test_portable_telnet_runner_connect_failure_is_outage(monkeypatch):
+    # Never connected -> unavailable (FAIL 'X').
+    monkeypatch.setattr(
+        "vivipi.runtime.checks._open_socket",
+        lambda host, port, timeout_s: (_ for _ in ()).throw(OSError("connection refused")),
+    )
+    result = portable_telnet_runner(
+        "telnet://switch.example.local", 10, trace=lambda event, **fields: None
+    )
+    assert result.ok is False
+    assert result.status == Status.FAIL
+
+
+def test_portable_ftp_runner_ftplib_bad_greeting_is_degraded(monkeypatch):
+    # ftplib.connect() opens the TCP socket (sets ftp.sock) before reading the
+    # greeting, so a bad/partial greeting on a connected server is reachable but
+    # degraded (DEG), while a refused connection stays a full outage (FAIL).
+    import ftplib
+
+    monkeypatch.setattr(runtime_checks, "_is_micropython_runtime", lambda: False)
+
+    class BadGreetingFTP:
+        def __init__(self):
+            self.sock = None
+
+        def connect(self, host, port, timeout=None):
+            self.sock = object()  # TCP connected before the greeting is read
+            raise RuntimeError("expected FTP 220, got noise")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(ftplib, "FTP", BadGreetingFTP)
+    degraded = portable_ftp_runner("ftp://host.example.local", 10)
+    assert degraded.ok is False
+    assert degraded.status == Status.DEG
+
+    class RefusedFTP:
+        def __init__(self):
+            self.sock = None
+
+        def connect(self, host, port, timeout=None):
+            raise OSError("connection refused")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(ftplib, "FTP", RefusedFTP)
+    outage = portable_ftp_runner("ftp://host.example.local", 10)
+    assert outage.ok is False
+    assert outage.status == Status.FAIL
+
+
 def test_read_telnet_until_idle_counts_visible_bytes_across_chunks_without_buffering_full_transcript():
     # Two sub-threshold chunks that together cross the confirmation threshold:
     # proves visible bytes are accumulated incrementally across reads (via

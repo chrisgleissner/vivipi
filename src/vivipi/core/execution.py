@@ -21,6 +21,10 @@ class HttpResponseResult:
     body: object | None = None
     latency_ms: float | None = None
     details: str = ""
+    # True once the TCP connection to the endpoint succeeded. Lets a connected
+    # server that never returned a parseable HTTP response classify as DEG
+    # (reachable but degraded) instead of a full outage.
+    reachable: bool = False
 
 
 @dataclass(frozen=True)
@@ -252,6 +256,10 @@ def execute_check(
             return _execution_error(definition, observed_at_s, "HTTP", "request failed")
 
         status = _status_for_http(result.status_code)
+        if result.status_code is None and getattr(result, "reachable", False):
+            # Connected but no parseable HTTP response: reachable but degraded,
+            # not a full outage.
+            status = Status.DEG
         details = result.details.strip() or (
             f"HTTP {result.status_code}" if result.status_code is not None else "request failed"
         )
