@@ -1825,3 +1825,36 @@
     test proving DMA is present for `c64u`/`u64` and absent for `u2`
   - `./build lint` -> All checks passed
   - `./build test` -> `1000 passed`
+
+## 2026-07-23T07:09:23Z
+
+- Addressed the PR #37 Kilo code-review findings on the telnet `vanish` reap lane.
+- `scripts/u64/u64_connection_test.py`:
+  - dropped `VANISH` from `PROBE_CORRECTNESS_ORDER` (the global degradation ladder)
+    and taught `_fallback_correctness` to return each protocol's safe default for
+    modes outside the ladder. `--mode vanish` no longer silently degrades ftp to
+    `INVALID` / http to `INCOMPLETE`; only telnet takes the reap lane.
+  - added `parse_session_slots` (int >= 1) and `parse_reap_timeout_s` (float > 0)
+    and wired them as the `--session-slots` / `--reap-timeout-s` arg types, matching
+    the existing `parse_runners` / `parse_duration_s` guards.
+  - `validate_execution_config` now rejects `vanish` unless `--runners 1
+    --schedule sequential`: the concurrent schedule spawns one thread per probe
+    (and stress lists telnet twice), so any concurrency races on the shared session
+    table and victim IP alias.
+- `scripts/u64/u64_telnet.py`:
+  - `_vanish_del_alias` now returns the `CompletedProcess`; step 4 checks the
+    return code, surfaces stderr, and only clears `alias_added` on success so the
+    `finally` retries cleanup on a failed delete (no more stale alias -> misleading
+    "sudo -n ip" failure on the next run).
+  - replaced `_vanish_probe_is_free` with tri-state `_vanish_probe_state`
+    (free/busy/unreachable) so a listener outage during saturation or recovery is
+    reported as a connectivity problem, not a false "could not saturate" / "still
+    wedged" reap verdict.
+  - `_vanish_measure_capacity` now closes the socket opened in an iteration before
+    breaking on `OSError`, fixing an fd leak on partial-read failures.
+- Tests: added coverage for the vanish global-mode fallback, the two new arg
+  validators, the vanish concurrency rejection, listener-unreachable-during-recovery,
+  and alias-delete-failure cleanup retry.
+- Validation:
+  - `./build lint` -> All checks passed
+  - `./build test` -> `1006 passed`

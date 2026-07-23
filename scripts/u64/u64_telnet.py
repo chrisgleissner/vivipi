@@ -1052,8 +1052,8 @@ def _vanish_add_alias(iface: str, victim_ip: str) -> None:
     _vanish_run_ip(["addr", "add", f"{victim_ip}/24", "dev", iface], check=True)
 
 
-def _vanish_del_alias(iface: str, victim_ip: str) -> None:
-    _vanish_run_ip(["addr", "del", f"{victim_ip}/24", "dev", iface], check=False)
+def _vanish_del_alias(iface: str, victim_ip: str) -> subprocess.CompletedProcess:
+    return _vanish_run_ip(["addr", "del", f"{victim_ip}/24", "dev", iface], check=False)
 
 
 def _vanish_connect(host: str, port: int, *, source_ip: str | None = None, timeout: float = 4.0) -> socket.socket:
@@ -1065,18 +1065,32 @@ def _vanish_connect(host: str, port: int, *, source_ip: str | None = None, timeo
     return sock
 
 
-def _vanish_probe_is_free(host: str, port: int) -> bool:
-    """True if a fresh connection from the primary IP gets a banner (not busy)."""
+# Tri-state reachability of the telnet listener from the primary IP.
+_VANISH_FREE = "free"  # accepted the connection and served a banner (a slot is free)
+_VANISH_BUSY = "busy"  # accepted the connection but reported the table full / wedged
+_VANISH_UNREACHABLE = "unreachable"  # could not connect at all (listener outage, not busy)
+
+
+def _vanish_probe_state(host: str, port: int) -> str:
+    """Classify a fresh connection from the primary IP as free/busy/unreachable.
+
+    Distinguishing "unreachable" from "busy" matters: a transient listener outage
+    must not be reported as a saturation or keepalive-reaping (wedged) verdict.
+    """
     try:
         sock = _vanish_connect(host, port)
+    except (ConnectionRefusedError, socket.timeout, TimeoutError, socket.gaierror):
+        return _VANISH_UNREACHABLE
     except OSError:
-        return False
+        return _VANISH_UNREACHABLE
     try:
         sock.settimeout(1.5)
         data = sock.recv(128)
-        return _VANISH_BUSY_MARKER not in data and len(data) > 0
+        if _VANISH_BUSY_MARKER in data or len(data) == 0:
+            return _VANISH_BUSY
+        return _VANISH_FREE
     except OSError:
-        return False
+        return _VANISH_UNREACHABLE
     finally:
         close_socket(sock)
 
@@ -1086,6 +1100,7 @@ def _vanish_measure_capacity(host: str, port: int, cap: int) -> int:
     conns: list[socket.socket] = []
     free = 0
     for _ in range(cap + 1):
+        sock = None
         try:
             sock = _vanish_connect(host, port)
             time.sleep(0.15)
@@ -1096,6 +1111,10 @@ def _vanish_measure_capacity(host: str, port: int, cap: int) -> int:
                 conns.append(sock)
                 free += 1
         except OSError:
+            # Release the socket opened this iteration before bailing out so a
+            # partial-read failure does not leak the fd.
+            if sock is not None:
+                close_socket(sock)
             break
     for sock in conns:
         close_socket(sock)
@@ -1154,25 +1173,37 @@ def run_vanish_probe(settings: RuntimeSettings) -> ProbeOutcome:
             victims.append(sock)
             time.sleep(0.2)
 
-        # 3. Confirm saturation: a fresh probe from the primary IP is refused.
+        # 3. Confirm saturation: a fresh probe from the primary IP is not served.
         time.sleep(1.0)
-        if _vanish_probe_is_free(host, port):
+        saturation_state = _vanish_probe_state(host, port)
+        if saturation_state == _VANISH_FREE:
             return outcome("FAIL", "could not saturate the session table (fresh probe still free)")
+        if saturation_state == _VANISH_UNREACHABLE:
+            return outcome("FAIL", "listener unreachable while confirming saturation (connectivity problem, not a reap test)")
 
         # 4. Make the victims vanish at the network level: delete the source IP.
-        _vanish_del_alias(iface, victim_ip)
+        #    If the delete fails the victims never vanish, so the reap test is
+        #    invalid; surface the error and let the finally block retry cleanup.
+        del_result = _vanish_del_alias(iface, victim_ip)
+        if del_result.returncode != 0:
+            stderr = (del_result.stderr or "").strip()
+            return outcome("FAIL", f"could not delete victim IP alias to trigger vanish: {stderr}")
         alias_added = False
 
         # 5. Poll for recovery. GREEN = the device reaped the dead sessions and
         #    freed capacity; RED = it stays wedged past the reap window.
         deadline = time.time() + reap_timeout
         start = time.time()
+        last_state = _VANISH_BUSY
         while time.time() < deadline:
-            if _vanish_probe_is_free(host, port):
+            last_state = _vanish_probe_state(host, port)
+            if last_state == _VANISH_FREE:
                 recovered = time.time() - start
                 return outcome("OK", f"reaped {slots} half-open slots in ~{recovered:.0f}s")
             time.sleep(3.0)
 
+        if last_state == _VANISH_UNREACHABLE:
+            return outcome("FAIL", f"listener unreachable during recovery; keepalive reaping inconclusive after {reap_timeout:.0f}s")
         return outcome("FAIL", f"still wedged {reap_timeout:.0f}s after peers vanished (half-open sessions not reaped)")
     finally:
         for sock in victims:
