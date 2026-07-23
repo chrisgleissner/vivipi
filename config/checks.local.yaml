@@ -66,3 +66,27 @@ checks:
     password: ${VIVIPI_NETWORK_PASSWORD}
     interval_s: 10
     timeout_s: 8
+
+  - name: U2 REST
+    type: http
+    target: http://u2/v1/version
+    method: GET
+    password: ${VIVIPI_NETWORK_PASSWORD}
+    interval_s: 10
+    timeout_s: 8
+
+  - name: U2 FTP
+    type: ftp
+    target: u2
+    username: ${VIVIPI_NETWORK_USERNAME}
+    password: ${VIVIPI_NETWORK_PASSWORD}
+    interval_s: 10
+    timeout_s: 8
+
+  - name: U2 TELNET
+    type: telnet
+    target: u2:23
+    username: ${VIVIPI_NETWORK_USERNAME}
+    password: ${VIVIPI_NETWORK_PASSWORD}
+    interval_s: 10
+    timeout_s: 8

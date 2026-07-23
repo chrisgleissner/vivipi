@@ -80,12 +80,13 @@ PROBE_CORRECTNESS_ORDER = (
     ProbeCorrectness.OPEN,
     ProbeCorrectness.INCOMPLETE,
     ProbeCorrectness.INVALID,
+    ProbeCorrectness.VANISH,
 )
 PROBE_CORRECTNESS_CHOICES = {
     "ping": (ProbeCorrectness.COMPLETE,),
     "ident": (ProbeCorrectness.COMPLETE,),
     "dma": (ProbeCorrectness.COMPLETE,),
-    "telnet": (ProbeCorrectness.COMPLETE, ProbeCorrectness.OPEN, ProbeCorrectness.INCOMPLETE),
+    "telnet": (ProbeCorrectness.COMPLETE, ProbeCorrectness.OPEN, ProbeCorrectness.INCOMPLETE, ProbeCorrectness.VANISH),
     "ftp": (ProbeCorrectness.COMPLETE, ProbeCorrectness.OPEN, ProbeCorrectness.INCOMPLETE, ProbeCorrectness.INVALID),
     "http": (ProbeCorrectness.COMPLETE, ProbeCorrectness.INCOMPLETE),
     "modem": (ProbeCorrectness.COMPLETE,),
@@ -412,6 +413,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--http-mode", choices=[value.value for value in ProbeCorrectness], default=None, help="HTTP probe correctness.")
     parser.add_argument("--ftp-mode", choices=[value.value for value in ProbeCorrectness], default=None, help="FTP probe correctness.")
     parser.add_argument("--telnet-mode", choices=[value.value for value in ProbeCorrectness], default=None, help="Telnet probe correctness.")
+    parser.add_argument("--iface", default=os.environ.get("C64_LAN_IFACE"),
+                        help="LAN interface to add the throwaway victim IP on for --telnet-mode vanish.")
+    parser.add_argument("--victim-ip", default=os.environ.get("C64_VICTIM_IP"),
+                        help="Unused LAN IP to source the vanishing half-open connections from (--telnet-mode vanish).")
+    parser.add_argument("--session-slots", type=int, default=4,
+                        help="Telnet session slots to fill for the half-open lane (= firmware TELNET_MAX_SESSIONS).")
+    parser.add_argument("--reap-timeout-s", type=float, default=75.0,
+                        help="Seconds to wait for keepalive reaping before the half-open lane declares RED.")
     parser.add_argument(
         "--stream",
         nargs="*",
@@ -442,6 +451,10 @@ def build_runtime_settings(args: argparse.Namespace) -> RuntimeSettings:
         verbose=args.verbose,
         network_password=shared_network_password,
         modem_port=args.modem_port,
+        lan_iface=args.iface or "",
+        victim_ip=args.victim_ip or "",
+        session_slots=args.session_slots,
+        reap_timeout_s=args.reap_timeout_s,
     )
 
 

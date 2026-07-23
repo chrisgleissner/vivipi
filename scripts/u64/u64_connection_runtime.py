@@ -14,6 +14,11 @@ class ProbeCorrectness(enum.StrEnum):
     OPEN = "open"
     INCOMPLETE = "incomplete"
     INVALID = "invalid"
+    # True half-open: fill the telnet session table from a throwaway secondary IP
+    # alias, then delete the alias so the peer vanishes at L2/L3 (no FIN/RST, no
+    # ACK to the device's keepalive probes) and assert the listener reaps the
+    # dead slots within the keepalive window. GREEN=reaped (OK), RED=wedged (FAIL).
+    VANISH = "vanish"
 
 
 class ProbeSurface(enum.StrEnum):
@@ -36,6 +41,14 @@ class RuntimeSettings:
     verbose: bool
     network_password: str = ""
     modem_port: int = 3000
+    # Half-open (VANISH) telnet lane: the LAN interface to add the throwaway
+    # victim IP alias on, an unused LAN IP to source the vanishing connections
+    # from, how many session slots to fill, and how long to wait for the device
+    # to reap them before declaring RED. Requires CAP_NET_ADMIN (sudo -n ip).
+    lan_iface: str = ""
+    victim_ip: str = ""
+    session_slots: int = 4
+    reap_timeout_s: float = 75.0
 
 
 @dataclass(frozen=True)

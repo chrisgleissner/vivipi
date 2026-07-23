@@ -716,3 +716,76 @@ def test_collect_telnet_visible_ignores_subnegotiation_and_keeps_literal_iac():
 
     assert visible == b"A\xffB"
     assert replies == [bytes([module.IAC, module.WONT, 1])]
+
+
+class _FakeVictimSocket:
+    def settimeout(self, *_):
+        return None
+
+    def recv(self, *_):
+        return b""
+
+    def close(self):
+        return None
+
+
+def _make_vanish_settings(runtime, **overrides):
+    base = dict(lan_iface="eth0", victim_ip="192.0.2.240", session_slots=2, reap_timeout_s=0.05)
+    base.update(overrides)
+    return runtime.RuntimeSettings("192.0.2.1", "v1/version", 80, 23, 21, "anonymous", "", 0, 1, True, **base)
+
+
+def test_telnet_vanish_is_a_valid_telnet_mode():
+    runtime = load_runtime()
+    connection_test = load_connection_test()
+    assert runtime.ProbeCorrectness.VANISH in connection_test.PROBE_CORRECTNESS_CHOICES["telnet"]
+    # A requested telnet vanish mode must be honoured, not silently degraded.
+    assert connection_test._fallback_correctness("telnet", runtime.ProbeCorrectness.VANISH) == runtime.ProbeCorrectness.VANISH
+
+
+def test_telnet_vanish_missing_iface_fails_fast():
+    runtime = load_runtime()
+    module = load_telnet()
+    settings = _make_vanish_settings(runtime, lan_iface="", victim_ip="")
+    outcome = module.run_probe(settings, runtime.ProbeCorrectness.VANISH)
+    assert outcome.result == "FAIL"
+    assert "missing lan_iface" in outcome.detail
+
+
+def test_telnet_vanish_green_reaps_reports_ok(monkeypatch):
+    runtime = load_runtime()
+    module = load_telnet()
+    settings = _make_vanish_settings(runtime, reap_timeout_s=5.0)
+    monkeypatch.setattr(module.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(module, "_vanish_measure_capacity", lambda host, port, cap: cap)
+    monkeypatch.setattr(module, "_vanish_add_alias", lambda iface, victim: None)
+    monkeypatch.setattr(module, "_vanish_del_alias", lambda iface, victim: None)
+    monkeypatch.setattr(module, "_vanish_connect", lambda *a, **k: _FakeVictimSocket())
+    calls = {"free": 0}
+
+    def fake_is_free(host, port):
+        calls["free"] += 1
+        # First call is the saturation check (must read as full); later calls are
+        # the recovery poll (the fix reaped the slots, so a fresh probe is free).
+        return calls["free"] > 1
+
+    monkeypatch.setattr(module, "_vanish_probe_is_free", fake_is_free)
+    outcome = module.run_probe(settings, runtime.ProbeCorrectness.VANISH)
+    assert outcome.result == "OK", outcome.detail
+    assert "reaped" in outcome.detail
+
+
+def test_telnet_vanish_red_stays_wedged_reports_fail(monkeypatch):
+    runtime = load_runtime()
+    module = load_telnet()
+    settings = _make_vanish_settings(runtime, reap_timeout_s=0.05)
+    monkeypatch.setattr(module.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(module, "_vanish_measure_capacity", lambda host, port, cap: cap)
+    monkeypatch.setattr(module, "_vanish_add_alias", lambda iface, victim: None)
+    monkeypatch.setattr(module, "_vanish_del_alias", lambda iface, victim: None)
+    monkeypatch.setattr(module, "_vanish_connect", lambda *a, **k: _FakeVictimSocket())
+    # Never recovers: saturation reads full and the recovery poll never frees up.
+    monkeypatch.setattr(module, "_vanish_probe_is_free", lambda host, port: False)
+    outcome = module.run_probe(settings, runtime.ProbeCorrectness.VANISH)
+    assert outcome.result == "FAIL"
+    assert "still wedged" in outcome.detail
