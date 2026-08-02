@@ -339,6 +339,8 @@ Rules:
 - No animation
 - FAIL has highest visual priority
 - The visible DEG phase MUST be configurable independently from the internal hysteresis state
+- In matrix overview mode, status cells display `.` for OK, lowercase `x` for DEG,
+  an inverted `X` for FAIL, and `?` for UNKNOWN.
 
 [VIVIPI-UX-STATUS-001]
 

@@ -306,7 +306,7 @@ def test_matrix_marks_failed_cells_with_glyph_and_span():
     )
 
 
-def test_matrix_uses_distinct_glyphs_for_degraded_and_unknown():
+def test_matrix_uses_lowercase_x_for_degraded_and_question_mark_for_unknown():
     checks = _full_matrix_checks()
     checks = [
         make_check(c.identifier, c.name, status=Status.DEG) if c.name == "U64 FTP" else c
@@ -320,7 +320,7 @@ def test_matrix_uses_distinct_glyphs_for_degraded_and_unknown():
 
     u64_row = next(row for row in frame.rows if row.startswith("U64"))
     c64u_row = next(row for row in frame.rows if row.startswith("C64U"))
-    assert u64_row[9] == "!"  # FTP column, degraded
+    assert u64_row[9] == "x"  # FTP column, degraded
     assert c64u_row[5] == "?"  # PING column, unknown
 
 
