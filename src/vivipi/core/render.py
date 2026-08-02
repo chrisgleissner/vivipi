@@ -28,7 +28,7 @@ _MATRIX_KEYWORD_TO_COLUMN = {
 }
 MATRIX_GLYPH_NONE = " "  # no such (target, probe) check is configured
 MATRIX_GLYPH_OK = "."
-MATRIX_GLYPH_DEG = "!"
+MATRIX_GLYPH_DEG = "x"
 MATRIX_GLYPH_FAIL = "X"
 MATRIX_GLYPH_UNKNOWN = "?"
 _MATRIX_COLUMN_CELL_WIDTH = 2  # one leading space + one status glyph per column
